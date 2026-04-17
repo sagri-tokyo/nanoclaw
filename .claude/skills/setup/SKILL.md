@@ -19,9 +19,16 @@ Then explain that setup runs many shell commands, and recommend pre-approving th
 2. **No thanks** — "I'll approve each command individually as it comes up."
 3. **Show me the list first** — "Show me exactly which commands will be pre-approved before I decide."
 
-If option 1: read `.claude/skills/setup/setup-permissions.json`, read `.claude/settings.json` (create with `{}` if missing), merge permissions into `permissions.allow`, write back. Do NOT use the `update-config` skill.
+If option 1:
 
-If option 3: display the list, then re-ask with just options 1 and 2.
+```bash
+./setup/scripts/preapprove.sh
+```
+
+- `STATUS: success` → continue.
+- `STATUS: needs_manual` → python3 isn't available; tell the user you'll fall back to per-command approval and continue.
+
+If option 3: read `.claude/skills/setup/setup-permissions.json`, display it, then re-ask with just options 1 and 2.
 
 Declined → continue; they'll approve each command individually.
 
@@ -32,20 +39,10 @@ Declined → continue; they'll approve each command individually.
 - Run steps automatically. Only pause when user action is required (channel auth, tokens, a sudo password, fork in the road).
 - Setup uses `bash setup.sh` for bootstrap, then `pnpm exec tsx setup/index.ts --step <name>` for other steps. Steps emit structured status blocks to stdout. Verbose logs go to `logs/setup.log`.
 - **Fix things yourself.** Don't punt to the user unless they genuinely must act.
-- **Long-running tasks** (bootstrap, container build, post-merge rebuild) — move them to the background where possible and continue with the next non-dependent step. Check results before any step that depends on them.
+- **Long-running tasks** (bootstrap, container build) — move them to the background where possible and continue with the next non-dependent step. Check results before any step that depends on them.
 - **AskUserQuestion** for multi-choice only. Free-text (tokens, phone numbers, paths) — ask plainly, wait.
 - **Timeouts:** 5m for install/build.
 - **Waiting on user:** give clear instructions, say "Let me know when done or if you need help", stop. Don't continue.
-
-## 0. Git upstream
-
-Ensure `upstream` points to `qwibitai/nanoclaw`:
-
-```bash
-./setup/scripts/ensure-upstream.sh
-```
-
-Parse the status block — `STATUS: added | already_set | mismatch`. Mismatch means someone retargeted `upstream`; surface before touching.
 
 ## 1. Bootstrap (Node.js + dependencies)
 
@@ -62,13 +59,16 @@ Run `bash setup.sh`. Parse the status block:
 - `NATIVE_OK: false` with build tools present → `rm -rf node_modules`, re-run once. Still failing → surface log tail.
 - `DEPS_OK: false` → `rm -rf node_modules`, re-run once. Still failing → surface log tail.
 
-## 2. Check environment
+## 2. Preflight (upstream + environment + timezone)
 
-`pnpm exec tsx setup/index.ts --step environment` — parse status block.
+`pnpm exec tsx setup/index.ts --step preflight` — one status block, three checks.
 
+- `UPSTREAM: mismatch` → someone retargeted `upstream`; surface before touching.
 - `HAS_AUTH=true` → WhatsApp already configured; note for step 5.
 - `HAS_REGISTERED_GROUPS=true` → existing config; offer skip or reconfigure.
 - Record `DOCKER` for step 3.
+- `NEEDS_TZ_INPUT: true` → autodetect failed (e.g. POSIX-style `IST-2`). `AskUserQuestion` with common options (America/New_York, Europe/London, Asia/Jerusalem, Asia/Tokyo) plus Other. Re-run with `-- --tz <answer>`.
+- `RESOLVED_TZ` is `UTC`/`Etc/UTC` → confirm: "Your system timezone is UTC — correct, or are you on a remote server?" If wrong, ask for the actual TZ and re-run with `--tz`.
 
 ### OpenClaw migration detection
 
@@ -78,15 +78,7 @@ If `OPENCLAW_PATH` is not `none`, `AskUserQuestion`:
 2. **Fresh start** — "Skip migration."
 3. **Migrate later** — "Continue now; run `/migrate-from-openclaw` any time."
 
-If "Migrate now": invoke `/migrate-from-openclaw`, return to step 2a.
-
-## 2a. Timezone
-
-`pnpm exec tsx setup/index.ts --step timezone` — parse status block.
-
-- `NEEDS_USER_INPUT=true` → autodetect failed (e.g. POSIX-style `IST-2`). `AskUserQuestion` with common options (America/New_York, Europe/London, Asia/Jerusalem, Asia/Tokyo) plus Other. Re-run with `-- --tz <answer>`.
-- `RESOLVED_TZ` is `UTC`/`Etc/UTC` → confirm: "Your system timezone is UTC — correct, or are you on a remote server?" If wrong, ask for the actual TZ and re-run with `--tz`.
-- `STATUS=success` → note `RESOLVED_TZ`.
+If "Migrate now": invoke `/migrate-from-openclaw`, then return to step 3.
 
 ## 3. Container runtime (Docker)
 
@@ -105,7 +97,7 @@ If "Migrate now": invoke `/migrate-from-openclaw`, return to step 2a.
 Agent containers skip CJK fonts by default (~200MB saved). Without them, Chromium renders tofu for Chinese/Japanese/Korean.
 
 - User writing to you in CJK → enable without asking; mention briefly.
-- CJK timezone from step 2a (`Asia/Tokyo`, `Asia/Shanghai`, `Asia/Hong_Kong`, `Asia/Taipei`, `Asia/Seoul`) → ask: "Enable CJK fonts? Adds ~200MB, lets the agent render CJK in screenshots and PDFs."
+- CJK timezone from step 2 (`Asia/Tokyo`, `Asia/Shanghai`, `Asia/Hong_Kong`, `Asia/Taipei`, `Asia/Seoul`) → ask: "Enable CJK fonts? Adds ~200MB, lets the agent render CJK in screenshots and PDFs."
 - Otherwise → skip.
 
 Enable: `./setup/scripts/upsert-env.sh INSTALL_CJK_FONTS true` (next build picks it up).
@@ -201,7 +193,7 @@ Show the full list in plain text (not `AskUserQuestion` — it caps at 4 options
 12. Resend (email)
 13. Matrix
 
-**Delegate to the selected channel's skill.** Each handles its own package installation, authentication, and configuration:
+**Delegate to the selected channel's skill.** Each handles its own package installation, authentication, configuration, and build:
 
 - **Discord:** `/add-discord`
 - **Slack:** `/add-slack`
@@ -217,37 +209,11 @@ Show the full list in plain text (not `AskUserQuestion` — it caps at 4 options
 - **Webex:** `/add-webex`
 - **iMessage:** `/add-imessage`
 
-The skill installs the adapter, wires it in, collects creds, builds.
+The channel skill's final step is `pnpm run build`, so `dist/` is ready by the time step 6 starts. If that step fails, `./setup/scripts/rebuild.sh` retries install + build.
 
-**After the channel skill completes**, rebuild to pick up any new packages from the merge. Long-running — run in the background while step 6 (mounts) proceeds:
+## 6. Start service
 
-```bash
-./setup/scripts/rebuild.sh
-```
-
-Check before step 7 (service start needs `dist/`):
-
-- `STATUS: success` → proceed.
-- `STATUS: failed` + `STAGE: install` → retry once.
-- `STATUS: failed` + `STAGE: build` → surface `file:line` from log, ask user.
-
-## 6. Mount allowlist
-
-Empty allowlist — agents only access their own workspace. Users can configure mounts later with `/manage-mounts`.
-
-```bash
-pnpm exec tsx setup/index.ts --step mounts -- --empty
-```
-
-## 7. Start service
-
-Unload if running:
-
-```bash
-./setup/scripts/restart-service.sh stop
-```
-
-Then run `pnpm exec tsx setup/index.ts --step service` and parse the status block.
+`pnpm exec tsx setup/index.ts --step service` — the step stops any previously loaded unit before loading the new one. Parse the status block.
 
 **If FALLBACK=wsl_no_systemd:** WSL without systemd. Either enable systemd (`echo -e "[boot]\nsystemd=true" | sudo tee /etc/wsl.conf` + restart WSL) or use the generated `start-nanoclaw.sh` wrapper.
 
@@ -273,7 +239,7 @@ Replace `USERNAME` with `whoami`. Run separately. After setfacl, re-run the serv
 - Linux: `systemctl --user status nanoclaw`.
 - Re-run after fixing.
 
-## 7a. Wire conversations to agents
+## 6a. Wire conversations to agents
 
 > **Tell the user:**
 >
@@ -298,7 +264,7 @@ Invoke `/manage-channels`. It:
 
 **Required.** Without it, channels are installed but messages are silently dropped (router has no agent group to route to).
 
-## 7b. Dashboard & web applications
+## 6b. Dashboard & web applications
 
 > **Tell the user:** "What your agent can do out of the box: talk on the app you just wired, browse the web (built-in Chromium), self-customize per conversation ('remember X for this chat'), install its own packages and MCP servers (with approval). Add more later with `/customize` — more messaging apps, `/add-resend` (email), `/add-karpathy-llm-wiki` (persistent knowledge base). Dashboard + Vercel is up next: dashboard for monitoring, Vercel lets the agent publish websites."
 
@@ -309,23 +275,23 @@ Invoke `/manage-channels`. It:
 
 Yes → invoke `/add-vercel`.
 
-## 8. Verify
+## 7. Verify
 
 `pnpm exec tsx setup/index.ts --step verify` — parse the status block.
 
 **If STATUS=failed, fix each:**
 
 - `SERVICE=stopped` → `pnpm run build && ./setup/scripts/restart-service.sh restart`
-- `SERVICE=not_found` → re-run step 7.
+- `SERVICE=not_found` → re-run step 6.
 - `CREDENTIALS=missing` → re-run step 4 (check `onecli secrets list`).
 - `CHANNEL_AUTH` shows `not_found` for any channel → re-invoke that channel's skill.
-- `REGISTERED_GROUPS=0` → re-invoke `/manage-channels` from step 7a.
+- `REGISTERED_GROUPS=0` → re-invoke `/manage-channels` from step 6a.
 
 Tell the user to test: send a message in their registered chat. Tail: `tail -f logs/nanoclaw.log`.
 
 ## Troubleshooting
 
-**Service not starting:** check `logs/nanoclaw.error.log`. Common causes: wrong Node path (re-run step 7), credential system not running (check `curl ${ONECLI_URL}/api/health`), missing channel credentials (re-invoke channel skill).
+**Service not starting:** check `logs/nanoclaw.error.log`. Common causes: wrong Node path (re-run step 6), credential system not running (check `curl ${ONECLI_URL}/api/health`), missing channel credentials (re-invoke channel skill).
 
 **Container agent fails ("Claude Code process exited with code 1"):** ensure Docker is running with `./setup/scripts/ensure-docker-running.sh`. Check container logs in `groups/main/logs/container-*.log`.
 
@@ -335,24 +301,24 @@ Tell the user to test: send a message in their registered chat. Tail: `tail -f l
 
 **Unload service:** `./setup/scripts/restart-service.sh stop`
 
-## 9. Diagnostics
+## 8. Diagnostics
 
 Read `.claude/skills/setup/diagnostics.md` and follow every step before completing setup.
 
-## 10. Fork setup
+## 9. Fork setup
 
 Only run this after the user has confirmed 2-way messaging works.
 
-Check `git remote -v`. If `origin` points to `qwibitai/nanoclaw` (not a fork), ask in plain text:
+Ask the user in plain text:
 
 > We recommend forking NanoClaw so you can push your customizations and pull updates easily. Would you like to set up a fork now?
 
 If yes: instruct the user to fork `qwibitai/nanoclaw` on GitHub (browser), ask for their GitHub username, then:
 
 ```bash
-git remote rename origin upstream
-git remote add origin https://github.com/<their-username>/nanoclaw.git
+git remote rename origin upstream 2>/dev/null || true
+git remote add origin https://github.com/<their-username>/nanoclaw.git 2>/dev/null || git remote set-url origin https://github.com/<their-username>/nanoclaw.git
 git push --force origin main
 ```
 
-If no: skip — upstream is already configured from step 0.
+If no: skip — upstream is already configured from step 2.

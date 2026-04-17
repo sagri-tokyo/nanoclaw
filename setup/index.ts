@@ -9,6 +9,7 @@ const STEPS: Record<
   string,
   () => Promise<{ run: (args: string[]) => Promise<void> }>
 > = {
+  preflight: () => import('./preflight.js'),
   timezone: () => import('./timezone.js'),
   environment: () => import('./environment.js'),
   container: () => import('./container.js'),
@@ -16,6 +17,7 @@ const STEPS: Record<
   mounts: () => import('./mounts.js'),
   service: () => import('./service.js'),
   verify: () => import('./verify.js'),
+  diagnostics: () => import('./diagnostics.js'),
 };
 
 async function main(): Promise<void> {

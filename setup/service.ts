@@ -115,6 +115,15 @@ function setupLaunchd(
   fs.writeFileSync(plistPath, plist);
   log.info('Wrote launchd plist', { plistPath });
 
+  // Unload any previously loaded copy so load picks up changes to the plist.
+  try {
+    execSync(`launchctl unload ${JSON.stringify(plistPath)}`, {
+      stdio: 'ignore',
+    });
+  } catch {
+    // Not loaded yet — fine.
+  }
+
   try {
     execSync(`launchctl load ${JSON.stringify(plistPath)}`, {
       stdio: 'ignore',
@@ -294,9 +303,9 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   }
 
   try {
-    execSync(`${systemctlPrefix} start nanoclaw`, { stdio: 'ignore' });
+    execSync(`${systemctlPrefix} restart nanoclaw`, { stdio: 'ignore' });
   } catch (err) {
-    log.error('systemctl start failed', { err });
+    log.error('systemctl restart failed', { err });
   }
 
   // Verify
