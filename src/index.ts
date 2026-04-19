@@ -65,6 +65,7 @@ import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { isStopIntent, handleAbort } from './abort.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -620,6 +621,20 @@ async function main(): Promise<void> {
           logger.error({ err, chatJid }, 'Remote control command error'),
         );
         return;
+      }
+
+      // Abort intent: kill the active container for this group before storing the message
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const group = registeredGroups[chatJid];
+        if (isStopIntent(msg.content, group)) {
+          const channel = findChannel(channels, chatJid);
+          if (channel) {
+            handleAbort(chatJid, queue, channel).catch((err) =>
+              logger.error({ err, chatJid }, 'Abort handler error'),
+            );
+          }
+          return;
+        }
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before storing
