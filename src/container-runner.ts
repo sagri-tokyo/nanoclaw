@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { getForwardedEnv } from './env-forward.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -278,6 +279,16 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Opt-in host env forwarding: only vars listed in DATA_DIR/env/forward-list
+  // are passed to the container. The /workspace/project/.env shadow is kept
+  // intact — this is an explicit, named-variable path only.
+  const forwardedEnv = getForwardedEnv();
+  for (const [name, value] of Object.entries(forwardedEnv).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    args.push('-e', `${name}=${value}`);
   }
 
   for (const mount of mounts) {

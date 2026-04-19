@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { loadEnvIntoProcess } from './env.js';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
@@ -545,6 +546,9 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  // Load .env into process.env so host env forwarding can resolve var values.
+  // Values already set in the environment (e.g. from the shell) take precedence.
+  loadEnvIntoProcess();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
