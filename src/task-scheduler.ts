@@ -62,6 +62,17 @@ export function computeNextRun(task: ScheduledTask): string | null {
   return null;
 }
 
+// Markers a scheduled-task agent can emit to signal "no output" without
+// triggering a chat post. Needed because LLMs are unreliable at producing
+// a truly empty final message — they tend to narrate compliance ("Per the
+// reply policy, replying with empty string") which then gets posted. Giving
+// the agent a concrete token to emit is a much more reliable instruction.
+const SILENT_RESULT_MARKERS = new Set(['', '__SILENT__', '__NOOP__']);
+
+export function isSilentResult(result: string): boolean {
+  return SILENT_RESULT_MARKERS.has(result.trim());
+}
+
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
@@ -187,8 +198,14 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          if (isSilentResult(streamedOutput.result)) {
+            logger.debug(
+              { taskId: task.id },
+              'Scheduled task produced silent-result marker; skipping chat post',
+            );
+          } else {
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {

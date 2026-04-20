@@ -4,6 +4,7 @@ import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  isSilentResult,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -125,5 +126,37 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+
+  describe('isSilentResult', () => {
+    it('treats empty string as silent', () => {
+      expect(isSilentResult('')).toBe(true);
+    });
+
+    it('treats whitespace-only output as silent', () => {
+      expect(isSilentResult('   \n\t ')).toBe(true);
+    });
+
+    it('treats __SILENT__ marker as silent', () => {
+      expect(isSilentResult('__SILENT__')).toBe(true);
+    });
+
+    it('treats __NOOP__ marker as silent', () => {
+      expect(isSilentResult('__NOOP__')).toBe(true);
+    });
+
+    it('trims surrounding whitespace before matching a marker', () => {
+      expect(isSilentResult('  __SILENT__\n')).toBe(true);
+    });
+
+    it('does not silence narration that mentions the marker', () => {
+      expect(isSilentResult('Per policy, I would output __SILENT__ here.')).toBe(
+        false,
+      );
+    });
+
+    it('does not silence a normal task summary', () => {
+      expect(isSilentResult('Triage — 2026-04-20 — Complete')).toBe(false);
+    });
   });
 });
