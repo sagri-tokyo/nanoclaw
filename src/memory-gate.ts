@@ -36,10 +36,13 @@ const ISO8601_RE =
 export function parseFrontmatter(
   content: string,
 ): Record<string, string> | null {
-  if (!content.startsWith('---\n') && !content.startsWith('---\r\n'))
-    return null;
+  const stripped = content.startsWith('\uFEFF') ? content.slice(1) : content;
 
-  const afterOpen = content.slice(content.indexOf('\n') + 1);
+  let afterOpen: string;
+  if (stripped.startsWith('---\n')) afterOpen = stripped.slice(4);
+  else if (stripped.startsWith('---\r\n')) afterOpen = stripped.slice(5);
+  else return null;
+
   const closeMatch = afterOpen.match(/^---\s*$/m);
   if (!closeMatch || closeMatch.index === undefined)
     throw new Error('unterminated frontmatter');
@@ -53,6 +56,8 @@ export function parseFrontmatter(
     if (colon < 0) throw new Error(`malformed frontmatter line: ${line}`);
     const key = line.slice(0, colon).trim();
     const value = line.slice(colon + 1).trim();
+    if (Object.prototype.hasOwnProperty.call(result, key))
+      throw new Error(`duplicate frontmatter key: ${key}`);
     result[key] = value;
   }
   return result;
@@ -87,6 +92,11 @@ export function validateProvenance(data: unknown): ProvenanceFields {
   if (typeof d.timestamp !== 'string' || !ISO8601_RE.test(d.timestamp))
     throw new Error(`provenance: timestamp "${d.timestamp}" is not iso 8601`);
 
+  if (Number.isNaN(Date.parse(d.timestamp)))
+    throw new Error(
+      `provenance: timestamp "${d.timestamp}" is invalid (unparseable)`,
+    );
+
   if (typeof d.author_model !== 'string' || d.author_model.length === 0)
     throw new Error('provenance: author_model is empty');
 
@@ -106,13 +116,19 @@ export interface DecideWriteInput {
 }
 
 function isInsideMemoryDir(filePath: string, memoryDir: string): boolean {
-  const normDir = memoryDir.replace(/\/+$/, '') + path.sep;
-  const normFile = path.normalize(filePath);
-  return normFile.startsWith(normDir);
+  const resolvedDir = path.resolve(memoryDir);
+  const resolvedFile = path.resolve(filePath);
+  if (resolvedFile === resolvedDir) return false;
+  return resolvedFile.startsWith(resolvedDir + path.sep);
 }
 
 export function decideWrite(input: DecideWriteInput): Decision {
   const { filePath, content, memoryDir } = input;
+
+  if (!path.isAbsolute(filePath))
+    throw new Error(`decideWrite: filePath must be absolute: ${filePath}`);
+  if (!path.isAbsolute(memoryDir))
+    throw new Error(`decideWrite: memoryDir must be absolute: ${memoryDir}`);
 
   if (!isInsideMemoryDir(filePath, memoryDir)) return { allow: true };
 
