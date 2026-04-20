@@ -94,35 +94,35 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
   }
 
   it('write to /home/node/.claude/settings.json fails with non-zero exit', () => {
+    // No `|| true` wrapper: the shell's exit code reflects the redirect
+    // failure, not a trailing echo, so the process-level assertion is the
+    // primary invariant. Host-file byte comparison is secondary evidence.
     const result = runInContainer(
-      'echo "POISONED" > /home/node/.claude/settings.json; echo "exit=$?"',
+      'echo "POISONED" > /home/node/.claude/settings.json',
     );
-    // Container-side redirect failure surfaces as non-zero exit; the exact
-    // error string differs across shells (busybox vs bash) so we check the
-    // observable contract: write denied + host file unchanged (asserted below).
-    expect(result.stdout).toMatch(/exit=[1-9]/);
+    expect(result.status).not.toBe(0);
     expect(fs.readFileSync(policySettingsFile, 'utf8')).toEqual(
       ORIGINAL_SETTINGS,
     );
   });
 
-  it('host-side policy settings.json is byte-identical after hostile write attempts', () => {
+  it('rm of /home/node/.claude/hooks/memory-gate-hook.js leaves host file intact', () => {
     runInContainer(
-      'echo "POISONED" > /home/node/.claude/settings.json 2>/dev/null || true; ' +
-        'cat /home/node/.claude/hooks/memory-gate-hook.js > /home/node/.claude/hooks/memory-gate-hook.js.bak 2>/dev/null || true; ' +
-        'rm -f /home/node/.claude/hooks/memory-gate-hook.js 2>/dev/null || true',
+      'rm -f /home/node/.claude/hooks/memory-gate-hook.js 2>/dev/null || true',
     );
-    expect(fs.readFileSync(policySettingsFile, 'utf8')).toEqual(ORIGINAL_SETTINGS);
     expect(fs.existsSync(path.join(policyHooksDir, 'memory-gate-hook.js'))).toBe(
       true,
     );
+    expect(
+      fs.readFileSync(path.join(policyHooksDir, 'memory-gate-hook.js'), 'utf8'),
+    ).toEqual('// noop\n');
   });
 
   it('write to /home/node/.claude/hooks/memory-gate-hook.js fails with non-zero exit', () => {
     const result = runInContainer(
-      'echo "bypass" > /home/node/.claude/hooks/memory-gate-hook.js; echo "exit=$?"',
+      'echo "bypass" > /home/node/.claude/hooks/memory-gate-hook.js',
     );
-    expect(result.stdout).toMatch(/exit=[1-9]/);
+    expect(result.status).not.toBe(0);
     expect(
       fs.readFileSync(path.join(policyHooksDir, 'memory-gate-hook.js'), 'utf8'),
     ).toEqual('// noop\n');
@@ -130,9 +130,9 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
 
   it('writes elsewhere under /home/node/.claude still succeed (sessions stay writable)', () => {
     const result = runInContainer(
-      'echo "session-data" > /home/node/.claude/projects.json 2>&1; echo "exit=$?"',
+      'echo "session-data" > /home/node/.claude/projects.json',
     );
-    expect(result.stdout).toMatch(/exit=0/);
+    expect(result.status).toBe(0);
     expect(
       fs.readFileSync(path.join(sessionsDir, 'projects.json'), 'utf8'),
     ).toEqual('session-data\n');

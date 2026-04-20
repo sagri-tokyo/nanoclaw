@@ -146,7 +146,7 @@ function buildContainerPlan(
   // Security-critical config (settings.json, hooks/) lives in a sibling
   // `policy/` directory and is overlaid read-only so a compromised agent
   // inside the container cannot rewrite `hooks.PreToolUse` to disable the
-  // memory-gate. See docs/SECURITY.md "Memory-gate integrity" for rationale.
+  // memory-gate. See docs/SECURITY.md "Memory-Gate Integrity" for rationale.
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
@@ -162,9 +162,13 @@ function buildContainerPlan(
   const policyHooksDir = path.join(groupPolicyDir, 'hooks');
   const policySettingsFile = path.join(groupPolicyDir, 'settings.json');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+  // policyDir must be created explicitly (not just as a side effect of the
+  // hooks subdir) so policySettingsFile can be bind-mounted as a file. If
+  // Docker sees a non-existent source file, it creates a directory there and
+  // mounts a dir as settings.json — Claude Code would then ignore it, silently
+  // reopening the bypass. writeFileSync below guarantees the file exists.
+  fs.mkdirSync(groupPolicyDir, { recursive: true });
   fs.mkdirSync(policyHooksDir, { recursive: true });
-  // Memory dir: main group shares /workspace/global/memory; other groups get
-  // isolated /workspace/group/memory. Both land inside writable mounts.
   const containerMemoryDir = isMain
     ? '/workspace/global/memory'
     : '/workspace/group/memory';

@@ -51,7 +51,7 @@ Each group has isolated Claude sessions at `data/sessions/{group}/.claude/`:
 - Session data includes full message history and file contents read
 - Prevents cross-group information disclosure
 
-### 3a. Memory-Gate Integrity
+### 4. Memory-Gate Integrity
 
 The memory-gate is enforced by a Claude Code `PreToolUse` hook declared in `settings.json`. The gate is security-critical: without it, non-admin sources can poison long-term memory (see `memory-gate.ts` for the provenance schema).
 
@@ -76,9 +76,9 @@ Claude Code `settings.json` is the wrong location for security-critical config w
 
 **Integration test.** `memory-gate.integration.test.ts` spawns a real container that simulates a compromised agent writing to `/home/node/.claude/settings.json` and `/home/node/.claude/hooks/memory-gate-hook.js`. Both writes return non-zero and the host-side files are byte-identical before and after, proving the overlay closes the bypass. Unrelated writes under `/home/node/.claude/` (e.g. session data) still succeed.
 
-**Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json` and forwards `SAGRI_MEMORY_DIR`. Reader/actor split (issue #35) is the complementary defense against prompt-injected content reaching the actor in the first place.
+**Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json` and forwards `SAGRI_MEMORY_DIR`. The reader/actor split ([sagri-tokyo/sagri-ai#35](https://github.com/sagri-tokyo/sagri-ai/issues/35)) is the complementary defense against prompt-injected content reaching the actor in the first place.
 
-### 4. IPC Authorization
+### 5. IPC Authorization
 
 Messages and task operations are verified against group identity:
 
@@ -91,7 +91,7 @@ Messages and task operations are verified against group identity:
 | View all tasks | ✓ | Own only |
 | Manage other groups | ✓ | ✗ |
 
-### 5. Credential Isolation (OneCLI Agent Vault)
+### 6. Credential Isolation (OneCLI Agent Vault)
 
 Real API credentials **never enter containers**. NanoClaw uses [OneCLI's Agent Vault](https://github.com/onecli/onecli) to proxy outbound requests and inject credentials at the gateway level.
 
