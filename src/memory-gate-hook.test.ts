@@ -3,8 +3,16 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluate,
   formatDenyResponse,
+  HookOutput,
   HookPayload,
+  parsePayload,
 } from './memory-gate-hook.js';
+
+function expectDeny(result: HookOutput): string {
+  if (result.kind !== 'deny')
+    throw new Error(`expected deny, got ${result.kind}`);
+  return result.reason;
+}
 
 const memoryDir = '/workspace/global/memory';
 
@@ -62,9 +70,7 @@ describe('evaluate', () => {
       write(`${memoryDir}/bad.md`, 'body only'),
       memoryDir,
     );
-    expect(result.kind).toBe('deny');
-    if (result.kind !== 'deny') throw new Error('unreachable');
-    expect(result.reason).toMatch(/memory-gate.*frontmatter/i);
+    expect(expectDeny(result)).toMatch(/memory-gate.*frontmatter/i);
   });
 
   it('denies Write with non-admin source', () => {
@@ -73,9 +79,7 @@ describe('evaluate', () => {
       'source: slack_message',
     );
     const result = evaluate(write(`${memoryDir}/x.md`, content), memoryDir);
-    expect(result.kind).toBe('deny');
-    if (result.kind !== 'deny') throw new Error('unreachable');
-    expect(result.reason).toMatch(/non-admin.*slack_message/i);
+    expect(expectDeny(result)).toMatch(/non-admin.*slack_message/i);
   });
 
   it('denies Write with missing tool_input fields', () => {
@@ -83,9 +87,7 @@ describe('evaluate', () => {
       { tool_name: 'Write', tool_input: {} },
       memoryDir,
     );
-    expect(result.kind).toBe('deny');
-    if (result.kind !== 'deny') throw new Error('unreachable');
-    expect(result.reason).toMatch(/missing file_path or content/i);
+    expect(expectDeny(result)).toMatch(/missing file_path or content/i);
   });
 
   it('denies Write with non-string file_path', () => {
@@ -97,6 +99,46 @@ describe('evaluate', () => {
       memoryDir,
     );
     expect(result.kind).toBe('deny');
+  });
+});
+
+describe('parsePayload', () => {
+  it('parses a well-formed payload', () => {
+    const parsed = parsePayload(
+      JSON.stringify({
+        tool_name: 'Write',
+        tool_input: { file_path: '/x', content: 'y' },
+      }),
+    );
+    expect(parsed.tool_name).toBe('Write');
+    expect(parsed.tool_input.file_path).toBe('/x');
+  });
+
+  it('throws on non-JSON input', () => {
+    expect(() => parsePayload('not json')).toThrow();
+  });
+
+  it('throws when tool_name is missing', () => {
+    expect(() =>
+      parsePayload(JSON.stringify({ tool_input: {} })),
+    ).toThrow(/tool_name/);
+  });
+
+  it('throws when tool_name is non-string', () => {
+    expect(() =>
+      parsePayload(JSON.stringify({ tool_name: 42, tool_input: {} })),
+    ).toThrow(/tool_name/);
+  });
+
+  it('throws when tool_input is missing', () => {
+    expect(() => parsePayload(JSON.stringify({ tool_name: 'Write' }))).toThrow(
+      /tool_input/,
+    );
+  });
+
+  it('throws when payload is not an object', () => {
+    expect(() => parsePayload(JSON.stringify(null))).toThrow(/object/);
+    expect(() => parsePayload(JSON.stringify('str'))).toThrow(/object/);
   });
 });
 

@@ -28,14 +28,19 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
-// Mock fs
+// Mock fs. existsSync returns true for compiled memory-gate hook files so
+// buildVolumeMounts' fail-fast guard is satisfied under test; everything else
+// still returns false (matching the pre-existing test assumption).
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
+  const HOOK_FILES = ['memory-gate.js', 'memory-gate-hook.js'];
   return {
     ...actual,
     default: {
       ...actual,
-      existsSync: vi.fn(() => false),
+      existsSync: vi.fn((p: string) =>
+        HOOK_FILES.some((name) => p.endsWith(`/dist/${name}`)),
+      ),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
       readFileSync: vi.fn(() => ''),

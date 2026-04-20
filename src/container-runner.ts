@@ -188,13 +188,18 @@ function buildVolumeMounts(
   }
 
   // Copy compiled memory-gate hook into the group's .claude/hooks/.
-  // Requires `npm run build` to have produced dist/ on the host before container start.
+  // Fail-fast: the container boot is blocked rather than starting without an
+  // enforceable provenance gate. Requires `npm run build` before container start.
   const hookSrc = path.join(projectRoot, 'dist');
   const hookDst = path.join(groupSessionsDir, 'hooks');
   fs.mkdirSync(hookDst, { recursive: true });
   for (const name of ['memory-gate.js', 'memory-gate-hook.js']) {
     const src = path.join(hookSrc, name);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(hookDst, name));
+    if (!fs.existsSync(src))
+      throw new Error(
+        `memory-gate hook not built: ${src} missing. Run \`npm run build\` before starting the container.`,
+      );
+    fs.copyFileSync(src, path.join(hookDst, name));
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // PreToolUse hook: enforces memory provenance on Write calls targeting SAGRI_MEMORY_DIR.
 // Edit/MultiEdit not covered; tracked as follow-up.
+import { fileURLToPath } from 'node:url';
+
 import { decideWrite } from './memory-gate.js';
 
 export interface HookPayload {
@@ -12,6 +14,18 @@ export interface HookPayload {
 }
 
 export type HookOutput = { kind: 'allow' } | { kind: 'deny'; reason: string };
+
+export function parsePayload(raw: string): HookPayload {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object')
+    throw new Error('hook payload: not an object');
+  const p = parsed as Record<string, unknown>;
+  if (typeof p.tool_name !== 'string')
+    throw new Error('hook payload: tool_name missing or not a string');
+  if (!p.tool_input || typeof p.tool_input !== 'object')
+    throw new Error('hook payload: tool_input missing or not an object');
+  return { tool_name: p.tool_name, tool_input: p.tool_input as HookPayload['tool_input'] };
+}
 
 export function evaluate(payload: HookPayload, memoryDir: string): HookOutput {
   if (payload.tool_name !== 'Write') return { kind: 'allow' };
@@ -51,16 +65,22 @@ async function main(): Promise<void> {
   const memoryDir = process.env.SAGRI_MEMORY_DIR;
   if (!memoryDir) {
     process.stderr.write('memory-gate-hook: SAGRI_MEMORY_DIR not set\n');
+    process.stdout.write(
+      formatDenyResponse('memory-gate: SAGRI_MEMORY_DIR not configured'),
+    );
     process.exit(2);
   }
 
   const raw = await readStdin();
-  const payload = JSON.parse(raw) as HookPayload;
+  const payload = parsePayload(raw);
   const result = evaluate(payload, memoryDir);
-  if (result.kind === 'deny') process.stdout.write(formatDenyResponse(result.reason));
+  if (result.kind === 'deny') {
+    process.stdout.write(formatDenyResponse(result.reason));
+    process.exit(2);
+  }
 }
 
 const invokedDirectly =
   typeof process.argv[1] === 'string' &&
-  import.meta.url === `file://${process.argv[1]}`;
+  fileURLToPath(import.meta.url) === process.argv[1];
 if (invokedDirectly) void main();
