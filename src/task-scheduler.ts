@@ -65,12 +65,23 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // Markers a scheduled-task agent can emit to signal "no output" without
 // triggering a chat post. Needed because LLMs are unreliable at producing
 // a truly empty final message — they tend to narrate compliance ("Per the
-// reply policy, replying with empty string") which then gets posted. Giving
-// the agent a concrete token to emit is a much more reliable instruction.
-const SILENT_RESULT_MARKERS = new Set(['', '__SILENT__', '__NOOP__']);
+// reply policy, replying with empty string") which then gets posted.
+//
+// We match a marker on ANY line of the trimmed result, not just the
+// whole-message value, because in practice the agent often emits both a
+// narration line and the sentinel in the same message (observed 2026-04-20
+// 16:15 JST: "Empty results — no pages with 'Ready for AI' status.\n\n
+// __SILENT__"). Treating any-line match as silent swallows the narration
+// too — operator's intent was "nothing to say", so suppressing the whole
+// post matches that intent better than posting the narration alone.
+const SILENT_RESULT_MARKERS = new Set(['__SILENT__', '__NOOP__']);
 
 export function isSilentResult(result: string): boolean {
-  return SILENT_RESULT_MARKERS.has(result.trim());
+  const trimmed = result.trim();
+  if (trimmed === '') return true;
+  return trimmed
+    .split('\n')
+    .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
 }
 
 export interface SchedulerDependencies {

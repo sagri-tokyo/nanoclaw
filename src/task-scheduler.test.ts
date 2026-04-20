@@ -149,7 +149,7 @@ describe('task scheduler', () => {
       expect(isSilentResult('  __SILENT__\n')).toBe(true);
     });
 
-    it('does not silence narration that mentions the marker', () => {
+    it('does not silence narration that only mentions the marker inline', () => {
       expect(isSilentResult('Per policy, I would output __SILENT__ here.')).toBe(
         false,
       );
@@ -157,6 +157,32 @@ describe('task scheduler', () => {
 
     it('does not silence a normal task summary', () => {
       expect(isSilentResult('Triage — 2026-04-20 — Complete')).toBe(false);
+    });
+
+    it('silences narration followed by the marker on its own line', () => {
+      // Real observed output 2026-04-20 16:15 JST: agent narrated AND emitted
+      // the sentinel in the same message. Intent was still "nothing to say".
+      expect(
+        isSilentResult(
+          'Empty results — no pages with "Ready for AI" status.\n\n__SILENT__',
+        ),
+      ).toBe(true);
+    });
+
+    it('silences the marker preceded by a reasoning line', () => {
+      expect(
+        isSilentResult('No pages processed this tick.\n__SILENT__'),
+      ).toBe(true);
+    });
+
+    it('silences the marker followed by trailing narration', () => {
+      expect(
+        isSilentResult('__SILENT__\n(nothing to report)'),
+      ).toBe(true);
+    });
+
+    it('does not silence a title containing underscores but not the sentinel', () => {
+      expect(isSilentResult('__staging__ test — Complete')).toBe(false);
     });
   });
 });
