@@ -162,11 +162,8 @@ function buildContainerPlan(
   const policyHooksDir = path.join(groupPolicyDir, 'hooks');
   const policySettingsFile = path.join(groupPolicyDir, 'settings.json');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
-  // policyDir must be created explicitly (not just as a side effect of the
-  // hooks subdir) so policySettingsFile can be bind-mounted as a file. If
-  // Docker sees a non-existent source file, it creates a directory there and
-  // mounts a dir as settings.json — Claude Code would then ignore it, silently
-  // reopening the bypass. writeFileSync below guarantees the file exists.
+  // Explicit even though mkdir'ing hooks/ creates it: guards against a future
+  // refactor that could move hooks/ and leave settings.json without a parent.
   fs.mkdirSync(groupPolicyDir, { recursive: true });
   fs.mkdirSync(policyHooksDir, { recursive: true });
   const containerMemoryDir = isMain

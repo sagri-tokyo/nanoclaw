@@ -106,10 +106,11 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
     );
   });
 
-  it('rm of /home/node/.claude/hooks/memory-gate-hook.js leaves host file intact', () => {
-    runInContainer(
-      'rm -f /home/node/.claude/hooks/memory-gate-hook.js 2>/dev/null || true',
+  it('rm of /home/node/.claude/hooks/memory-gate-hook.js fails with non-zero exit', () => {
+    const result = runInContainer(
+      'rm /home/node/.claude/hooks/memory-gate-hook.js',
     );
+    expect(result.status).not.toBe(0);
     expect(fs.existsSync(path.join(policyHooksDir, 'memory-gate-hook.js'))).toBe(
       true,
     );
