@@ -58,11 +58,18 @@ interface VolumeMount {
   readonly: boolean;
 }
 
-function buildVolumeMounts(
+interface ContainerPlan {
+  mounts: VolumeMount[];
+  /** Env vars this group needs injected via `-e` (not settings.json). */
+  extraEnv: Record<string, string>;
+}
+
+function buildContainerPlan(
   group: RegisteredGroup,
   isMain: boolean,
-): VolumeMount[] {
+): ContainerPlan {
   const mounts: VolumeMount[] = [];
+  const extraEnv: Record<string, string> = {};
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
 
@@ -135,71 +142,86 @@ function buildVolumeMounts(
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
+  // Each group gets their own .claude/ to prevent cross-group session access.
+  // Security-critical config (settings.json, hooks/) lives in a sibling
+  // `policy/` directory and is overlaid read-only so a compromised agent
+  // inside the container cannot rewrite `hooks.PreToolUse` to disable the
+  // memory-gate. See docs/SECURITY.md "Memory-gate integrity" for rationale.
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
     group.folder,
     '.claude',
   );
+  const groupPolicyDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    'policy',
+  );
+  const policyHooksDir = path.join(groupPolicyDir, 'hooks');
+  const policySettingsFile = path.join(groupPolicyDir, 'settings.json');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  fs.mkdirSync(policyHooksDir, { recursive: true });
   // Memory dir: main group shares /workspace/global/memory; other groups get
   // isolated /workspace/group/memory. Both land inside writable mounts.
   const containerMemoryDir = isMain
     ? '/workspace/global/memory'
     : '/workspace/group/memory';
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-            SAGRI_MEMORY_DIR: containerMemoryDir,
-          },
-          autoMemoryDirectory: containerMemoryDir,
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: 'Write',
-                hooks: [
-                  {
-                    type: 'command',
-                    command: 'node /home/node/.claude/hooks/memory-gate-hook.js',
-                  },
-                ],
-              },
-            ],
-          },
+  // settings.json is authored by the host on every container start so updates
+  // to defaults propagate without requiring policy-dir cleanup, and so any
+  // residual attacker modifications to prior on-disk state are overwritten.
+  fs.writeFileSync(
+    policySettingsFile,
+    JSON.stringify(
+      {
+        env: {
+          // Enable agent swarms (subagent orchestration)
+          // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+          // Load CLAUDE.md from additional mounted directories
+          // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+          CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+          // Enable Claude's memory feature (persists user preferences between sessions)
+          // https://code.claude.com/docs/en/memory#manage-auto-memory
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
         },
-        null,
-        2,
-      ) + '\n',
-    );
-  }
+        autoMemoryDirectory: containerMemoryDir,
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write',
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'node /home/node/.claude/hooks/memory-gate-hook.js',
+                },
+              ],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ) + '\n',
+  );
 
-  // Copy compiled memory-gate hook into the group's .claude/hooks/.
+  // SAGRI_MEMORY_DIR is forwarded via docker -e rather than settings.json.env
+  // because the hook reads process.env directly and this path survives even if
+  // settings.json is tampered with before the read-only overlay lands.
+  extraEnv.SAGRI_MEMORY_DIR = containerMemoryDir;
+
+  // Copy compiled memory-gate hook into the group's policy/hooks dir.
   // Fail-fast: the container boot is blocked rather than starting without an
   // enforceable provenance gate. Requires `npm run build` before container start.
   const hookSrc = path.join(projectRoot, 'dist');
-  const hookDst = path.join(groupSessionsDir, 'hooks');
-  fs.mkdirSync(hookDst, { recursive: true });
   for (const name of ['memory-gate.js', 'memory-gate-hook.js']) {
     const src = path.join(hookSrc, name);
     if (!fs.existsSync(src))
       throw new Error(
         `memory-gate hook not built: ${src} missing. Run \`npm run build\` before starting the container.`,
       );
-    fs.copyFileSync(src, path.join(hookDst, name));
+    fs.copyFileSync(src, path.join(policyHooksDir, name));
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
@@ -217,6 +239,19 @@ function buildVolumeMounts(
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
     readonly: false,
+  });
+  // Overlay settings.json and hooks/ read-only on top of the writable .claude/
+  // mount. Later mounts win in Docker's mount ordering, so writes from the
+  // container to these paths return EROFS.
+  mounts.push({
+    hostPath: policySettingsFile,
+    containerPath: '/home/node/.claude/settings.json',
+    readonly: true,
+  });
+  mounts.push({
+    hostPath: policyHooksDir,
+    containerPath: '/home/node/.claude/hooks',
+    readonly: true,
   });
 
   // Per-group IPC namespace: each group gets its own IPC directory
@@ -274,13 +309,14 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
-  return mounts;
+  return { mounts, extraEnv };
 }
 
 function buildContainerArgs(
-  mounts: VolumeMount[],
+  plan: ContainerPlan,
   containerName: string,
 ): string[] {
+  const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
@@ -314,6 +350,15 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Per-group env that must come from the host rather than settings.json —
+  // keeps security-critical values (e.g. memory-gate target dir) out of
+  // Claude's writable settings.json view.
+  for (const [name, value] of Object.entries(extraEnv).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    args.push('-e', `${name}=${value}`);
   }
 
   // Opt-in host env forwarding: only vars listed in DATA_DIR/env/forward-list
@@ -350,10 +395,11 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const plan = buildContainerPlan(group, input.isMain);
+  const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(plan, containerName);
 
   logger.debug(
     {

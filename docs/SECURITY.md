@@ -51,6 +51,33 @@ Each group has isolated Claude sessions at `data/sessions/{group}/.claude/`:
 - Session data includes full message history and file contents read
 - Prevents cross-group information disclosure
 
+### 3a. Memory-Gate Integrity
+
+The memory-gate is enforced by a Claude Code `PreToolUse` hook declared in `settings.json`. The gate is security-critical: without it, non-admin sources can poison long-term memory (see `memory-gate.ts` for the provenance schema).
+
+**Threat.** The group's `.claude/` directory is a writable bind mount so Claude can persist session data, skills, and command history. If `settings.json` and `hooks/` lived inside that same writable mount, a compromised agent could:
+
+1. `Write` to `/home/node/.claude/settings.json` and remove `hooks.PreToolUse` (or point the hook at `/bin/true`).
+2. `Write` a benign no-op over `/home/node/.claude/hooks/memory-gate-hook.js`.
+3. Persist poisoned memory entries on subsequent `Write` calls — the gate is effectively off.
+
+Claude Code `settings.json` is the wrong location for security-critical config when the subject of the config (Claude) has write access to the file.
+
+**Mitigation.** Per-group config is split across two host directories:
+
+- `data/sessions/{group}/.claude/` — writable. Mounted at `/home/node/.claude` (rw). Holds sessions, skills, projects, command history.
+- `data/sessions/{group}/policy/` — host-only. Its `settings.json` and `hooks/` are overlaid **read-only** on top of the writable `.claude/` mount (in that order, so they take precedence):
+  - `policy/settings.json` → `/home/node/.claude/settings.json` (ro)
+  - `policy/hooks/`        → `/home/node/.claude/hooks` (ro)
+
+`settings.json` is re-authored by the host on every container start, so any stale on-disk copy is overwritten and no code path reads a settings.json produced by the container.
+
+**`SAGRI_MEMORY_DIR` sourcing.** The memory-gate hook reads the target directory from `process.env.SAGRI_MEMORY_DIR`. This value is injected by the host via `docker -e SAGRI_MEMORY_DIR=…`, never by the container's `settings.json.env`. This prevents a bypass where a compromised agent redirects the gate to an unmonitored path.
+
+**Integration test.** `memory-gate.integration.test.ts` spawns a real container that simulates a compromised agent writing to `/home/node/.claude/settings.json` and `/home/node/.claude/hooks/memory-gate-hook.js`. Both writes return non-zero and the host-side files are byte-identical before and after, proving the overlay closes the bypass. Unrelated writes under `/home/node/.claude/` (e.g. session data) still succeed.
+
+**Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json` and forwards `SAGRI_MEMORY_DIR`. Reader/actor split (issue #35) is the complementary defense against prompt-injected content reaching the actor in the first place.
+
 ### 4. IPC Authorization
 
 Messages and task operations are verified against group identity:
