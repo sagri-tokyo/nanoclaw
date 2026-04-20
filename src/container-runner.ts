@@ -144,6 +144,11 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  // Memory dir: main group shares /workspace/global/memory; other groups get
+  // isolated /workspace/group/memory. Both land inside writable mounts.
+  const containerMemoryDir = isMain
+    ? '/workspace/global/memory'
+    : '/workspace/group/memory';
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
       settingsFile,
@@ -159,12 +164,37 @@ function buildVolumeMounts(
             // Enable Claude's memory feature (persists user preferences between sessions)
             // https://code.claude.com/docs/en/memory#manage-auto-memory
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+            SAGRI_MEMORY_DIR: containerMemoryDir,
+          },
+          autoMemoryDirectory: containerMemoryDir,
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: 'Write',
+                hooks: [
+                  {
+                    type: 'command',
+                    command: 'node /home/node/.claude/hooks/memory-gate-hook.js',
+                  },
+                ],
+              },
+            ],
           },
         },
         null,
         2,
       ) + '\n',
     );
+  }
+
+  // Copy compiled memory-gate hook into the group's .claude/hooks/.
+  // Requires `npm run build` to have produced dist/ on the host before container start.
+  const hookSrc = path.join(projectRoot, 'dist');
+  const hookDst = path.join(groupSessionsDir, 'hooks');
+  fs.mkdirSync(hookDst, { recursive: true });
+  for (const name of ['memory-gate.js', 'memory-gate-hook.js']) {
+    const src = path.join(hookSrc, name);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(hookDst, name));
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
