@@ -28,9 +28,10 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
-// Mock fs. existsSync returns true for compiled memory-gate hook files so
-// buildContainerPlan's fail-fast guard is satisfied under test; everything
-// else still returns false (matching the pre-existing test assumption).
+// Mock fs. existsSync returns true for files we need to exist for the
+// happy path: compiled memory-gate hooks (fail-fast guard) and per-group
+// CLAUDE.md templates (ro-overlay gated on existence — sagri-ai#73).
+// Everything else returns false, matching the pre-existing test assumption.
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
   const HOOK_FILES = ['memory-gate.js', 'memory-gate-hook.js'];
@@ -38,9 +39,14 @@ vi.mock('fs', async () => {
     ...actual,
     default: {
       ...actual,
-      existsSync: vi.fn((p: string) =>
-        HOOK_FILES.some((name) => p.endsWith(`/dist/${name}`)),
-      ),
+      existsSync: vi.fn((p: string) => {
+        if (HOOK_FILES.some((name) => p.endsWith(`/dist/${name}`))) return true;
+        if (p.endsWith('/CLAUDE.md')) return true;
+        // Enable the globalDir mount branch so the main-group global
+        // CLAUDE.md ro-overlay is exercised in tests.
+        if (p.endsWith('/nanoclaw-test-groups/global')) return true;
+        return false;
+      }),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
       readFileSync: vi.fn(() => ''),
@@ -411,6 +417,43 @@ describe('container-runner memory-gate hardening', () => {
       expect(mount!.endsWith(':ro')).toBe(true);
     },
   );
+
+  it('mounts /workspace/group/CLAUDE.md read-only for main (sagri-ai#73)', async () => {
+    const args = await captureArgs(true);
+    const mount = findMountFor(args, '/workspace/group/CLAUDE.md');
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('mounts /workspace/group/CLAUDE.md read-only for non-main (sagri-ai#73)', async () => {
+    const args = await captureArgs(false);
+    const mount = findMountFor(args, '/workspace/group/CLAUDE.md');
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('overlays CLAUDE.md after the writable /workspace/group mount', async () => {
+    const args = await captureArgs(false);
+    const mountArgs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-v') mountArgs.push(args[i + 1]);
+    }
+    const parentIdx = mountArgs.findIndex(
+      (m) => m.split(':')[1] === '/workspace/group',
+    );
+    const mdIdx = mountArgs.findIndex(
+      (m) => m.split(':')[1] === '/workspace/group/CLAUDE.md',
+    );
+    expect(parentIdx).toBeGreaterThanOrEqual(0);
+    expect(mdIdx).toBeGreaterThan(parentIdx);
+  });
+
+  it('mounts /workspace/global/CLAUDE.md read-only for main', async () => {
+    const args = await captureArgs(true);
+    const mount = findMountFor(args, '/workspace/global/CLAUDE.md');
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
 
   it('overlays settings.json and hooks/ after the writable /home/node/.claude mount', async () => {
     const args = await captureArgs(false);

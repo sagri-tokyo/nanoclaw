@@ -90,7 +90,14 @@ Claude Code `settings.json` is the wrong location for security-critical config w
 
 Either suffices to disable auto-memory; both are set for defense in depth. The gate remains active for explicit `Write` tool calls into `SAGRI_MEMORY_DIR` (admin tooling, future features).
 
-**Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json` and forwards `SAGRI_MEMORY_DIR`. The reader/actor split ([sagri-tokyo/sagri-ai#35](https://github.com/sagri-tokyo/sagri-ai/issues/35)) is the complementary defense against prompt-injected content reaching the actor in the first place.
+**`CLAUDE.md` protection.** Each group's `CLAUDE.md` is templated on the host at group creation and auto-loaded by Claude Code at session start — the primary prompt-injection persistence vector (read every session, used as authoritative context). The file is overlaid read-only from the host so writes from inside the container return `EROFS` at the kernel level regardless of which tool the agent uses (`Write`, `Bash`, Python, `tee`, etc.). This closes the bash-bypass of `PreToolUse:Write` hooks on this surface ([sagri-tokyo/sagri-ai#73](https://github.com/sagri-tokyo/sagri-ai/issues/73)).
+
+- `groups/{group}/CLAUDE.md` → `/workspace/group/CLAUDE.md` (ro)
+- `groups/global/CLAUDE.md`  → `/workspace/global/CLAUDE.md` (ro, for main — non-main already has the whole global dir as ro)
+
+Curated updates are host-side (edit the file in the host `groups/` tree; next container start picks it up).
+
+**Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json`, templates `CLAUDE.md`, and forwards `SAGRI_MEMORY_DIR`. The reader/actor split ([sagri-tokyo/sagri-ai#35](https://github.com/sagri-tokyo/sagri-ai/issues/35)) is the complementary defense against prompt-injected content reaching the actor in the first place.
 
 ### 5. IPC Authorization
 
