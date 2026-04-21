@@ -779,7 +779,7 @@ describe('SlackChannel', () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
 
-      // Queue messages while disconnected
+      // Queue messages while disconnected (no thread context seen)
       await channel.sendMessage('slack:C0123456789', 'First queued');
       await channel.sendMessage('slack:C0123456789', 'Second queued');
 
@@ -788,10 +788,6 @@ describe('SlackChannel', () => {
       // Connect triggers flush
       await channel.connect();
 
-      // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
-      // The expected payload omits thread_ts to document the current
-      // (deficient) behavior — replies that should be in-thread post to
-      // the channel after recovery.
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'First queued',
@@ -801,6 +797,56 @@ describe('SlackChannel', () => {
         channel: 'C0123456789',
         text: 'Second queued',
         thread_ts: undefined,
+      });
+    });
+
+    it('preserves thread_ts captured at enqueue when flushing after a thread inbound', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+
+      // Inbound thread message populates lastThreadTs without needing connect
+      await triggerMessageEvent(
+        createMessageEvent({ threadTs: '1700000000.111', text: 'ping' }),
+      );
+
+      // sendMessage while disconnected — should capture threadTs at enqueue
+      await channel.sendMessage('slack:C0123456789', 'reply');
+
+      await channel.connect();
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'reply',
+        thread_ts: '1700000000.111',
+      });
+    });
+
+    it('preserves thread_ts when re-queueing after a send failure', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Inbound thread context arrives after connect
+      await triggerMessageEvent(
+        createMessageEvent({ threadTs: '1700000000.222', text: 'ping' }),
+      );
+
+      // First send fails — message gets re-queued with the captured threadTs
+      currentApp().client.chat.postMessage.mockRejectedValueOnce(
+        new Error('Network error'),
+      );
+      await channel.sendMessage('slack:C0123456789', 'reply');
+
+      // Reconnect to trigger flush of the re-queued message
+      await channel.disconnect();
+      await channel.connect();
+
+      const calls = currentApp().client.chat.postMessage.mock.calls;
+      const flushedCall = calls[calls.length - 1][0];
+      expect(flushedCall).toEqual({
+        channel: 'C0123456789',
+        text: 'reply',
+        thread_ts: '1700000000.222',
       });
     });
   });
