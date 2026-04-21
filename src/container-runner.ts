@@ -183,10 +183,19 @@ function buildContainerPlan(
           // Load CLAUDE.md from additional mounted directories
           // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-          // Enable Claude's memory feature (persists user preferences between sessions)
-          // https://code.claude.com/docs/en/memory#manage-auto-memory
-          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+          // CLAUDE_CODE_DISABLE_AUTO_MEMORY is forwarded via docker -e, not
+          // here — the claude code binary reads it from its own process.env,
+          // and settings.json.env only populates env for subprocesses.
         },
+        // Disable auto-memory. Auto-memory writes bypass PreToolUse:Write
+        // hooks (empirically verified against claude code 2.1.116 — see
+        // sagri-tokyo/sagri-ai#79), which would render the memory-gate below
+        // inoperative against its primary threat: prompt-injection-driven
+        // memory poisoning. `autoMemoryEnabled: false` is the settings-level
+        // equivalent; also set via process env (see extraEnv assignment
+        // below) — both mechanisms in OR for defense in depth. The gate
+        // stays active for explicit Write tool calls to SAGRI_MEMORY_DIR.
+        autoMemoryEnabled: false,
         autoMemoryDirectory: containerMemoryDir,
         hooks: {
           PreToolUse: [
@@ -211,6 +220,12 @@ function buildContainerPlan(
   // because the hook reads process.env directly and this path survives even if
   // settings.json is tampered with before the read-only overlay lands.
   extraEnv.SAGRI_MEMORY_DIR = containerMemoryDir;
+
+  // CLAUDE_CODE_DISABLE_AUTO_MEMORY must be in claude's own process env —
+  // the binary reads process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY directly,
+  // and settings.json.env only populates env for subprocesses claude
+  // spawns, not claude's own. See sagri-tokyo/sagri-ai#79.
+  extraEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
 
   // Copy compiled memory-gate hook into the group's policy/hooks dir.
   // Fail-fast: the container boot is blocked rather than starting without an

@@ -71,7 +71,7 @@ vi.mock('./credential-proxy.js', () => ({
 }));
 
 // Mock env-forward — default to no forwarded vars
-const mockGetForwardedEnv = vi.fn(() => ({} as Record<string, string>));
+const mockGetForwardedEnv = vi.fn(() => ({}) as Record<string, string>);
 vi.mock('./env-forward.js', () => ({
   getForwardedEnv: () => mockGetForwardedEnv(),
 }));
@@ -263,11 +263,7 @@ describe('container-runner env forwarding', () => {
     mockGetForwardedEnv.mockReturnValue(forwardedEnv);
     const argsPromise = captureSpawnArgs();
 
-    const containerPromise = runContainerAgent(
-      testGroup,
-      testInput,
-      () => {},
-    );
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
 
     const args = await argsPromise;
 
@@ -296,7 +292,8 @@ describe('container-runner env forwarding', () => {
         !f.startsWith('ANTHROPIC_API_KEY=') &&
         !f.startsWith('CLAUDE_CODE_OAUTH_TOKEN=') &&
         !f.startsWith('HOME=') &&
-        !f.startsWith('SAGRI_MEMORY_DIR='),
+        !f.startsWith('SAGRI_MEMORY_DIR=') &&
+        !f.startsWith('CLAUDE_CODE_DISABLE_AUTO_MEMORY='),
     );
     expect(forwardedFlags).toEqual([]);
   });
@@ -460,6 +457,53 @@ describe('container-runner memory-gate hardening', () => {
       const parsed = JSON.parse(body);
       expect(parsed.env).toBeDefined();
       expect(parsed.env.SAGRI_MEMORY_DIR).toBeUndefined();
+    }
+  });
+
+  it('passes CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 via -e flag', async () => {
+    const args = await captureArgs(false);
+    const idx = args.indexOf('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+    expect(idx).toBeGreaterThan(0);
+    expect(args[idx - 1]).toBe('-e');
+  });
+
+  it('does not write CLAUDE_CODE_DISABLE_AUTO_MEMORY into settings.json.env', async () => {
+    const fs = (await import('fs')).default;
+    const writeFileSync = fs.writeFileSync as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    writeFileSync.mockClear();
+    await captureArgs(false);
+    const settingsWrites = (writeFileSync.mock.calls as unknown[][]).filter(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).endsWith('/policy/settings.json'),
+    );
+    expect(settingsWrites.length).toBeGreaterThan(0);
+    for (const call of settingsWrites) {
+      const body = call[1] as string;
+      const parsed = JSON.parse(body);
+      expect(parsed.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBeUndefined();
+    }
+  });
+
+  it('writes autoMemoryEnabled: false at settings.json top level', async () => {
+    const fs = (await import('fs')).default;
+    const writeFileSync = fs.writeFileSync as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    writeFileSync.mockClear();
+    await captureArgs(false);
+    const settingsWrites = (writeFileSync.mock.calls as unknown[][]).filter(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).endsWith('/policy/settings.json'),
+    );
+    expect(settingsWrites.length).toBeGreaterThan(0);
+    for (const call of settingsWrites) {
+      const body = call[1] as string;
+      const parsed = JSON.parse(body);
+      expect(parsed.autoMemoryEnabled).toBe(false);
     }
   });
 });
