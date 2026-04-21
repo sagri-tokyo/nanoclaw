@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagri.co.jp/schemas/memory-provenance.json",
+  "title": "Memory Provenance",
+  "description": "Provenance fields required on every auto-memory topic file. MEMORY.md (the index) is exempt; only topic files carry provenance.",
+  "type": "object",
+  "required": ["source", "trigger", "session_id", "timestamp", "author_model"],
+  "additionalProperties": true,
+  "properties": {
+    "source": {
+      "description": "Input origin that produced this memory entry.",
+      "enum": [
+        "admin_commit",
+        "notion_brief",
+        "cli",
+        "slack_message",
+        "github_issue",
+        "github_comment",
+        "web_content",
+        "notion_page"
+      ]
+    },
+    "trigger": {
+      "description": "Human-readable reason the entry was written (e.g. user correction, inferred from conversation).",
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "description": "UUID of the agent session that produced the write.",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "timestamp": {
+      "description": "ISO 8601 instant when the entry was written.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "author_model": {
+      "description": "Claude model id that authored the entry.",
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "adminSources": {
+      "description": "Sources considered admin-trusted. Non-admin sources are rejected from long-term memory.",
+      "enum": ["admin_commit", "notion_brief", "cli"]
+    }
+  }
+}

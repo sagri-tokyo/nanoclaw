@@ -28,14 +28,19 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
-// Mock fs
+// Mock fs. existsSync returns true for compiled memory-gate hook files so
+// buildContainerPlan's fail-fast guard is satisfied under test; everything
+// else still returns false (matching the pre-existing test assumption).
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
+  const HOOK_FILES = ['memory-gate.js', 'memory-gate-hook.js'];
   return {
     ...actual,
     default: {
       ...actual,
-      existsSync: vi.fn(() => false),
+      existsSync: vi.fn((p: string) =>
+        HOOK_FILES.some((name) => p.endsWith(`/dist/${name}`)),
+      ),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
       readFileSync: vi.fn(() => ''),
@@ -290,7 +295,8 @@ describe('container-runner env forwarding', () => {
         !f.startsWith('ANTHROPIC_BASE_URL=') &&
         !f.startsWith('ANTHROPIC_API_KEY=') &&
         !f.startsWith('CLAUDE_CODE_OAUTH_TOKEN=') &&
-        !f.startsWith('HOME='),
+        !f.startsWith('HOME=') &&
+        !f.startsWith('SAGRI_MEMORY_DIR='),
     );
     expect(forwardedFlags).toEqual([]);
   });
@@ -339,5 +345,121 @@ describe('container-runner env forwarding', () => {
     expect(envFlagIdx).toBeGreaterThan(0);
     expect(firstVolumeIdx).toBeGreaterThan(0);
     expect(envFlagIdx).toBeLessThan(firstVolumeIdx);
+  });
+});
+
+// These tests pin the mitigations for issue #63 (memory-gate bypass via
+// settings.json rewrite). If any of these fail, the compromised-claude threat
+// model is no longer closed — see docs/SECURITY.md "Memory-gate integrity".
+describe('container-runner memory-gate hardening', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function captureArgs(isMain: boolean): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(
+      testGroup,
+      { ...testInput, isMain },
+      () => {},
+    );
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  function findMountFor(args: string[], containerPath: string): string | null {
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] !== '-v') continue;
+      const [, cPath] = args[i + 1].split(':');
+      if (cPath === containerPath) return args[i + 1];
+    }
+    return null;
+  }
+
+  it('mounts /home/node/.claude/settings.json read-only', async () => {
+    const args = await captureArgs(false);
+    const mount = findMountFor(args, '/home/node/.claude/settings.json');
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('mounts /home/node/.claude/hooks read-only', async () => {
+    const args = await captureArgs(false);
+    const mount = findMountFor(args, '/home/node/.claude/hooks');
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('overlays settings.json and hooks/ after the writable /home/node/.claude mount', async () => {
+    const args = await captureArgs(false);
+    const mountArgs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-v') mountArgs.push(args[i + 1]);
+    }
+    const parentIdx = mountArgs.findIndex((m) => {
+      const parts = m.split(':');
+      return parts[1] === '/home/node/.claude';
+    });
+    const settingsIdx = mountArgs.findIndex((m) => {
+      const parts = m.split(':');
+      return parts[1] === '/home/node/.claude/settings.json';
+    });
+    const hooksIdx = mountArgs.findIndex((m) => {
+      const parts = m.split(':');
+      return parts[1] === '/home/node/.claude/hooks';
+    });
+    expect(parentIdx).toBeGreaterThanOrEqual(0);
+    expect(settingsIdx).toBeGreaterThan(parentIdx);
+    expect(hooksIdx).toBeGreaterThan(parentIdx);
+  });
+
+  it('passes SAGRI_MEMORY_DIR via -e flag for main group', async () => {
+    const args = await captureArgs(true);
+    const idx = args.indexOf('SAGRI_MEMORY_DIR=/workspace/global/memory');
+    expect(idx).toBeGreaterThan(0);
+    expect(args[idx - 1]).toBe('-e');
+  });
+
+  it('passes SAGRI_MEMORY_DIR via -e flag for non-main group', async () => {
+    const args = await captureArgs(false);
+    const idx = args.indexOf('SAGRI_MEMORY_DIR=/workspace/group/memory');
+    expect(idx).toBeGreaterThan(0);
+    expect(args[idx - 1]).toBe('-e');
+  });
+
+  it('does not write SAGRI_MEMORY_DIR into settings.json.env', async () => {
+    const fs = (await import('fs')).default;
+    const writeFileSync = fs.writeFileSync as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    writeFileSync.mockClear();
+    await captureArgs(false);
+    const settingsWrites = (writeFileSync.mock.calls as unknown[][]).filter(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).endsWith('/policy/settings.json'),
+    );
+    expect(settingsWrites.length).toBeGreaterThan(0);
+    for (const call of settingsWrites) {
+      const body = call[1] as string;
+      const parsed = JSON.parse(body);
+      expect(parsed.env).toBeDefined();
+      expect(parsed.env.SAGRI_MEMORY_DIR).toBeUndefined();
+    }
   });
 });
