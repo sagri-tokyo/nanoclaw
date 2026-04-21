@@ -82,7 +82,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { SlackChannel, SlackChannelOpts } from './slack.js';
+import { SlackChannel, SlackChannelOpts, splitForSlack } from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 
@@ -788,13 +788,19 @@ describe('SlackChannel', () => {
       // Connect triggers flush
       await channel.connect();
 
+      // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
+      // The expected payload omits thread_ts to document the current
+      // (deficient) behavior — replies that should be in-thread post to
+      // the channel after recovery.
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'First queued',
+        thread_ts: undefined,
       });
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'Second queued',
+        thread_ts: undefined,
       });
     });
   });
@@ -960,5 +966,43 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(createTestOpts());
       expect(channel.name).toBe('slack');
     });
+  });
+});
+
+describe('splitForSlack', () => {
+  it('returns a single chunk for empty input', () => {
+    expect(splitForSlack('', 100)).toEqual(['']);
+  });
+
+  it('returns a single chunk when length equals max', () => {
+    const text = 'a'.repeat(100);
+    expect(splitForSlack(text, 100)).toEqual([text]);
+  });
+
+  it('emits a one-character second chunk when length is max + 1 with no boundary', () => {
+    const text = 'a'.repeat(101);
+    expect(splitForSlack(text, 100)).toEqual(['a'.repeat(100), 'a']);
+  });
+
+  it('does not produce empty chunks when input begins with a paragraph break', () => {
+    const text = '\n\n' + 'x'.repeat(150);
+    const chunks = splitForSlack(text, 100);
+    expect(chunks.every((c) => c.length > 0)).toBe(true);
+    expect(chunks.join('')).toContain('x'.repeat(150));
+  });
+
+  it('hard-cuts a single oversized token with no boundary characters', () => {
+    const text = 'z'.repeat(250);
+    expect(splitForSlack(text, 100)).toEqual([
+      'z'.repeat(100),
+      'z'.repeat(100),
+      'z'.repeat(50),
+    ]);
+  });
+
+  it('reconstructs the original text (modulo separators) for boundary-driven splits', () => {
+    const text = 'a'.repeat(60) + '\n\n' + 'b'.repeat(60);
+    const chunks = splitForSlack(text, 100);
+    expect(chunks).toEqual(['a'.repeat(60), 'b'.repeat(60)]);
   });
 });

@@ -214,15 +214,7 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      const threadTs = this.lastThreadTs.get(jid);
-
-      for (const chunk of splitForSlack(text, MAX_MESSAGE_LENGTH)) {
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: chunk,
-          thread_ts: threadTs,
-        });
-      }
+      await this.postChunks(channelId, text, this.lastThreadTs.get(jid));
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
       this.outgoingQueue.push({ jid, text });
@@ -315,12 +307,8 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        for (const chunk of splitForSlack(item.text, MAX_MESSAGE_LENGTH)) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: chunk,
-          });
-        }
+        // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
+        await this.postChunks(channelId, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
@@ -328,6 +316,20 @@ export class SlackChannel implements Channel {
       }
     } finally {
       this.flushing = false;
+    }
+  }
+
+  private async postChunks(
+    channelId: string,
+    text: string,
+    threadTs?: string,
+  ): Promise<void> {
+    for (const chunk of splitForSlack(text, MAX_MESSAGE_LENGTH)) {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        text: chunk,
+        thread_ts: threadTs,
+      });
     }
   }
 }
