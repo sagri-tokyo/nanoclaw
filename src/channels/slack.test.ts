@@ -984,11 +984,14 @@ describe('splitForSlack', () => {
     expect(splitForSlack(text, 100)).toEqual(['a'.repeat(100), 'a']);
   });
 
-  it('does not produce empty chunks when input begins with a paragraph break', () => {
+  it('hard-cuts past a leading paragraph break that would land below the half-limit', () => {
+    // Leading '\n\n' is at index 0, far below minBoundary (50). The splitter
+    // must skip it and fall back to a hard cut so the first chunk is non-empty.
     const text = '\n\n' + 'x'.repeat(150);
-    const chunks = splitForSlack(text, 100);
-    expect(chunks.every((c) => c.length > 0)).toBe(true);
-    expect(chunks.join('')).toContain('x'.repeat(150));
+    expect(splitForSlack(text, 100)).toEqual([
+      '\n\n' + 'x'.repeat(98),
+      'x'.repeat(52),
+    ]);
   });
 
   it('hard-cuts a single oversized token with no boundary characters', () => {
