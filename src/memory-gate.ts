@@ -143,7 +143,10 @@ function canonicalize(p: string): string {
   }
 }
 
-function isInsideMemoryDir(filePath: string, memoryDir: string): boolean {
+export function isInsideMemoryDir(
+  filePath: string,
+  memoryDir: string,
+): boolean {
   const resolvedDir = canonicalize(memoryDir);
   const resolvedFile = canonicalize(filePath);
   if (resolvedFile === resolvedDir) return false;

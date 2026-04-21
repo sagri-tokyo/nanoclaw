@@ -35,7 +35,7 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
     hooks: {
       PreToolUse: [
         {
-          matcher: 'Write',
+          matcher: 'Write|Edit|MultiEdit',
           hooks: [
             {
               type: 'command',
@@ -56,7 +56,10 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.mkdirSync(policyHooksDir, { recursive: true });
     fs.writeFileSync(policySettingsFile, ORIGINAL_SETTINGS);
-    fs.writeFileSync(path.join(policyHooksDir, 'memory-gate-hook.js'), '// noop\n');
+    fs.writeFileSync(
+      path.join(policyHooksDir, 'memory-gate-hook.js'),
+      '// noop\n',
+    );
   });
 
   afterAll(() => {
@@ -111,9 +114,9 @@ runIfDocker('memory-gate bypass resistance (integration)', () => {
       'rm /home/node/.claude/hooks/memory-gate-hook.js',
     );
     expect(result.status).not.toBe(0);
-    expect(fs.existsSync(path.join(policyHooksDir, 'memory-gate-hook.js'))).toBe(
-      true,
-    );
+    expect(
+      fs.existsSync(path.join(policyHooksDir, 'memory-gate-hook.js')),
+    ).toBe(true);
     expect(
       fs.readFileSync(path.join(policyHooksDir, 'memory-gate-hook.js'), 'utf8'),
     ).toEqual('// noop\n');

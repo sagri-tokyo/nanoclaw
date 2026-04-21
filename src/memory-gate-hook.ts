@@ -1,19 +1,37 @@
 #!/usr/bin/env node
-// PreToolUse hook: enforces memory provenance on Write calls targeting SAGRI_MEMORY_DIR.
-// Edit/MultiEdit not covered; tracked as follow-up.
+// PreToolUse hook: enforces memory provenance on Write / Edit / MultiEdit
+// calls targeting SAGRI_MEMORY_DIR. For Edit and MultiEdit, the gate
+// simulates the resulting on-disk content and applies the same provenance
+// checks used for Write. This closes the laundering bypass described in
+// sagri-ai#61 — where an admin-provenanced topic could be written via Write
+// and then have its `source` field stripped or mutated via Edit without
+// re-triggering the gate.
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { decideWrite } from './memory-gate.js';
+import { decideWrite, isInsideMemoryDir } from './memory-gate.js';
+
+export interface EditSpec {
+  old_string: string;
+  new_string: string;
+  replace_all?: boolean;
+}
 
 export interface HookPayload {
   tool_name: string;
   tool_input: {
     file_path?: string;
     content?: string;
+    old_string?: string;
+    new_string?: string;
+    replace_all?: boolean;
+    edits?: unknown;
   };
 }
 
 export type HookOutput = { kind: 'allow' } | { kind: 'deny'; reason: string };
+
+export type CurrentContentReader = (filePath: string) => string | null;
 
 export function parsePayload(raw: string): HookPayload {
   const parsed: unknown = JSON.parse(raw);
@@ -24,21 +42,131 @@ export function parsePayload(raw: string): HookPayload {
     throw new Error('hook payload: tool_name missing or not a string');
   if (!p.tool_input || typeof p.tool_input !== 'object')
     throw new Error('hook payload: tool_input missing or not an object');
-  return { tool_name: p.tool_name, tool_input: p.tool_input as HookPayload['tool_input'] };
+  return {
+    tool_name: p.tool_name,
+    tool_input: p.tool_input as HookPayload['tool_input'],
+  };
 }
 
-export function evaluate(payload: HookPayload, memoryDir: string): HookOutput {
-  if (payload.tool_name !== 'Write') return { kind: 'allow' };
+const defaultReader: CurrentContentReader = (filePath) => {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+};
 
-  const { file_path: filePath, content } = payload.tool_input;
+function applyEdit(
+  current: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+): string {
+  if (oldString === '') return newString + current;
+  if (replaceAll) return current.split(oldString).join(newString);
+  const idx = current.indexOf(oldString);
+  if (idx === -1) return current;
+  return (
+    current.slice(0, idx) + newString + current.slice(idx + oldString.length)
+  );
+}
 
-  if (typeof filePath !== 'string' || typeof content !== 'string')
+function parseEdits(raw: unknown): EditSpec[] {
+  if (!Array.isArray(raw)) throw new Error('MultiEdit edits must be an array');
+  if (raw.length === 0) throw new Error('MultiEdit edits must be non-empty');
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object')
+      throw new Error(`MultiEdit edits[${index}] must be an object`);
+    const e = entry as Record<string, unknown>;
+    if (typeof e.old_string !== 'string')
+      throw new Error(`MultiEdit edits[${index}].old_string must be a string`);
+    if (typeof e.new_string !== 'string')
+      throw new Error(`MultiEdit edits[${index}].new_string must be a string`);
+    const replaceAll = e.replace_all;
+    if (replaceAll !== undefined && typeof replaceAll !== 'boolean')
+      throw new Error(
+        `MultiEdit edits[${index}].replace_all must be a boolean`,
+      );
+    return {
+      old_string: e.old_string,
+      new_string: e.new_string,
+      replace_all: replaceAll === true,
+    };
+  });
+}
+
+export function evaluate(
+  payload: HookPayload,
+  memoryDir: string,
+  readCurrentContent: CurrentContentReader = defaultReader,
+): HookOutput {
+  const { tool_name: toolName, tool_input: input } = payload;
+  if (toolName !== 'Write' && toolName !== 'Edit' && toolName !== 'MultiEdit')
+    return { kind: 'allow' };
+
+  const filePath = input.file_path;
+  if (typeof filePath !== 'string')
     return {
       kind: 'deny',
-      reason: 'memory-gate: Write payload missing file_path or content',
+      reason: `memory-gate: ${toolName} payload missing file_path`,
     };
 
-  const decision = decideWrite({ filePath, content, memoryDir });
+  let finalContent: string;
+
+  if (toolName === 'Write') {
+    if (typeof input.content !== 'string')
+      return {
+        kind: 'deny',
+        reason: 'memory-gate: Write payload missing content',
+      };
+    finalContent = input.content;
+  } else if (toolName === 'Edit') {
+    if (
+      typeof input.old_string !== 'string' ||
+      typeof input.new_string !== 'string'
+    )
+      return {
+        kind: 'deny',
+        reason: 'memory-gate: Edit payload missing old_string or new_string',
+      };
+    if (
+      input.replace_all !== undefined &&
+      typeof input.replace_all !== 'boolean'
+    )
+      return {
+        kind: 'deny',
+        reason: 'memory-gate: Edit replace_all must be a boolean',
+      };
+    if (!isInsideMemoryDir(filePath, memoryDir)) return { kind: 'allow' };
+    const current = readCurrentContent(filePath) ?? '';
+    finalContent = applyEdit(
+      current,
+      input.old_string,
+      input.new_string,
+      input.replace_all === true,
+    );
+  } else {
+    let edits: EditSpec[];
+    try {
+      edits = parseEdits(input.edits);
+    } catch (err) {
+      return { kind: 'deny', reason: `memory-gate: ${(err as Error).message}` };
+    }
+    if (!isInsideMemoryDir(filePath, memoryDir)) return { kind: 'allow' };
+    let content = readCurrentContent(filePath) ?? '';
+    for (const edit of edits) {
+      content = applyEdit(
+        content,
+        edit.old_string,
+        edit.new_string,
+        edit.replace_all === true,
+      );
+    }
+    finalContent = content;
+  }
+
+  const decision = decideWrite({ filePath, content: finalContent, memoryDir });
   if (decision.allow) return { kind: 'allow' };
   return { kind: 'deny', reason: `memory-gate: ${decision.reason}` };
 }

@@ -250,7 +250,7 @@ function buildContainerPlan(
         hooks: {
           PreToolUse: [
             {
-              matcher: 'Write',
+              matcher: 'Write|Edit|MultiEdit',
               hooks: [
                 {
                   type: 'command',
