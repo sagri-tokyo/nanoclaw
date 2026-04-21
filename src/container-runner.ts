@@ -111,6 +111,19 @@ function buildContainerPlan(
       containerPath: '/workspace/group',
       readonly: false,
     });
+    // CLAUDE.md is templated on the host at group creation and auto-loaded
+    // by claude code at session start — a prompt-injection persistence
+    // vector if the agent can rewrite it. Overlay as ro so writes fail at
+    // the kernel level regardless of tool (Write, Bash, subprocess) —
+    // closes sagri-ai#73 for this surface. Curated updates are host-side.
+    const groupMdFile = path.join(groupDir, 'CLAUDE.md');
+    if (fs.existsSync(groupMdFile)) {
+      mounts.push({
+        hostPath: groupMdFile,
+        containerPath: '/workspace/group/CLAUDE.md',
+        readonly: true,
+      });
+    }
 
     // Global memory directory — writable for main so it can update shared context
     const globalDir = path.join(GROUPS_DIR, 'global');
@@ -120,6 +133,17 @@ function buildContainerPlan(
         containerPath: '/workspace/global',
         readonly: false,
       });
+      // Protect the global CLAUDE.md with a ro overlay for the same reason
+      // — main has rw access to the dir, but the instruction file itself
+      // must not be agent-mutable.
+      const globalMdFile = path.join(globalDir, 'CLAUDE.md');
+      if (fs.existsSync(globalMdFile)) {
+        mounts.push({
+          hostPath: globalMdFile,
+          containerPath: '/workspace/global/CLAUDE.md',
+          readonly: true,
+        });
+      }
     }
   } else {
     // Other groups only get their own folder
@@ -128,9 +152,18 @@ function buildContainerPlan(
       containerPath: '/workspace/group',
       readonly: false,
     });
+    // CLAUDE.md ro overlay — see rationale in the main branch above
+    // (sagri-ai#73).
+    const groupMdFile = path.join(groupDir, 'CLAUDE.md');
+    if (fs.existsSync(groupMdFile)) {
+      mounts.push({
+        hostPath: groupMdFile,
+        containerPath: '/workspace/group/CLAUDE.md',
+        readonly: true,
+      });
+    }
 
     // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
