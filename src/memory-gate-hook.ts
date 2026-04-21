@@ -31,6 +31,10 @@ export interface HookPayload {
 
 export type HookOutput = { kind: 'allow' } | { kind: 'deny'; reason: string };
 
+// Returns the current file content, or `null` when the file does not exist
+// (ENOENT). Any other I/O failure should throw — this signal is reserved
+// strictly for "file not found", so downstream code can treat `null` as
+// "simulate against an empty buffer" for new-file edits.
 export type CurrentContentReader = (filePath: string) => string | null;
 
 export function parsePayload(raw: string): HookPayload {
@@ -63,9 +67,22 @@ function applyEdit(
   newString: string,
   replaceAll: boolean,
 ): string {
+  // Empty old_string is handled explicitly. MultiEdit's first-edit empty
+  // old_string is documented as "create new file" (current === ''), which
+  // reduces to newString. For non-empty current, String.prototype.replace
+  // with '' prepends, and `split('').join(new)` would interleave new
+  // between every character — a distinct, nonsense result. Unifying both
+  // cases as `newString + current` keeps behavior predictable regardless
+  // of `replaceAll`, and the gate still validates the simulated result
+  // against decideWrite (which rejects anything that does not start with
+  // valid frontmatter, so prepended non-frontmatter content denies).
   if (oldString === '') return newString + current;
   if (replaceAll) return current.split(oldString).join(newString);
   const idx = current.indexOf(oldString);
+  // No-match is a no-op: claude-code errors at runtime and no file change
+  // occurs. Simulating with unchanged content is safe — the gate either
+  // allowed the prior state or it was created under a prior policy, and
+  // either way nothing is written.
   if (idx === -1) return current;
   return (
     current.slice(0, idx) + newString + current.slice(idx + oldString.length)
@@ -96,32 +113,29 @@ function parseEdits(raw: unknown): EditSpec[] {
   });
 }
 
-export function evaluate(
-  payload: HookPayload,
+// Produces either the final on-disk content a Write / Edit / MultiEdit
+// would leave behind, or a `deny` HookOutput if the payload is malformed.
+// Returning `null` means the tool call is outside the hook's scope (e.g.
+// reading a non-edit tool, or an Edit/MultiEdit targeting a path outside
+// memoryDir). Called by `evaluate`; factored out so the branching logic
+// does not interleave with the single downstream `decideWrite` call.
+function simulateFinalContent(
+  toolName: string,
+  input: HookPayload['tool_input'],
+  filePath: string,
   memoryDir: string,
-  readCurrentContent: CurrentContentReader = defaultReader,
-): HookOutput {
-  const { tool_name: toolName, tool_input: input } = payload;
-  if (toolName !== 'Write' && toolName !== 'Edit' && toolName !== 'MultiEdit')
-    return { kind: 'allow' };
-
-  const filePath = input.file_path;
-  if (typeof filePath !== 'string')
-    return {
-      kind: 'deny',
-      reason: `memory-gate: ${toolName} payload missing file_path`,
-    };
-
-  let finalContent: string;
-
+  readCurrentContent: CurrentContentReader,
+): { kind: 'content'; value: string } | { kind: 'allow' } | HookOutput {
   if (toolName === 'Write') {
     if (typeof input.content !== 'string')
       return {
         kind: 'deny',
         reason: 'memory-gate: Write payload missing content',
       };
-    finalContent = input.content;
-  } else if (toolName === 'Edit') {
+    return { kind: 'content', value: input.content };
+  }
+
+  if (toolName === 'Edit') {
     if (
       typeof input.old_string !== 'string' ||
       typeof input.new_string !== 'string'
@@ -140,33 +154,66 @@ export function evaluate(
       };
     if (!isInsideMemoryDir(filePath, memoryDir)) return { kind: 'allow' };
     const current = readCurrentContent(filePath) ?? '';
-    finalContent = applyEdit(
+    const value = applyEdit(
       current,
       input.old_string,
       input.new_string,
       input.replace_all === true,
     );
-  } else {
-    let edits: EditSpec[];
-    try {
-      edits = parseEdits(input.edits);
-    } catch (err) {
-      return { kind: 'deny', reason: `memory-gate: ${(err as Error).message}` };
-    }
-    if (!isInsideMemoryDir(filePath, memoryDir)) return { kind: 'allow' };
-    let content = readCurrentContent(filePath) ?? '';
-    for (const edit of edits) {
-      content = applyEdit(
-        content,
-        edit.old_string,
-        edit.new_string,
-        edit.replace_all === true,
-      );
-    }
-    finalContent = content;
+    return { kind: 'content', value };
   }
 
-  const decision = decideWrite({ filePath, content: finalContent, memoryDir });
+  // MultiEdit
+  let edits: EditSpec[];
+  try {
+    edits = parseEdits(input.edits);
+  } catch (err) {
+    return { kind: 'deny', reason: `memory-gate: ${(err as Error).message}` };
+  }
+  if (!isInsideMemoryDir(filePath, memoryDir)) return { kind: 'allow' };
+  let content = readCurrentContent(filePath) ?? '';
+  for (const edit of edits) {
+    content = applyEdit(
+      content,
+      edit.old_string,
+      edit.new_string,
+      edit.replace_all === true,
+    );
+  }
+  return { kind: 'content', value: content };
+}
+
+export function evaluate(
+  payload: HookPayload,
+  memoryDir: string,
+  readCurrentContent: CurrentContentReader = defaultReader,
+): HookOutput {
+  const { tool_name: toolName, tool_input: input } = payload;
+  if (toolName !== 'Write' && toolName !== 'Edit' && toolName !== 'MultiEdit')
+    return { kind: 'allow' };
+
+  const filePath = input.file_path;
+  if (typeof filePath !== 'string')
+    return {
+      kind: 'deny',
+      reason: `memory-gate: ${toolName} payload missing file_path`,
+    };
+
+  const simulated = simulateFinalContent(
+    toolName,
+    input,
+    filePath,
+    memoryDir,
+    readCurrentContent,
+  );
+  if (simulated.kind === 'allow') return { kind: 'allow' };
+  if (simulated.kind === 'deny') return simulated;
+
+  const decision = decideWrite({
+    filePath,
+    content: simulated.value,
+    memoryDir,
+  });
   if (decision.allow) return { kind: 'allow' };
   return { kind: 'deny', reason: `memory-gate: ${decision.reason}` };
 }

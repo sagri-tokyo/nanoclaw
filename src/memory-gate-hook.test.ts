@@ -137,7 +137,7 @@ describe('evaluate', () => {
       },
       memoryDir,
     );
-    expect(result.kind).toBe('deny');
+    expect(expectDeny(result)).toMatch(/missing file_path/i);
   });
 });
 
@@ -232,6 +232,21 @@ describe('evaluate — Edit', () => {
       readerOf(doubled),
     );
     expect(expectDeny(result)).toMatch(/source/i);
+  });
+
+  it('denies Edit with empty old_string prepending non-frontmatter to admin file', () => {
+    // Simulated result is newString + current. parseFrontmatter requires
+    // `---\n` at the very start of the buffer; prepending non-frontmatter
+    // content means the simulation no longer parses as valid memory and
+    // is denied. Guards against an attempted bypass where an attacker
+    // sends `old_string: ''` to splice content in front of valid
+    // provenance.
+    const result = evaluate(
+      edit(`${memoryDir}/admin.md`, '', 'poisoned body without frontmatter\n'),
+      memoryDir,
+      readerOf(VALID_TOPIC),
+    );
+    expect(expectDeny(result)).toMatch(/frontmatter/i);
   });
 });
 
