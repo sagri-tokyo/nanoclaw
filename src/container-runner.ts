@@ -183,9 +183,15 @@ function buildContainerPlan(
           // Load CLAUDE.md from additional mounted directories
           // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-          // Enable Claude's memory feature (persists user preferences between sessions)
+          // Disable Claude's auto-memory feature. Auto-memory writes bypass
+          // PreToolUse:Write hooks (empirically verified against claude code
+          // 2.1.116 — see sagri-tokyo/sagri-ai#79), which would render the
+          // memory-gate below inoperative against its primary threat model:
+          // prompt-injection-driven memory poisoning. Keeping the gate for
+          // explicit Write calls to SAGRI_MEMORY_DIR (admin tooling, future
+          // features), but auto-memory itself is off.
           // https://code.claude.com/docs/en/memory#manage-auto-memory
-          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
         },
         autoMemoryDirectory: containerMemoryDir,
         hooks: {

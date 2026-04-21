@@ -76,6 +76,8 @@ Claude Code `settings.json` is the wrong location for security-critical config w
 
 **Integration test.** `memory-gate.integration.test.ts` spawns a real container that simulates a compromised agent writing to `/home/node/.claude/settings.json` and `/home/node/.claude/hooks/memory-gate-hook.js`. Both writes return non-zero and the host-side files are byte-identical before and after, proving the overlay closes the bypass. Unrelated writes under `/home/node/.claude/` (e.g. session data) still succeed.
 
+**Auto-memory disabled.** Claude Code's auto-memory feature writes to its memory directory via a code path that does **not** invoke `PreToolUse:Write` hooks (empirically verified — see [sagri-tokyo/sagri-ai#79](https://github.com/sagri-tokyo/sagri-ai/issues/79)). If auto-memory were enabled, an adversarial prompt could cause Claude to remember attacker-controlled content, and the gate would not fire. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is set in `policy/settings.json` so no auto-memory writes occur. The gate remains active for explicit `Write` tool calls into `SAGRI_MEMORY_DIR` (admin tooling, future features).
+
 **Out of scope.** This mitigation does not defend against a compromised host process — the host is the trust anchor that authors `settings.json` and forwards `SAGRI_MEMORY_DIR`. The reader/actor split ([sagri-tokyo/sagri-ai#35](https://github.com/sagri-tokyo/sagri-ai/issues/35)) is the complementary defense against prompt-injected content reaching the actor in the first place.
 
 ### 5. IPC Authorization
