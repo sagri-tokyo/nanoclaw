@@ -161,11 +161,28 @@ function buildContainerPlan(
   );
   const policyHooksDir = path.join(groupPolicyDir, 'hooks');
   const policySettingsFile = path.join(groupPolicyDir, 'settings.json');
+  // Additional .claude/ subdirs Claude Code auto-loads as instruction
+  // surfaces (slash commands, subagent defs, plugins, rule files, agent
+  // team configs). A compromised agent could Write files under these
+  // paths and inject persistent instructions activated on any future
+  // session. Mounted as empty ro overlays — deny writes at kernel level.
+  // See sagri-ai#75. Skills/ is a separate concern (host-copied, not
+  // mounted) tracked as follow-up.
+  const POLICY_READONLY_SUBDIRS = [
+    'commands',
+    'agents',
+    'plugins',
+    'rules',
+    'teams',
+  ] as const;
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   // Explicit even though mkdir'ing hooks/ creates it: guards against a future
   // refactor that could move hooks/ and leave settings.json without a parent.
   fs.mkdirSync(groupPolicyDir, { recursive: true });
   fs.mkdirSync(policyHooksDir, { recursive: true });
+  for (const subdir of POLICY_READONLY_SUBDIRS) {
+    fs.mkdirSync(path.join(groupPolicyDir, subdir), { recursive: true });
+  }
   const containerMemoryDir = isMain
     ? '/workspace/global/memory'
     : '/workspace/group/memory';
@@ -269,6 +286,14 @@ function buildContainerPlan(
     containerPath: '/home/node/.claude/hooks',
     readonly: true,
   });
+  // Same overlay pattern for the other Claude Code instruction surfaces.
+  for (const subdir of POLICY_READONLY_SUBDIRS) {
+    mounts.push({
+      hostPath: path.join(groupPolicyDir, subdir),
+      containerPath: `/home/node/.claude/${subdir}`,
+      readonly: true,
+    });
+  }
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC

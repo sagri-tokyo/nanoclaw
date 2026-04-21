@@ -402,6 +402,16 @@ describe('container-runner memory-gate hardening', () => {
     expect(mount!.endsWith(':ro')).toBe(true);
   });
 
+  it.each(['commands', 'agents', 'plugins', 'rules', 'teams'] as const)(
+    'mounts /home/node/.claude/%s read-only (sagri-ai#75)',
+    async (subdir) => {
+      const args = await captureArgs(false);
+      const mount = findMountFor(args, `/home/node/.claude/${subdir}`);
+      expect(mount).not.toBeNull();
+      expect(mount!.endsWith(':ro')).toBe(true);
+    },
+  );
+
   it('overlays settings.json and hooks/ after the writable /home/node/.claude mount', async () => {
     const args = await captureArgs(false);
     const mountArgs: string[] = [];

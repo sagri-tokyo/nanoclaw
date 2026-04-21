@@ -66,9 +66,16 @@ Claude Code `settings.json` is the wrong location for security-critical config w
 **Mitigation.** Per-group config is split across two host directories:
 
 - `data/sessions/{group}/.claude/` — writable. Mounted at `/home/node/.claude` (rw). Holds sessions, skills, projects, command history.
-- `data/sessions/{group}/policy/` — host-only. Its `settings.json` and `hooks/` are overlaid **read-only** on top of the writable `.claude/` mount (in that order, so they take precedence):
+- `data/sessions/{group}/policy/` — host-only. Its `settings.json` and several `.claude/` subdirs are overlaid **read-only** on top of the writable `.claude/` mount (in that order, so they take precedence):
   - `policy/settings.json` → `/home/node/.claude/settings.json` (ro)
   - `policy/hooks/`        → `/home/node/.claude/hooks` (ro)
+  - `policy/commands/`     → `/home/node/.claude/commands` (ro) — slash commands
+  - `policy/agents/`       → `/home/node/.claude/agents` (ro) — subagent defs
+  - `policy/plugins/`      → `/home/node/.claude/plugins` (ro) — plugin manifests
+  - `policy/rules/`        → `/home/node/.claude/rules` (ro) — rule files
+  - `policy/teams/`        → `/home/node/.claude/teams` (ro) — agent team configs
+
+  Each of these is an instruction surface Claude Code auto-loads — writing to any of them from inside the container would be a persistent-injection vector (see [sagri-tokyo/sagri-ai#75](https://github.com/sagri-tokyo/sagri-ai/issues/75)). The overlays are empty by default; custom commands / agents / etc. must be authored on the host.
 
 `settings.json` is re-authored by the host on every container start, so any stale on-disk copy is overwritten and no code path reads a settings.json produced by the container.
 
