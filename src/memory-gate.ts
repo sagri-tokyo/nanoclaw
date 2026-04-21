@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 export const SOURCES = [
@@ -115,9 +116,36 @@ export interface DecideWriteInput {
   memoryDir: string;
 }
 
+// Resolve a path to its canonical location, dereferencing symlinks along the
+// way. When the leaf (or some ancestor) does not yet exist — typical for a
+// Write creating a new file — walk up to the nearest existing ancestor,
+// realpath that, then re-join the non-existent suffix. If nothing along the
+// path exists (tests with fabricated paths), falls back to `path.resolve`.
+//
+// Protects against symlink-based bypass of the memory-dir check: an attacker
+// creating `/tmp/link -> /workspace/group/memory` cannot smuggle a write
+// through `/tmp/link/poison.md` — realpath resolves the parent to the real
+// memory directory, so the write is recognised as inside. See sagri-ai#74.
+function canonicalize(p: string): string {
+  let current = path.resolve(p);
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      const real = fs.realpathSync(current);
+      return suffix.length === 0 ? real : path.join(real, ...suffix.reverse());
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(p);
+      suffix.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 function isInsideMemoryDir(filePath: string, memoryDir: string): boolean {
-  const resolvedDir = path.resolve(memoryDir);
-  const resolvedFile = path.resolve(filePath);
+  const resolvedDir = canonicalize(memoryDir);
+  const resolvedFile = canonicalize(filePath);
   if (resolvedFile === resolvedDir) return false;
   return resolvedFile.startsWith(resolvedDir + path.sep);
 }
@@ -132,7 +160,12 @@ export function decideWrite(input: DecideWriteInput): Decision {
 
   if (!isInsideMemoryDir(filePath, memoryDir)) return { allow: true };
 
-  if (path.basename(filePath) === 'MEMORY.md') return { allow: true };
+  // MEMORY.md used to be whitelisted because auto-memory wrote it as a plain
+  // bullet index without frontmatter. Auto-memory is now disabled
+  // (sagri-ai#79) so no legitimate in-container writer exists. Removing the
+  // whitelist closes sagri-ai#78 — an attacker could previously write
+  // arbitrary content to MEMORY.md and poison the index read on next
+  // session. Any curated MEMORY.md should be authored on the host.
 
   let frontmatter: Record<string, string> | null;
   try {

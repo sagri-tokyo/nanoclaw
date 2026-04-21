@@ -53,10 +53,12 @@ describe('evaluate', () => {
     });
   });
 
-  it('allows Write to MEMORY.md index', () => {
-    expect(
-      evaluate(write(`${memoryDir}/MEMORY.md`, '- link'), memoryDir),
-    ).toEqual({ kind: 'allow' });
+  it('denies Write to MEMORY.md without frontmatter (whitelist removed — sagri-ai#78)', () => {
+    const result = evaluate(
+      write(`${memoryDir}/MEMORY.md`, '- link'),
+      memoryDir,
+    );
+    expect(expectDeny(result)).toMatch(/memory-gate.*frontmatter/i);
   });
 
   it('allows Write of valid admin topic', () => {

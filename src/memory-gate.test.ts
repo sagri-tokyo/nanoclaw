@@ -1,5 +1,7 @@
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ADMIN_SOURCES,
@@ -145,13 +147,22 @@ describe('decideWrite', () => {
     expect(decision).toEqual({ allow: true });
   });
 
-  it('allows writes to MEMORY.md without frontmatter', () => {
+  it('rejects writes to MEMORY.md without frontmatter (whitelist removed — sagri-ai#78)', () => {
     const decision = decideWrite({
       filePath: path.join(memoryDir, 'MEMORY.md'),
       content: '- [topic](file.md) — hook\n',
       memoryDir,
     });
-    expect(decision).toEqual({ allow: true });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('rejects writes to MEMORY.md in a subdir without frontmatter', () => {
+    const decision = decideWrite({
+      filePath: path.join(memoryDir, 'subdir', 'MEMORY.md'),
+      content: '- [topic](file.md) — hook\n',
+      memoryDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
   });
 
   it('allows topic write with valid admin provenance', () => {
@@ -273,5 +284,77 @@ describe('decideWrite', () => {
         memoryDir: 'relative/memory',
       }),
     ).toThrow(/absolute/i);
+  });
+});
+
+describe('decideWrite symlink resolution (sagri-ai#74)', () => {
+  let tmpRoot: string;
+  let realMemoryDir: string;
+
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'memgate-'));
+    realMemoryDir = path.join(tmpRoot, 'memory');
+    fs.mkdirSync(realMemoryDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('denies Write through a symlink that dereferences into memory dir', () => {
+    // Attack: attacker creates a symlink elsewhere pointing at memory/, then
+    // Writes through the symlink. Path string looks "outside" memory but the
+    // fs follows the symlink and the file lands inside.
+    const symlinkRoot = path.join(tmpRoot, 'elsewhere');
+    fs.symlinkSync(realMemoryDir, symlinkRoot);
+    const decision = decideWrite({
+      filePath: path.join(symlinkRoot, 'poison.md'),
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('allows Write through a symlink inside memory dir that points outside', () => {
+    // Inverse: a symlink inside memory/ pointing elsewhere. Write through it
+    // lands outside memory, so the gate correctly allows (write is out of
+    // scope — not poisoning memory).
+    const outsideTarget = path.join(tmpRoot, 'outside');
+    fs.mkdirSync(outsideTarget);
+    fs.symlinkSync(outsideTarget, path.join(realMemoryDir, 'escape'));
+    const decision = decideWrite({
+      filePath: path.join(realMemoryDir, 'escape', 'x.md'),
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(decision).toEqual({ allow: true });
+  });
+
+  it('denies Write when memoryDir itself is a symlink', () => {
+    // Operational case: container-runner may bind-mount memory dir via a
+    // symlinked path. The gate should canonicalize memoryDir too, not just
+    // filePath, so prefix matching works on real paths.
+    const linkedDir = path.join(tmpRoot, 'linked-memory');
+    fs.symlinkSync(realMemoryDir, linkedDir);
+    const decision = decideWrite({
+      filePath: path.join(realMemoryDir, 'x.md'),
+      content: 'no frontmatter',
+      memoryDir: linkedDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('resolves parent when target file does not exist yet', () => {
+    // Write creates a new file. realpathSync on the file itself ENOENTs;
+    // must fall through to the parent. Confirm symlink on the parent is
+    // still followed.
+    const symlinkRoot = path.join(tmpRoot, 'elsewhere2');
+    fs.symlinkSync(realMemoryDir, symlinkRoot);
+    const decision = decideWrite({
+      filePath: path.join(symlinkRoot, 'brand-new.md'),
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
   });
 });
