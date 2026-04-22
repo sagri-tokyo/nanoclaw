@@ -11,6 +11,16 @@ const READER_MAX_TOKENS = 1024;
 const READER_TIMEOUT_MS = 30000;
 const ANTHROPIC_VERSION = '2023-06-01';
 
+// Post-validation bounds on reader output. Caps prevent a reader response
+// from re-embedding the full injection payload through the intent paraphrase
+// or extracted_data scalar values. Scalars-only rule on extracted_data blocks
+// the "nested object with instructions" echo path.
+export const MAX_INTENT_LENGTH = 500;
+export const MAX_EXTRACTED_VALUE_LENGTH = 200;
+export const MAX_EXTRACTED_KEYS = 32;
+export const MAX_RISK_FLAGS = 16;
+export const MAX_RISK_FLAG_LENGTH = 64;
+
 export interface SourceMetadata {
   sender?: string;
   chat_jid?: string;
@@ -33,9 +43,11 @@ export interface SourceProvenance {
   url?: string;
 }
 
+export type ExtractedScalar = string | number | boolean;
+
 export interface ReaderOutput {
   intent: string;
-  extracted_data: Record<string, unknown>;
+  extracted_data: Record<string, ExtractedScalar>;
   confidence: number;
   risk_flags: string[];
   source_provenance: SourceProvenance;
@@ -143,12 +155,12 @@ function postMessages(
   });
 }
 
-function parseReaderJson(text: string): {
-  intent: unknown;
-  extracted_data: unknown;
-  confidence: unknown;
-  risk_flags: unknown;
-} {
+function parseAndValidateReaderOutput(
+  text: string,
+): Pick<
+  ReaderOutput,
+  'intent' | 'extracted_data' | 'confidence' | 'risk_flags'
+> {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
   const candidate = fenced ? fenced[1] : trimmed;
@@ -156,47 +168,72 @@ function parseReaderJson(text: string): {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new Error('reader: response is not a JSON object');
   const r = parsed as Record<string, unknown>;
-  return {
-    intent: r.intent,
-    extracted_data: r.extracted_data,
-    confidence: r.confidence,
-    risk_flags: r.risk_flags,
-  };
-}
 
-function validateReaderFields(
-  fields: ReturnType<typeof parseReaderJson>,
-): Pick<
-  ReaderOutput,
-  'intent' | 'extracted_data' | 'confidence' | 'risk_flags'
-> {
-  if (typeof fields.intent !== 'string' || fields.intent.length === 0)
+  if (typeof r.intent !== 'string' || r.intent.length === 0)
     throw new Error('reader: intent must be a non-empty string');
+  if (r.intent.length > MAX_INTENT_LENGTH)
+    throw new Error(
+      `reader: intent exceeds ${MAX_INTENT_LENGTH} chars (got ${r.intent.length})`,
+    );
+  const intent: string = r.intent;
+
   if (
-    !fields.extracted_data ||
-    typeof fields.extracted_data !== 'object' ||
-    Array.isArray(fields.extracted_data)
+    !r.extracted_data ||
+    typeof r.extracted_data !== 'object' ||
+    Array.isArray(r.extracted_data)
   )
     throw new Error('reader: extracted_data must be an object');
+  const rawExtracted = r.extracted_data as Record<string, unknown>;
+  const extractedKeys = Object.keys(rawExtracted);
+  if (extractedKeys.length > MAX_EXTRACTED_KEYS)
+    throw new Error(
+      `reader: extracted_data has ${extractedKeys.length} keys (max ${MAX_EXTRACTED_KEYS})`,
+    );
+  const extracted_data: Record<string, string | number | boolean> = {};
+  for (const key of extractedKeys) {
+    const value = rawExtracted[key];
+    if (typeof value === 'string') {
+      if (value.length > MAX_EXTRACTED_VALUE_LENGTH)
+        throw new Error(
+          `reader: extracted_data["${key}"] exceeds ${MAX_EXTRACTED_VALUE_LENGTH} chars`,
+        );
+      extracted_data[key] = value;
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      extracted_data[key] = value;
+    } else {
+      throw new Error(
+        `reader: extracted_data["${key}"] must be string, number, or boolean (got ${typeof value})`,
+      );
+    }
+  }
+
   if (
-    typeof fields.confidence !== 'number' ||
-    Number.isNaN(fields.confidence) ||
-    fields.confidence < 0 ||
-    fields.confidence > 1
+    typeof r.confidence !== 'number' ||
+    Number.isNaN(r.confidence) ||
+    r.confidence < 0 ||
+    r.confidence > 1
   )
     throw new Error('reader: confidence must be a number in [0, 1]');
-  if (!Array.isArray(fields.risk_flags))
+  const confidence: number = r.confidence;
+
+  if (!Array.isArray(r.risk_flags))
     throw new Error('reader: risk_flags must be an array');
-  for (const flag of fields.risk_flags) {
+  if (r.risk_flags.length > MAX_RISK_FLAGS)
+    throw new Error(
+      `reader: risk_flags has ${r.risk_flags.length} entries (max ${MAX_RISK_FLAGS})`,
+    );
+  const risk_flags: string[] = [];
+  for (const flag of r.risk_flags) {
     if (typeof flag !== 'string')
       throw new Error('reader: each risk_flag must be a string');
+    if (flag.length > MAX_RISK_FLAG_LENGTH)
+      throw new Error(
+        `reader: risk_flag exceeds ${MAX_RISK_FLAG_LENGTH} chars`,
+      );
+    risk_flags.push(flag);
   }
-  return {
-    intent: fields.intent,
-    extracted_data: fields.extracted_data as Record<string, unknown>,
-    confidence: fields.confidence,
-    risk_flags: fields.risk_flags as string[],
-  };
+
+  return { intent, extracted_data, confidence, risk_flags };
 }
 
 function buildUserMessage(input: ReaderInput): string {
@@ -254,7 +291,7 @@ export async function readUntrustedContent(
   );
   if (!textBlock) throw new Error('reader: no text block in API response');
 
-  const parsed = validateReaderFields(parseReaderJson(textBlock.text));
+  const parsed = parseAndValidateReaderOutput(textBlock.text);
 
   const provenance: SourceProvenance = {
     source: input.source,

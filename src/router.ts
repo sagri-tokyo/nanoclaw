@@ -33,19 +33,25 @@ export function formatMessages(
   return `${header}<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
-function renderReaderOutput(out: ReaderOutput): string {
+function renderReaderOutput(out: ReaderOutput, indent: string): string {
   return [
-    `  <intent>${escapeXml(out.intent)}</intent>`,
-    `  <extracted_data>${escapeXml(JSON.stringify(out.extracted_data))}</extracted_data>`,
-    `  <confidence>${out.confidence}</confidence>`,
-    `  <risk_flags>${out.risk_flags.map(escapeXml).join(',')}</risk_flags>`,
+    `${indent}<intent>${escapeXml(out.intent)}</intent>`,
+    `${indent}<extracted_data>${escapeXml(JSON.stringify(out.extracted_data))}</extracted_data>`,
+    `${indent}<confidence>${out.confidence}</confidence>`,
+    `${indent}<risk_flags>${out.risk_flags.map(escapeXml).join(',')}</risk_flags>`,
   ].join('\n');
 }
 
+interface MessageReaderResult {
+  body: ReaderOutput;
+  quoted: ReaderOutput | null;
+}
+
 /**
- * Two-agent pipeline variant of formatMessages: each message body is routed
- * through the reader (Claude Sonnet) before reaching the actor. The raw body
- * is discarded — only the structured reader output is exposed to the actor.
+ * Two-agent pipeline variant of formatMessages: each untrusted content blob
+ * (message body and any quoted parent message) is routed through the reader
+ * (Claude Sonnet) before reaching the actor. The raw bodies are discarded —
+ * only the structured reader output is exposed to the actor.
  *
  * sagri-tokyo/sagri-ai#35.
  */
@@ -53,21 +59,39 @@ export async function formatMessagesViaReader(
   messages: NewMessage[],
   timezone: string,
 ): Promise<string> {
-  const readerOutputs = await Promise.all(
-    messages.map((m) =>
-      readUntrustedContent({
-        raw: m.content,
-        source: 'slack_message',
-        sourceMetadata: {
-          sender: m.sender_name,
-          chat_jid: m.chat_jid,
-          timestamp: m.timestamp,
-        },
-      }),
-    ),
+  const results: MessageReaderResult[] = await Promise.all(
+    messages.map(async (m) => {
+      const [body, quoted] = await Promise.all([
+        readUntrustedContent({
+          raw: m.content,
+          source: 'slack_message',
+          sourceMetadata: {
+            sender: m.sender_name,
+            chat_jid: m.chat_jid,
+            timestamp: m.timestamp,
+          },
+        }),
+        m.reply_to_message_content
+          ? readUntrustedContent({
+              raw: m.reply_to_message_content,
+              source: 'slack_message',
+              sourceMetadata: {
+                sender: m.reply_to_sender_name,
+                chat_jid: m.chat_jid,
+                timestamp: m.timestamp,
+              },
+            })
+          : Promise.resolve(null),
+      ]);
+      return { body, quoted };
+    }),
   );
 
-  const flagged = readerOutputs.filter((o) => o.risk_flags.length > 0).length;
+  const flagged = results.filter(
+    (r) =>
+      r.body.risk_flags.length > 0 ||
+      (r.quoted !== null && r.quoted.risk_flags.length > 0),
+  ).length;
   if (flagged > 0) {
     logger.info(
       { flagged, total: messages.length },
@@ -80,8 +104,11 @@ export async function formatMessagesViaReader(
     const replyAttr = m.reply_to_message_id
       ? ` reply_to="${escapeXml(m.reply_to_message_id)}"`
       : '';
-    const readerBlock = renderReaderOutput(readerOutputs[i]);
-    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>\n${readerBlock}\n</message>`;
+    const { body, quoted } = results[i];
+    const quotedBlock = quoted
+      ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name ?? '')}">\n${renderReaderOutput(quoted, '    ')}\n  </quoted_message>`
+      : '';
+    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${quotedBlock}\n${renderReaderOutput(body, '  ')}\n</message>`;
   });
 
   const header =
