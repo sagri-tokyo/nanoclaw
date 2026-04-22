@@ -126,15 +126,50 @@ export interface DecideWriteInput {
 // creating `/tmp/link -> /workspace/group/memory` cannot smuggle a write
 // through `/tmp/link/poison.md` — realpath resolves the parent to the real
 // memory directory, so the write is recognised as inside. See sagri-ai#74.
+//
+// Also follows dangling symlinks at the leaf or at a missing ancestor:
+// `realpathSync` fails ENOENT if a symlink's target doesn't exist yet, which
+// would otherwise let an attacker smuggle writes via
+// `/tmp/link -> /workspace/group/memory/poison.md` while poison.md is
+// absent. We readlink manually in that case. See sagri-ai#64.
+//
+// Loops and runaway chains return the unresolved path — outside memoryDir,
+// so the gate allows, which is safe because the kernel will also ELOOP on
+// the actual write.
+const MAX_SYMLINK_HOPS = 40;
 function canonicalize(p: string): string {
   let current = path.resolve(p);
   const suffix: string[] = [];
+  let hops = 0;
   while (true) {
     try {
       const real = fs.realpathSync(current);
       return suffix.length === 0 ? real : path.join(real, ...suffix.reverse());
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
+        return suffix.length === 0
+          ? current
+          : path.join(current, ...suffix.reverse());
+      }
+      if (code !== 'ENOENT') throw err;
+      let linkTarget: string | null = null;
+      try {
+        linkTarget = fs.readlinkSync(current);
+      } catch {
+        linkTarget = null;
+      }
+      if (linkTarget !== null) {
+        if (++hops > MAX_SYMLINK_HOPS) {
+          return suffix.length === 0
+            ? current
+            : path.join(current, ...suffix.reverse());
+        }
+        current = path.isAbsolute(linkTarget)
+          ? linkTarget
+          : path.resolve(path.dirname(current), linkTarget);
+        continue;
+      }
       const parent = path.dirname(current);
       if (parent === current) return path.resolve(p);
       suffix.push(path.basename(current));

@@ -200,7 +200,9 @@ describe('decideWrite', () => {
       content: topicBody({ source: 'slack_message' }),
       memoryDir,
     });
-    expect(expectDenied(decision).reason).toMatch(/non-admin source.*slack_message/i);
+    expect(expectDenied(decision).reason).toMatch(
+      /non-admin source.*slack_message/i,
+    );
   });
 
   it('rejects non-admin source (github_issue)', () => {
@@ -209,7 +211,9 @@ describe('decideWrite', () => {
       content: topicBody({ source: 'github_issue' }),
       memoryDir,
     });
-    expect(expectDenied(decision).reason).toMatch(/non-admin source.*github_issue/i);
+    expect(expectDenied(decision).reason).toMatch(
+      /non-admin source.*github_issue/i,
+    );
   });
 
   it('normalises trailing slash on memory dir', () => {
@@ -356,5 +360,54 @@ describe('decideWrite symlink resolution (sagri-ai#74)', () => {
       memoryDir: realMemoryDir,
     });
     expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('denies Write when leaf is a dangling symlink pointing into memory dir', () => {
+    // Attack: the leaf itself is a symlink whose target does not exist yet.
+    // realpathSync fails because the target is absent, so a naive fallback
+    // walks up to the parent and loses the symlink-ness — path looks
+    // "outside" memory. Kernel open(O_CREAT) follows the symlink and lands
+    // inside memory without provenance. Canonicalize must readlink
+    // dangling-symlink leaves instead of treating them as regular
+    // non-existent files.
+    const dangling = path.join(tmpRoot, 'dangling-leaf');
+    const targetInsideMemory = path.join(realMemoryDir, 'poison.md');
+    fs.symlinkSync(targetInsideMemory, dangling);
+    const decision = decideWrite({
+      filePath: dangling,
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('denies Write when leaf is a relative dangling symlink into memory dir', () => {
+    // Same attack, relative-target variant. Canonicalize must resolve the
+    // relative target against the symlink's parent dir, not cwd.
+    const dangling = path.join(tmpRoot, 'rel-dangling');
+    fs.symlinkSync(path.join('memory', 'poison.md'), dangling);
+    const decision = decideWrite({
+      filePath: dangling,
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
+  });
+
+  it('handles symlink loops without hanging', () => {
+    // Two symlinks pointing at each other. Neither resolves; canonicalize
+    // must bound its work rather than loop forever. Since the chain never
+    // reaches a real inode, the path resolves to "outside" memory (not
+    // exploitable because the kernel will also ELOOP on write).
+    const loopA = path.join(tmpRoot, 'loop-a');
+    const loopB = path.join(tmpRoot, 'loop-b');
+    fs.symlinkSync(loopB, loopA);
+    fs.symlinkSync(loopA, loopB);
+    const decision = decideWrite({
+      filePath: loopA,
+      content: 'no frontmatter',
+      memoryDir: realMemoryDir,
+    });
+    expect(decision).toEqual({ allow: true });
   });
 });
