@@ -150,9 +150,9 @@ describe('task scheduler', () => {
     });
 
     it('does not silence narration that only mentions the marker inline', () => {
-      expect(isSilentResult('Per policy, I would output __SILENT__ here.')).toBe(
-        false,
-      );
+      expect(
+        isSilentResult('Per policy, I would output __SILENT__ here.'),
+      ).toBe(false);
     });
 
     it('does not silence a normal task summary', () => {
@@ -170,15 +170,13 @@ describe('task scheduler', () => {
     });
 
     it('silences the marker preceded by a reasoning line', () => {
-      expect(
-        isSilentResult('No pages processed this tick.\n__SILENT__'),
-      ).toBe(true);
+      expect(isSilentResult('No pages processed this tick.\n__SILENT__')).toBe(
+        true,
+      );
     });
 
     it('silences the marker followed by trailing narration', () => {
-      expect(
-        isSilentResult('__SILENT__\n(nothing to report)'),
-      ).toBe(true);
+      expect(isSilentResult('__SILENT__\n(nothing to report)')).toBe(true);
     });
 
     it('does not silence a title containing underscores but not the sentinel', () => {
