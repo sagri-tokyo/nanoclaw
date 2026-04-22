@@ -156,8 +156,9 @@ function canonicalize(p: string): string {
       let linkTarget: string | null = null;
       try {
         linkTarget = fs.readlinkSync(current);
-      } catch {
-        linkTarget = null;
+      } catch (linkErr) {
+        const linkCode = (linkErr as NodeJS.ErrnoException).code;
+        if (linkCode !== 'ENOENT' && linkCode !== 'EINVAL') throw linkErr;
       }
       if (linkTarget !== null) {
         if (++hops > MAX_SYMLINK_HOPS) {
