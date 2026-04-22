@@ -121,10 +121,13 @@ Untrusted message bodies (Slack, and — in future — GitHub issue bodies, Noti
 
 **Test coverage.** `src/reader.test.ts` covers schema validation, the prompt-injection happy path (risk flag raised, payload not echoed into intent), API error handling, and auth mode selection. `src/reader-pipeline.test.ts` end-to-end asserts that an injection payload in a Slack message body is absent from the prompt string handed to the container.
 
+**Reader RPC (container-side access).** `src/reader-rpc.ts` exposes the reader primitive as an HTTP endpoint so skills running inside the container can launder their own fetches. `POST /rpc` with `{"method": "read_untrusted", "params": {raw, source, source_metadata}}` → 200 `ReaderOutput`. Bound to `PROXY_BIND_HOST` (loopback on macOS/WSL, docker0 on Linux); reachable from containers via `host.docker.internal`, not from LAN. Containers receive `NANOCLAW_READER_RPC_URL` in their environment. Trust model: containers are semi-trusted — they can burn reader API calls (cost DoS bounded by Anthropic rate limits) but cannot extract host credentials; the reader makes its own outbound Anthropic call and never echoes env vars into its output. Reader errors surface as HTTP 5xx with no raw-content fallback. Request body is capped at 256 KiB. `src/reader-rpc.test.ts` covers schema validation, unknown methods, size limits, and asserts the injection payload is absent from the response even when the reader flags it.
+
 **Scope in this iteration.**
 
-- Slack message bodies — laundered.
-- GitHub issue bodies / Notion pages / web content fetched **by the agent from inside the container** via its own tools (e.g. `gh issue view`, `curl`) — **not yet laundered**. These paths are read by the actor without a reader pass. Tracked as follow-ups: the container must either use reader-wrapped tools (MCP) or lose access to raw-fetch tools entirely.
+- Slack message bodies — laundered via `formatMessagesViaReader` (host path).
+- Container-side skill fetches — reader primitive available via the Reader RPC; skill migration to actually use it is tracked separately (sagri-ai#83–#87).
+- Raw-fetch tools (`curl`, `gh`, `wget`) are still available in the container image. Stripping them is tracked in sagri-ai#86 and is blocked on all skill migrations landing first.
 
 ### 6. IPC Authorization
 
