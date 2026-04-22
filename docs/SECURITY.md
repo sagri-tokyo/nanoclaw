@@ -115,6 +115,8 @@ Untrusted message bodies (Slack, and — in future — GitHub issue bodies, Noti
 
 **Static boundary.** The reader and actor are separate processes: the reader runs in the host process (direct Anthropic API call), the actor runs inside a Docker container with its own tool inventory. The host does not forward raw Slack bodies into the container on any code path.
 
+**Sender-name allowlist.** Slack display names (`sender_name`, `reply_to_sender_name`) are attacker-controlled strings and reach the actor prompt as XML attributes, bypassing the reader. `formatMessagesViaReader` enforces a Unicode-letter/digit + `._-'@` + space allowlist, 1–64 chars, fail-closed. Prompt-structure-breaking characters (`<`, `>`, `"`, `{`, `}`, colons, backticks, newlines) are rejected before the prompt is assembled. The `<pipeline>` note also tells the actor the `sender` and `from` attributes are opaque identifiers, not instructions.
+
 **Reader never writes memory.** The reader produces `source_provenance` fields for downstream auditing but does not itself invoke the memory gate. Memory writes remain admin-source-only per §4 — reader-derived content cannot be persisted to long-term memory, only used for the current session's prompt.
 
 **Test coverage.** `src/reader.test.ts` covers schema validation, the prompt-injection happy path (risk flag raised, payload not echoed into intent), API error handling, and auth mode selection. `src/reader-pipeline.test.ts` end-to-end asserts that an injection payload in a Slack message body is absent from the prompt string handed to the container.
