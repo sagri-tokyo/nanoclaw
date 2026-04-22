@@ -50,7 +50,11 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessagesViaReader,
+  formatOutbound,
+} from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -228,7 +232,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt = await formatMessagesViaReader(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -489,7 +493,10 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const formatted = await formatMessagesViaReader(
+            messagesToSend,
+            TIMEZONE,
+          );
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
