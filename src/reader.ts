@@ -161,10 +161,7 @@ function parseAndValidateReaderOutput(
   ReaderOutput,
   'intent' | 'extracted_data' | 'confidence' | 'risk_flags'
 > {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
-  const candidate = fenced ? fenced[1] : trimmed;
-  const parsed: unknown = JSON.parse(candidate);
+  const parsed: unknown = JSON.parse(text.trim());
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new Error('reader: response is not a JSON object');
   const r = parsed as Record<string, unknown>;
@@ -189,7 +186,7 @@ function parseAndValidateReaderOutput(
     throw new Error(
       `reader: extracted_data has ${extractedKeys.length} keys (max ${MAX_EXTRACTED_KEYS})`,
     );
-  const extracted_data: Record<string, string | number | boolean> = {};
+  const extracted_data: Record<string, ExtractedScalar> = {};
   for (const key of extractedKeys) {
     const value = rawExtracted[key];
     if (typeof value === 'string') {
@@ -245,11 +242,10 @@ function buildUserMessage(input: ReaderInput): string {
     meta.timestamp = input.sourceMetadata.timestamp;
   if (input.sourceMetadata.url) meta.url = input.sourceMetadata.url;
 
-  const metaLines = Object.entries(meta)
-    .map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`)
-    .join('\n');
-
-  return `<source_metadata>\n${metaLines}\n</source_metadata>\n<untrusted_content>\n${input.raw}\n</untrusted_content>`;
+  // Metadata is emitted as a JSON object so the reader model cannot be
+  // tricked by sender/url values that look like further structured fields.
+  // JSON encoding makes the extent of each value unambiguous.
+  return `<source_metadata>${JSON.stringify(meta)}</source_metadata>\n<untrusted_content>\n${input.raw}\n</untrusted_content>`;
 }
 
 /**
@@ -284,7 +280,23 @@ export async function readUntrustedContent(
   if (status < 200 || status >= 300)
     throw new Error(`reader: anthropic API ${status}: ${body.slice(0, 500)}`);
 
-  const response: AnthropicMessageResponse = JSON.parse(body);
+  const parsedBody: unknown = JSON.parse(body);
+  if (
+    !parsedBody ||
+    typeof parsedBody !== 'object' ||
+    Array.isArray(parsedBody)
+  )
+    throw new Error('reader: API response is not a JSON object');
+  const responseRecord = parsedBody as Record<string, unknown>;
+  if (!Array.isArray(responseRecord.content))
+    throw new Error('reader: API response.content is not an array');
+  if (
+    typeof responseRecord.model !== 'string' ||
+    responseRecord.model.length === 0
+  )
+    throw new Error('reader: API response.model missing or not a string');
+  const response = responseRecord as unknown as AnthropicMessageResponse;
+
   const textBlock = response.content.find(
     (b): b is { type: 'text'; text: string } =>
       b.type === 'text' && typeof b.text === 'string',
@@ -296,7 +308,7 @@ export async function readUntrustedContent(
   const provenance: SourceProvenance = {
     source: input.source,
     timestamp: new Date().toISOString(),
-    author_model: response.model || READER_MODEL,
+    author_model: response.model,
   };
   if (input.sourceMetadata.sender)
     provenance.sender = input.sourceMetadata.sender;

@@ -275,7 +275,7 @@ describe('reader', () => {
     ).rejects.toThrow(/invalid source/);
   });
 
-  it('tolerates a fenced ```json response block', async () => {
+  it('rejects a fenced code-block response (system prompt forbids fences)', async () => {
     respondWith = () => ({
       status: 200,
       body: {
@@ -297,12 +297,84 @@ describe('reader', () => {
       },
     });
 
+    await expect(
+      readUntrustedContent({
+        raw: 'x',
+        source: 'slack_message',
+        sourceMetadata: {},
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects API response when content is not an array', async () => {
+    respondWith = () => ({
+      status: 200,
+      body: { model: READER_MODEL, content: 'not an array' },
+    });
+
+    await expect(
+      readUntrustedContent({
+        raw: 'x',
+        source: 'slack_message',
+        sourceMetadata: {},
+      }),
+    ).rejects.toThrow(/content is not an array/);
+  });
+
+  it('rejects API response when model field is missing', async () => {
+    respondWith = () => ({
+      status: 200,
+      body: {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              intent: 'ok',
+              extracted_data: {},
+              confidence: 0.5,
+              risk_flags: [],
+            }),
+          },
+        ],
+      },
+    });
+
+    await expect(
+      readUntrustedContent({
+        raw: 'x',
+        source: 'slack_message',
+        sourceMetadata: {},
+      }),
+    ).rejects.toThrow(/model missing or not a string/);
+  });
+
+  it('records author_model from the API response (no silent fallback)', async () => {
+    respondWith = () => ({
+      status: 200,
+      body: {
+        model: 'claude-sonnet-4-6-20250101',
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              intent: 'ok',
+              extracted_data: {},
+              confidence: 0.5,
+              risk_flags: [],
+            }),
+          },
+        ],
+      },
+    });
+
     const out = await readUntrustedContent({
       raw: 'x',
       source: 'slack_message',
       sourceMetadata: {},
     });
-    expect(out.intent).toBe('ok');
+    expect(out.source_provenance.author_model).toBe(
+      'claude-sonnet-4-6-20250101',
+    );
   });
 
   it('throws when neither API key nor OAuth token is set', async () => {
