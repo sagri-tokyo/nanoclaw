@@ -394,20 +394,40 @@ describe('decideWrite symlink resolution (sagri-ai#74)', () => {
     expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
   });
 
-  it('handles symlink loops without hanging', () => {
-    // Two symlinks pointing at each other. Neither resolves; canonicalize
-    // must bound its work rather than loop forever. Since the chain never
-    // reaches a real inode, the path resolves to "outside" memory (not
-    // exploitable because the kernel will also ELOOP on write).
+  it('throws on symlink loops rather than failing open', () => {
+    // Two symlinks pointing at each other. realpathSync surfaces ELOOP and
+    // canonicalize must propagate — silently returning the unresolved path
+    // would let an ELOOP-configured memoryDir bypass the containment check
+    // (the comparison is a string match; there's no kernel write to backstop
+    // the failure).
     const loopA = path.join(tmpRoot, 'loop-a');
     const loopB = path.join(tmpRoot, 'loop-b');
     fs.symlinkSync(loopB, loopA);
     fs.symlinkSync(loopA, loopB);
+    expect(() =>
+      decideWrite({
+        filePath: loopA,
+        content: 'no frontmatter',
+        memoryDir: realMemoryDir,
+      }),
+    ).toThrow(/ELOOP/);
+  });
+
+  it('denies Write through a multi-hop dangling symlink chain into memory dir', () => {
+    // /tmp/hop1 -> /tmp/hop2 -> /workspace/.../poison.md, none of which
+    // exist as real files. canonicalize must walk both manual hops, then
+    // realpath the parent of the final target. Guards against the
+    // single-hop tests passing while a multi-hop chain regresses.
+    const finalTarget = path.join(realMemoryDir, 'poison.md');
+    const hop2 = path.join(tmpRoot, 'hop2');
+    const hop1 = path.join(tmpRoot, 'hop1');
+    fs.symlinkSync(finalTarget, hop2);
+    fs.symlinkSync(hop2, hop1);
     const decision = decideWrite({
-      filePath: loopA,
+      filePath: hop1,
       content: 'no frontmatter',
       memoryDir: realMemoryDir,
     });
-    expect(decision).toEqual({ allow: true });
+    expect(expectDenied(decision).reason).toMatch(/frontmatter/i);
   });
 });

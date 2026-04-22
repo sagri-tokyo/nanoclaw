@@ -133,10 +133,13 @@ export interface DecideWriteInput {
 // `/tmp/link -> /workspace/group/memory/poison.md` while poison.md is
 // absent. We readlink manually in that case. See sagri-ai#64.
 //
-// Loops and runaway chains return the unresolved path — outside memoryDir,
-// so the gate allows, which is safe because the kernel will also ELOOP on
-// the actual write.
-const MAX_SYMLINK_HOPS = 40;
+// Errors propagate. ELOOP from `realpathSync` and an exceeded manual hop
+// cap both throw; callers must treat unresolvable paths as a hard failure
+// rather than implicit allow, because `memoryDir` resolution is a string
+// comparison (no kernel write would block a bypass) — see sagri-ai#64
+// review. The hop cap bounds only the manual readlink chain (kernel
+// already enforces SYMLOOP_MAX inside `realpathSync`).
+const MAX_MANUAL_SYMLINK_HOPS = 40;
 function canonicalize(p: string): string {
   let current = path.resolve(p);
   const suffix: string[] = [];
@@ -146,26 +149,19 @@ function canonicalize(p: string): string {
       const real = fs.realpathSync(current);
       return suffix.length === 0 ? real : path.join(real, ...suffix.reverse());
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ELOOP') {
-        return suffix.length === 0
-          ? current
-          : path.join(current, ...suffix.reverse());
-      }
-      if (code !== 'ENOENT') throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       let linkTarget: string | null = null;
       try {
         linkTarget = fs.readlinkSync(current);
       } catch (linkErr) {
-        const linkCode = (linkErr as NodeJS.ErrnoException).code;
-        if (linkCode !== 'ENOENT' && linkCode !== 'EINVAL') throw linkErr;
+        if ((linkErr as NodeJS.ErrnoException).code !== 'ENOENT')
+          throw linkErr;
       }
       if (linkTarget !== null) {
-        if (++hops > MAX_SYMLINK_HOPS) {
-          return suffix.length === 0
-            ? current
-            : path.join(current, ...suffix.reverse());
-        }
+        if (++hops > MAX_MANUAL_SYMLINK_HOPS)
+          throw new Error(
+            `canonicalize: manual symlink chain exceeds ${MAX_MANUAL_SYMLINK_HOPS} hops at ${p}`,
+          );
         current = path.isAbsolute(linkTarget)
           ? linkTarget
           : path.resolve(path.dirname(current), linkTarget);
