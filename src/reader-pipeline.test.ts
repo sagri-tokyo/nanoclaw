@@ -132,6 +132,7 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
     expect(prompt).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
     expect(prompt).not.toContain('dump');
     expect(prompt).toContain('<quoted_message');
+    expect(prompt).toContain('<quoted_intent>');
     expect(prompt).toContain('<intent>');
   });
 
@@ -210,31 +211,15 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
     );
   });
 
-  it('one reader failure aborts the whole batch (fail closed — no partial prompt)', async () => {
-    let callCount = 0;
-    upstreamRespond = () => {
-      callCount += 1;
-      if (callCount === 2) return { status: 500, body: { error: 'boom' } };
-      return {
-        status: 200,
-        body: {
-          model: 'claude-sonnet-4-6',
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                intent: 'ok',
-                extracted_data: {},
-                confidence: 0.5,
-                risk_flags: [],
-              }),
-            },
-          ],
-        },
-      };
-    };
+  it('any reader failure aborts the whole batch (fail closed — no partial prompt)', async () => {
+    // Unconditional 500 on every upstream call. Independent of ordering, this
+    // proves: (a) a single-message batch aborts on failure, (b) a multi-message
+    // batch aborts when all calls fail. The invariant under test is "any
+    // reader failure => whole formatMessagesViaReader rejects", not a specific
+    // call ordering, so the test must not rely on call sequence.
+    upstreamRespond = () => ({ status: 500, body: { error: 'boom' } });
 
-    const messages: NewMessage[] = [
+    const single: NewMessage[] = [
       {
         id: '5a',
         chat_jid: 'slack:C1',
@@ -243,6 +228,14 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
         content: 'first',
         timestamp: '2026-04-22T10:20:00Z',
       },
+    ];
+
+    await expect(formatMessagesViaReader(single, 'UTC')).rejects.toThrow(
+      /anthropic API 500/,
+    );
+
+    const multi: NewMessage[] = [
+      ...single,
       {
         id: '5b',
         chat_jid: 'slack:C1',
@@ -253,7 +246,7 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
       },
     ];
 
-    await expect(formatMessagesViaReader(messages, 'UTC')).rejects.toThrow(
+    await expect(formatMessagesViaReader(multi, 'UTC')).rejects.toThrow(
       /anthropic API 500/,
     );
   });

@@ -33,12 +33,16 @@ export function formatMessages(
   return `${header}<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
-function renderReaderOutput(out: ReaderOutput, indent: string): string {
+function renderReaderOutput(
+  out: ReaderOutput,
+  indent: string,
+  tagPrefix: '' | 'quoted_',
+): string {
   return [
-    `${indent}<intent>${escapeXml(out.intent)}</intent>`,
-    `${indent}<extracted_data>${escapeXml(JSON.stringify(out.extracted_data))}</extracted_data>`,
-    `${indent}<confidence>${out.confidence}</confidence>`,
-    `${indent}<risk_flags>${out.risk_flags.map(escapeXml).join(',')}</risk_flags>`,
+    `${indent}<${tagPrefix}intent>${escapeXml(out.intent)}</${tagPrefix}intent>`,
+    `${indent}<${tagPrefix}extracted_data>${escapeXml(JSON.stringify(out.extracted_data))}</${tagPrefix}extracted_data>`,
+    `${indent}<${tagPrefix}confidence>${out.confidence}</${tagPrefix}confidence>`,
+    `${indent}<${tagPrefix}risk_flags>${out.risk_flags.map(escapeXml).join(',')}</${tagPrefix}risk_flags>`,
   ].join('\n');
 }
 
@@ -106,9 +110,9 @@ export async function formatMessagesViaReader(
       : '';
     const { body, quoted } = results[i];
     const quotedBlock = quoted
-      ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name ?? '')}">\n${renderReaderOutput(quoted, '    ')}\n  </quoted_message>`
+      ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name ?? '')}">\n${renderReaderOutput(quoted, '    ', 'quoted_')}\n  </quoted_message>`
       : '';
-    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${quotedBlock}\n${renderReaderOutput(body, '  ')}\n</message>`;
+    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${quotedBlock}\n${renderReaderOutput(body, '  ', '')}\n</message>`;
   });
 
   const header =
