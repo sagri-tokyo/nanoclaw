@@ -50,7 +50,7 @@ esac
 
 ### 2. Reader helpers
 
-Three shell functions. `launder` POSTs one fetched body. `is_injection_flagged` tests a reader output for the prompt_injection risk flag. `launder_array` iterates a JSON array and launders a named field on each record (see its Usage comment for the full contract). All three abort (`exit 1`) on any failure — the caller never sees a fallback.
+Three shell functions. `launder` POSTs one fetched body and aborts (`exit 1`) on any RPC or shape failure. `launder_array` iterates a JSON array and launders a named field on each record (see its Usage comment for the full contract); it aborts on the same class of failure. `is_injection_flagged` is a predicate meant for `if` gating — exit 0 when the reader output carries a `prompt_injection` flag, exit 1 when clean. No function has a raw-body fallback path.
 
 ```bash
 # Usage: launder <raw> <source> <url>
@@ -105,8 +105,8 @@ is_injection_flagged() {
 #   - Drop with WARN log if the reader flags prompt_injection.
 #   - Emit the original record plus {source_url, reader} where source_url
 #     mirrors record[url_field]. Callers must read source_url, not .id /
-#     .html_url / etc. — cross-channel parity with the web block is spelled
-#     out at step 5.
+#     .html_url / etc. — step 5 consumes source_url uniformly across arXiv,
+#     GitHub, and web records.
 # Writes the survivors to <output.json> as a JSON array (possibly empty).
 # mapfile + for (not while-read in a pipeline) so a launder() exit in the
 # body kills the whole script. A pipeline subshell would swallow the exit
@@ -277,7 +277,7 @@ Use curl to fetch content from authoritative sources in the domain:
 - ISRIC World Soil Information: `https://www.isric.org`
 - Google Earth Engine documentation: `https://developers.google.com/earth-engine`
 
-Fetch, strip non-content tags, truncate to 3000 characters, then launder the truncated body. The 3000-char cap is well under the reader's 256 KB request limit and keeps reader latency bounded. The filename hash is a collision-avoidance detail; do not try to reconstruct the URL from it.
+Fetch, strip non-content tags, truncate to 3000 characters, then launder the truncated body. The 3000-char cap is well under the reader's 256 KB request limit and keeps reader latency bounded.
 
 ```bash
 body=$(curl -sL --max-time 15 "$URL" | python3 -c "
@@ -310,6 +310,9 @@ else
   if is_injection_flagged "$reader"; then
     echo "WARN: dropped web source $URL (risk_flags includes prompt_injection)" >&2
   else
+    # url_hash is a collision-avoidance suffix on the filename; the canonical
+    # URL lives inside the file under source_url. Do not try to reconstruct
+    # the URL from the hash.
     url_hash=$(printf '%s' "$URL" | shasum | cut -d' ' -f1)
     # Emit a single-element JSON array so every *-laundered.json file has
     # the same top-level shape (array of {source_url, reader, ...}). Step 5
