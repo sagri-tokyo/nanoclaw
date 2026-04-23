@@ -26,6 +26,19 @@ function assertSenderNameAllowed(
   }
 }
 
+// Opaque message-id tokens (Slack TS strings, short synthetic IDs). ASCII
+// alphanumerics plus a minimal punctuation set; rejects characters that
+// could break the enclosing XML attribute or confuse the actor.
+const MESSAGE_ID_PATTERN = /^[\w.\-:]{1,64}$/;
+
+function assertMessageIdAllowed(id: string, chatJid: string): void {
+  if (!MESSAGE_ID_PATTERN.test(id)) {
+    throw new Error(
+      `router: reply_to_message_id rejected by allowlist (length=${id.length}, chat_jid=${chatJid})`,
+    );
+  }
+}
+
 export function formatMessages(
   messages: NewMessage[],
   timezone: string,
@@ -79,12 +92,18 @@ export async function formatMessagesViaReader(
 ): Promise<string> {
   for (const m of messages) {
     assertSenderNameAllowed(m.sender_name, 'sender_name', m.chat_jid);
-    if (m.reply_to_sender_name !== undefined && m.reply_to_sender_name !== null) {
+    if (
+      m.reply_to_sender_name !== undefined &&
+      m.reply_to_sender_name !== null
+    ) {
       assertSenderNameAllowed(
         m.reply_to_sender_name,
         'reply_to_sender_name',
         m.chat_jid,
       );
+    }
+    if (m.reply_to_message_id !== undefined && m.reply_to_message_id !== null) {
+      assertMessageIdAllowed(m.reply_to_message_id, m.chat_jid);
     }
   }
 
