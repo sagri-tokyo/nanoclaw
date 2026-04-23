@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock logger
 vi.mock('./logger.js', () => ({
@@ -16,8 +16,46 @@ vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
 }));
 
+// Mock os and fs so we can simulate Linux-without-docker0 and WSL on any host
+const mockPlatform: ReturnType<
+  typeof vi.fn<(...args: unknown[]) => NodeJS.Platform>
+> = vi.fn();
+const mockNetworkInterfaces: ReturnType<
+  typeof vi.fn<(...args: unknown[]) => NodeJS.Dict<os.NetworkInterfaceInfo[]>>
+> = vi.fn();
+const mockExistsSync: ReturnType<typeof vi.fn<(path: string) => boolean>> =
+  vi.fn();
+
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof os>('os');
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      platform: () => mockPlatform(),
+      networkInterfaces: () => mockNetworkInterfaces(),
+    },
+    platform: () => mockPlatform(),
+    networkInterfaces: () => mockNetworkInterfaces(),
+  };
+});
+
+vi.mock('fs', async () => {
+  const actual = await vi.importActual<typeof import('fs')>('fs');
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      existsSync: (p: string) => mockExistsSync(p),
+    },
+    existsSync: (p: string) => mockExistsSync(p),
+  };
+});
+
+import os from 'os';
 import {
   CONTAINER_RUNTIME_BIN,
+  getProxyBindHost,
   readonlyMountArgs,
   stopContainer,
   ensureContainerRuntimeRunning,
@@ -25,8 +63,118 @@ import {
 } from './container-runtime.js';
 import { logger } from './logger.js';
 
+const originalCredentialProxyHost = process.env.CREDENTIAL_PROXY_HOST;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  delete process.env.CREDENTIAL_PROXY_HOST;
+  mockPlatform.mockReturnValue('linux');
+  mockNetworkInterfaces.mockReturnValue({});
+  mockExistsSync.mockReturnValue(false);
+});
+
+afterEach(() => {
+  if (originalCredentialProxyHost === undefined) {
+    delete process.env.CREDENTIAL_PROXY_HOST;
+  } else {
+    process.env.CREDENTIAL_PROXY_HOST = originalCredentialProxyHost;
+  }
+});
+
+// --- getProxyBindHost ---
+
+describe('getProxyBindHost', () => {
+  it('returns 127.0.0.1 on macOS', () => {
+    mockPlatform.mockReturnValue('darwin');
+
+    expect(getProxyBindHost()).toBe('127.0.0.1');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns 127.0.0.1 on WSL (WSLInterop present)', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockExistsSync.mockImplementation(
+      (p) => p === '/proc/sys/fs/binfmt_misc/WSLInterop',
+    );
+
+    expect(getProxyBindHost()).toBe('127.0.0.1');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns docker0 bridge IP on Linux when the interface is present', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({
+      docker0: [
+        {
+          address: '172.17.0.1',
+          netmask: '255.255.0.0',
+          family: 'IPv4',
+          mac: '02:42:ab:cd:ef:01',
+          internal: false,
+          cidr: '172.17.0.1/16',
+        },
+      ],
+    });
+
+    expect(getProxyBindHost()).toBe('172.17.0.1');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('throws on Linux without docker0 and no CREDENTIAL_PROXY_HOST override', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({});
+
+    expect(() => getProxyBindHost()).toThrow(
+      /docker0 interface not found and CREDENTIAL_PROXY_HOST is not set/,
+    );
+    expect(() => getProxyBindHost()).toThrow(
+      /Refusing to fall back to 0\.0\.0\.0/,
+    );
+  });
+
+  it('honors explicit CREDENTIAL_PROXY_HOST=127.0.0.1 without a warning', () => {
+    process.env.CREDENTIAL_PROXY_HOST = '127.0.0.1';
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({});
+
+    expect(getProxyBindHost()).toBe('127.0.0.1');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('honors loopback aliases (localhost, ::1, 127.x.y.z) without a warning', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({});
+
+    for (const host of ['localhost', '::1', '127.0.0.2']) {
+      process.env.CREDENTIAL_PROXY_HOST = host;
+      expect(getProxyBindHost()).toBe(host);
+    }
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('permits non-loopback CREDENTIAL_PROXY_HOST but logs a warning', () => {
+    process.env.CREDENTIAL_PROXY_HOST = '172.17.0.1';
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({});
+
+    expect(getProxyBindHost()).toBe('172.17.0.1');
+    expect(logger.warn).toHaveBeenCalledWith(
+      { host: '172.17.0.1' },
+      expect.stringContaining('not a loopback address'),
+    );
+  });
+
+  it('warns when CREDENTIAL_PROXY_HOST=0.0.0.0 is explicitly set', () => {
+    process.env.CREDENTIAL_PROXY_HOST = '0.0.0.0';
+    mockPlatform.mockReturnValue('linux');
+    mockNetworkInterfaces.mockReturnValue({});
+
+    expect(getProxyBindHost()).toBe('0.0.0.0');
+    expect(logger.warn).toHaveBeenCalledWith(
+      { host: '0.0.0.0' },
+      expect.stringContaining('not a loopback address'),
+    );
+  });
 });
 
 // --- Pure functions ---

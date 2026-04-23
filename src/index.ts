@@ -30,7 +30,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
+  getProxyBindHost,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -561,17 +561,20 @@ async function main(): Promise<void> {
   loadState();
   restoreRemoteControl();
 
+  const proxyBindHost = getProxyBindHost();
+  logger.info(
+    { host: proxyBindHost },
+    'Credential proxy and reader RPC bind address resolved',
+  );
+
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
+    proxyBindHost,
   );
 
   // Start reader RPC (containers launder untrusted fetches through this)
-  const readerRpcServer = await startReaderRpc(
-    READER_RPC_PORT,
-    PROXY_BIND_HOST,
-  );
+  const readerRpcServer = await startReaderRpc(READER_RPC_PORT, proxyBindHost);
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
