@@ -81,9 +81,11 @@ function parsePrompt(prompt: string): ParsedPrompt {
   const messages: ParsedMessage[] = [];
   let cursor = 0;
   while (cursor < body.length) {
-    const open = body.slice(cursor).match(
-      /^<message sender="([^"<]*)" time="([^"<]*)"(?: reply_to="([^"<]*)")?>\n/,
-    );
+    const open = body
+      .slice(cursor)
+      .match(
+        /^<message sender="([^"<]*)" time="([^"<]*)"(?: reply_to="([^"<]*)")?>\n/,
+      );
     if (!open) {
       throw new Error(
         `message open does not match schema at offset ${cursor}:\n${body.slice(cursor, cursor + 200)}`,
@@ -95,9 +97,11 @@ function parsePrompt(prompt: string): ParsedPrompt {
     cursor += open[0].length;
 
     let quoted: ParsedQuoted | null = null;
-    const qopen = body.slice(cursor).match(
-      /^ {2}<quoted_message from="([^"<]*)">\n {4}<quoted_intent>([\s\S]*?)<\/quoted_intent>\n {4}<quoted_extracted_data>([\s\S]*?)<\/quoted_extracted_data>\n {4}<quoted_confidence>([^<]*)<\/quoted_confidence>\n {4}<quoted_risk_flags>([^<]*)<\/quoted_risk_flags>\n {2}<\/quoted_message>\n/,
-    );
+    const qopen = body
+      .slice(cursor)
+      .match(
+        /^ {2}<quoted_message from="([^"<]*)">\n {4}<quoted_intent>([\s\S]*?)<\/quoted_intent>\n {4}<quoted_extracted_data>([\s\S]*?)<\/quoted_extracted_data>\n {4}<quoted_confidence>([^<]*)<\/quoted_confidence>\n {4}<quoted_risk_flags>([^<]*)<\/quoted_risk_flags>\n {2}<\/quoted_message>\n/,
+      );
     if (qopen) {
       quoted = {
         from: unescapeXml(qopen[1]),
@@ -109,9 +113,11 @@ function parsePrompt(prompt: string): ParsedPrompt {
       cursor += qopen[0].length;
     }
 
-    const main = body.slice(cursor).match(
-      /^ {2}<intent>([\s\S]*?)<\/intent>\n {2}<extracted_data>([\s\S]*?)<\/extracted_data>\n {2}<confidence>([^<]*)<\/confidence>\n {2}<risk_flags>([^<]*)<\/risk_flags>\n<\/message>/,
-    );
+    const main = body
+      .slice(cursor)
+      .match(
+        /^ {2}<intent>([\s\S]*?)<\/intent>\n {2}<extracted_data>([\s\S]*?)<\/extracted_data>\n {2}<confidence>([^<]*)<\/confidence>\n {2}<risk_flags>([^<]*)<\/risk_flags>\n<\/message>/,
+      );
     if (!main) {
       throw new Error(
         `message body does not match schema at offset ${cursor}:\n${body.slice(cursor, cursor + 300)}`,
