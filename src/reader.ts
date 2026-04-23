@@ -277,8 +277,16 @@ export async function readUntrustedContent(
     body: requestBody,
   });
 
-  if (status < 200 || status >= 300)
-    throw new Error(`reader: anthropic API ${status}: ${body.slice(0, 500)}`);
+  if (status < 200 || status >= 300) {
+    // Upstream bodies may echo a user-message fragment including the
+    // untrusted input. Log internally for diagnostics; never embed the
+    // body in the thrown error, which can propagate back to containers.
+    logger.error(
+      { status, body_preview: body.slice(0, 500) },
+      'reader: anthropic API returned non-2xx',
+    );
+    throw new Error(`reader: anthropic API ${status}`);
+  }
 
   const parsedBody: unknown = JSON.parse(body);
   if (

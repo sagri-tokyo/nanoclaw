@@ -61,7 +61,11 @@ function parseRpcRequest(raw: string): RpcRequest {
     throw new RpcError('invalid_json', 400, 'request body is not valid JSON');
   }
   if (!isRecord(parsed)) {
-    throw new RpcError('invalid_json', 400, 'request body is not a JSON object');
+    throw new RpcError(
+      'invalid_json',
+      400,
+      'request body is not a JSON object',
+    );
   }
   if (typeof parsed.method !== 'string' || parsed.method.length === 0) {
     throw new RpcError('missing_method', 400, 'method is required');
@@ -74,9 +78,16 @@ function parseReadUntrustedParams(params: unknown): ReadUntrustedParams {
     throw new RpcError('invalid_params', 400, 'params must be an object');
   }
   if (typeof params.raw !== 'string' || params.raw.length === 0) {
-    throw new RpcError('invalid_params', 400, 'params.raw must be a non-empty string');
+    throw new RpcError(
+      'invalid_params',
+      400,
+      'params.raw must be a non-empty string',
+    );
   }
-  if (typeof params.source !== 'string' || !SOURCES.includes(params.source as Source)) {
+  if (
+    typeof params.source !== 'string' ||
+    !SOURCES.includes(params.source as Source)
+  ) {
     throw new RpcError(
       'invalid_params',
       400,
@@ -90,9 +101,20 @@ function parseReadUntrustedParams(params: unknown): ReadUntrustedParams {
       'params.source_metadata must be an object',
     );
   }
+  const allowedKeys = ['sender', 'chat_jid', 'timestamp', 'url'] as const;
+  const allowedKeySet = new Set<string>(allowedKeys);
   const metadata: SourceMetadata = {};
   const rawMetadata = params.source_metadata;
-  for (const key of ['sender', 'chat_jid', 'timestamp', 'url'] as const) {
+  for (const key of Object.keys(rawMetadata)) {
+    if (!allowedKeySet.has(key)) {
+      throw new RpcError(
+        'invalid_params',
+        400,
+        'params.source_metadata contains an unknown key',
+      );
+    }
+  }
+  for (const key of allowedKeys) {
     const value = rawMetadata[key];
     if (value === undefined) continue;
     if (typeof value !== 'string') {
@@ -135,7 +157,9 @@ function sendJson(
 }
 
 function sendError(res: ServerResponse, err: RpcError): void {
-  sendJson(res, err.statusCode, { error: { code: err.code, message: err.message } });
+  sendJson(res, err.statusCode, {
+    error: { code: err.code, message: err.message },
+  });
 }
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -148,6 +172,9 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
       total += chunk.length;
       if (total > MAX_REQUEST_BYTES) {
         rejected = true;
+        // Drain remaining bytes so the 413 response body is delivered
+        // cleanly instead of the connection being reset mid-upload.
+        req.resume();
         reject(
           new RpcError(
             'body_too_large',
@@ -159,7 +186,10 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => {
+      if (rejected) return;
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     req.on('error', reject);
   });
 }
@@ -173,8 +203,11 @@ async function handleReadUntrusted(params: unknown): Promise<ReaderOutput> {
       sourceMetadata: parsed.source_metadata,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new RpcError('reader_failure', 502, message);
+    // Re-raise with a scoped code and a static message. Reader errors can
+    // embed Anthropic response snippets that might echo the untrusted
+    // input back to the caller — never forward err.message to containers.
+    logger.error({ err }, 'reader-rpc: upstream reader call failed');
+    throw new RpcError('reader_failure', 502, 'upstream reader call failed');
   }
 }
 
@@ -187,7 +220,7 @@ async function handleRequest(
     return;
   }
   if (req.url !== RPC_PATH) {
-    sendError(res, new RpcError('bad_path', 404, `unknown path: ${req.url}`));
+    sendError(res, new RpcError('bad_path', 404, 'unknown path'));
     return;
   }
   const contentType = (req.headers['content-type'] ?? '').toLowerCase();
@@ -212,7 +245,7 @@ async function handleRequest(
     return;
   }
 
-  throw new RpcError('unknown_method', 404, `unknown method: ${rpc.method}`);
+  throw new RpcError('unknown_method', 404, 'unknown method');
 }
 
 export function startReaderRpc(
@@ -226,24 +259,23 @@ export function startReaderRpc(
           sendError(res, err);
           return;
         }
-        const message = err instanceof Error ? err.message : String(err);
         logger.error({ err }, 'reader-rpc: unexpected error');
         if (!res.headersSent) {
-          sendError(
-            res,
-            new RpcError('reader_failure', 500, `internal error: ${message}`),
-          );
+          sendError(res, new RpcError('reader_failure', 500, 'internal error'));
         }
       });
     });
 
+    // Attach error listener before listen() so a synchronous EADDRINUSE
+    // emits to our handler rather than crashing the process.
+    server.on('error', reject);
+
     server.listen(port, host, () => {
       const addr = server.address();
-      const boundPort = typeof addr === 'object' && addr !== null ? addr.port : port;
+      const boundPort =
+        typeof addr === 'object' && addr !== null ? addr.port : port;
       logger.info({ port: boundPort, host }, 'Reader RPC started');
       resolve(server);
     });
-
-    server.on('error', reject);
   });
 }

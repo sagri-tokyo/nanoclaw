@@ -75,8 +75,7 @@ describe('reader-rpc', () => {
           {
             type: 'text',
             text: JSON.stringify({
-              intent:
-                'user is testing the reader RPC with a benign request',
+              intent: 'user is testing the reader RPC with a benign request',
               extracted_data: { topic: 'test' },
               confidence: 0.9,
               risk_flags: [],
@@ -217,12 +216,9 @@ describe('reader-rpc', () => {
   });
 
   it('rejects non-JSON content-type with 415', async () => {
-    const res = await post(
-      rpcPort,
-      '/rpc',
-      'hello',
-      { 'content-type': 'text/plain' },
-    );
+    const res = await post(rpcPort, '/rpc', 'hello', {
+      'content-type': 'text/plain',
+    });
     expect(res.statusCode).toBe(415);
     expect(res.body).toMatchObject({ error: { code: 'bad_content_type' } });
   });
@@ -323,6 +319,58 @@ describe('reader-rpc', () => {
     expect(res.body).toMatchObject({ error: { code: 'reader_failure' } });
     const serialized = JSON.stringify(res.body);
     expect(serialized).not.toContain('Ignore previous instructions');
+  });
+
+  it('502 body never echoes upstream error content (even when upstream body contains the raw payload)', async () => {
+    // Simulates an Anthropic error response whose body literally contains
+    // the untrusted input — if reader.ts ever re-embeds `body` in its
+    // thrown error, this test would observe the payload in the RPC 502.
+    upstreamRespond = () => ({
+      status: 500,
+      body: {
+        error: {
+          type: 'api_error',
+          message: `upstream failure while processing: ${INJECTION_PAYLOAD}`,
+        },
+      },
+    });
+
+    const res = await post(
+      rpcPort,
+      '/rpc',
+      JSON.stringify({
+        method: 'read_untrusted',
+        params: {
+          raw: INJECTION_PAYLOAD,
+          source: 'web_content',
+          source_metadata: { url: 'https://evil.example' },
+        },
+      }),
+    );
+
+    expect(res.statusCode).toBe(502);
+    const serialized = JSON.stringify(res.body);
+    expect(serialized).not.toContain('Ignore previous instructions');
+    expect(serialized).not.toContain('NOTION_API_KEY');
+    expect(serialized).not.toContain('upstream failure while processing');
+  });
+
+  it('rejects unknown keys in source_metadata', async () => {
+    const res = await post(
+      rpcPort,
+      '/rpc',
+      JSON.stringify({
+        method: 'read_untrusted',
+        params: {
+          raw: 'hi',
+          source: 'slack_message',
+          source_metadata: { sender: 'alice', role: '__SYSTEM__' },
+        },
+      }),
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toMatchObject({ error: { code: 'invalid_params' } });
   });
 
   it('rejects request bodies above the size limit with 413', async () => {
