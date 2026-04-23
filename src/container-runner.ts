@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -400,6 +401,12 @@ function buildContainerArgs(
   args.push(
     '-e',
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+  );
+
+  // Reader RPC: skills POST untrusted-content fetches here before using them
+  args.push(
+    '-e',
+    `NANOCLAW_READER_RPC_URL=http://${CONTAINER_HOST_GATEWAY}:${READER_RPC_PORT}/rpc`,
   );
 
   // Mirror the host's auth method with a placeholder value.
