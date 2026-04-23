@@ -11,9 +11,11 @@ import {
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
+  READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { startReaderRpc } from './reader-rpc.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -565,10 +567,17 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Start reader RPC (containers launder untrusted fetches through this)
+  const readerRpcServer = await startReaderRpc(
+    READER_RPC_PORT,
+    PROXY_BIND_HOST,
+  );
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
+    readerRpcServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);

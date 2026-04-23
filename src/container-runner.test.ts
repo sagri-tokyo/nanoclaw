@@ -15,6 +15,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  READER_RPC_PORT: 3002,
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -297,6 +298,7 @@ describe('container-runner env forwarding', () => {
         !f.startsWith('ANTHROPIC_BASE_URL=') &&
         !f.startsWith('ANTHROPIC_API_KEY=') &&
         !f.startsWith('CLAUDE_CODE_OAUTH_TOKEN=') &&
+        !f.startsWith('NANOCLAW_READER_RPC_URL=') &&
         !f.startsWith('HOME=') &&
         !f.startsWith('SAGRI_MEMORY_DIR=') &&
         !f.startsWith('CLAUDE_CODE_DISABLE_AUTO_MEMORY='),
