@@ -99,6 +99,13 @@ launder_field() {
   local input="$1"
   local field="$2"
   local source="$3"
+  # Validate the input is a JSON array before mapfile. Process substitution
+  # exit codes don't propagate into mapfile, so a jq parse failure on "$input"
+  # would otherwise produce an empty rows array and silently drop every record.
+  jq -e 'type == "array"' "$input" >/dev/null || {
+    echo "ERROR: launder_field: $input is not a JSON array" >&2
+    exit 1
+  }
   local rows=()
   mapfile -t rows < <(jq -c '.[]' "$input")
   local enriched=()
@@ -106,7 +113,11 @@ launder_field() {
   for row in "${rows[@]}"; do
     text=$(printf '%s\n' "$row" | jq -r ".${field}")
     url=$(printf '%s\n' "$row"  | jq -r '.url')
-    reader=$(launder "$text" "$source" "$url")
+    # Explicit || exit 1 rather than relying on set -e propagating out of a
+    # $(...) command substitution, which has been bash-version-dependent in
+    # variable-assignment contexts. launder() already calls exit 1 on its own
+    # failure path; this guards against any future non-exit error.
+    reader=$(launder "$text" "$source" "$url") || exit 1
     enriched+=("$(printf '%s\n' "$row" | jq --argjson reader "$reader" '. + {reader: $reader}')")
   done
   printf '%s\n' "${enriched[@]}" | jq -s '.'
