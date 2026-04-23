@@ -50,7 +50,7 @@ esac
 
 ### 2. Reader helpers
 
-Three shell functions. `launder` POSTs one fetched body. `is_injection_flagged` tests a reader output for the prompt_injection risk flag. `launder_array` iterates a JSON array of records, launders a named text field on each, drops injection-flagged or empty-text rows, and emits the survivors to an output file. All three abort (`exit 1`) on any failure — the caller never sees a fallback.
+Three shell functions. `launder` POSTs one fetched body. `is_injection_flagged` tests a reader output for the prompt_injection risk flag. `launder_array` iterates a JSON array and launders a named field on each record (see its Usage comment for the full contract). All three abort (`exit 1`) on any failure — the caller never sees a fallback.
 
 ```bash
 # Usage: launder <raw> <source> <url>
@@ -104,8 +104,9 @@ is_injection_flagged() {
 #     source_metadata.url = record[url_field].
 #   - Drop with WARN log if the reader flags prompt_injection.
 #   - Emit the original record plus {source_url, reader} where source_url
-#     mirrors record[url_field]. Step 5 reads source_url uniformly across
-#     arXiv, GitHub, and web records; do not also read .id, .html_url, etc.
+#     mirrors record[url_field]. Callers must read source_url, not .id /
+#     .html_url / etc. — cross-channel parity with the web block is spelled
+#     out at step 5.
 # Writes the survivors to <output.json> as a JSON array (possibly empty).
 # mapfile + for (not while-read in a pipeline) so a launder() exit in the
 # body kills the whole script. A pipeline subshell would swallow the exit
@@ -154,10 +155,9 @@ launder_array() {
   done
   # Explicit empty-array branch: `printf '%s\n' "${enriched[@]}"` with a
   # zero-length bash array pipes an empty stream to `jq -s '.'`, which
-  # outputs the JSON value `null`. Step 5 globs *-laundered.json and reads
-  # records with `.[]`; `null | .[]` emits no output and raises no error,
-  # which would silently drop the entire batch — the failure mode we are
-  # laundering against. Write a literal empty array instead.
+  # outputs the JSON value `null`. A laundered file containing `null`
+  # would silently drop the whole batch at the consumer side — the
+  # failure mode we are laundering against. Write `[]` explicitly.
   if [ "${#enriched[@]}" -eq 0 ]; then
     printf '[]' > "$output"
   else
@@ -180,20 +180,17 @@ Example: for "How accurate is Sentinel-2 for soil organic carbon estimation?" th
 
 For each sub-question, gather sources from the following channels. Use the most targeted query possible.
 
-Set `SQ_SLUG` at the top of a single Bash invocation that runs all
-per-channel blocks below for one sub-question. Use a kebab-case,
-lowercase-alphanumeric + hyphens identifier, up to 40 characters. Every
-`/tmp` artefact in this step is namespaced by `$SQ_SLUG` so that
-consecutive sub-questions do not silently overwrite each other's search
-results.
-
-Claude Code's Bash tool starts a fresh shell for each invocation, so
-`SQ_SLUG`, `urlencode`, `launder`, `is_injection_flagged`, and
-`launder_array` do not persist across separate tool calls. Concatenate
-the preflight, reader-helpers, and all per-channel blocks for one
-sub-question into one script submitted as a single Bash call. A
-dangling `$SQ_SLUG` in a later block would collapse every path to
-`/tmp/sq--<channel>-...json`, defeating the namespacing.
+Set `SQ_SLUG` to a kebab-case, lowercase-alphanumeric + hyphens
+identifier (≤40 chars) for the current sub-question. Every `/tmp`
+artefact in this step is namespaced by `$SQ_SLUG` so consecutive
+sub-questions do not overwrite each other. Claude Code's Bash tool
+starts a fresh shell for each invocation, so `SQ_SLUG` and the helpers
+(`urlencode`, `launder`, `is_injection_flagged`, `launder_array`) do
+not persist across tool calls — concatenate the preflight, reader
+helpers, and all per-channel blocks for one sub-question into one
+script submitted as a single Bash call. Without that, `$SQ_SLUG` is
+empty in later blocks and every path collapses to
+`/tmp/sq--<channel>-...json`.
 
 ```bash
 SQ_SLUG="<per-sub-question-slug>"  # e.g. "soc-accuracy-sentinel2"
@@ -280,9 +277,7 @@ Use curl to fetch content from authoritative sources in the domain:
 - ISRIC World Soil Information: `https://www.isric.org`
 - Google Earth Engine documentation: `https://developers.google.com/earth-engine`
 
-Fetch, strip non-content tags, truncate to 3000 characters, then launder the truncated body. The 3000-char cap is well under the reader's 256 KB request limit and keeps reader latency bounded.
-
-Each web output file is a single-element JSON array of `{source_url, reader}` — identical top-level shape to `launder_array` output for arXiv and GitHub. Step 5 reads every laundered file with `jq '.[]'` uniformly. The filename hash is a collision-avoidance detail; do not try to reconstruct the URL from it.
+Fetch, strip non-content tags, truncate to 3000 characters, then launder the truncated body. The 3000-char cap is well under the reader's 256 KB request limit and keeps reader latency bounded. The filename hash is a collision-avoidance detail; do not try to reconstruct the URL from it.
 
 ```bash
 body=$(curl -sL --max-time 15 "$URL" | python3 -c "
