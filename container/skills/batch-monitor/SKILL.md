@@ -78,9 +78,11 @@ case "$NANOCLAW_READER_RPC_URL" in
 esac
 ```
 
-For each failed job, fetch the log stream and launder the tail through the reader RPC inside a single `for` loop. The per-job block uses `continue` to skip to the next failed job on any reader failure; the loop skeleton makes the target of `continue` unambiguous.
+For each failed job, fetch the log stream and launder the tail inside a single `for` loop.
 
-CloudWatch event bodies may contain NUL bytes (binary build output, malformed UTF-8 from third-party libraries); bash variable assignment strips NULs silently, which would produce a truncated `LOG_TAIL` that launders cleanly but misrepresents the failure. Strip NULs explicitly and replace with the Unicode replacement character (U+FFFD, encoded as octal `\357\277\275`) so the reader sees a bounded, printable body. Worst-case expansion: 20 events × up to ~8 KB each (CloudWatch caps `--limit 20` events well below the 256 KB-per-event absolute max) × 3× byte expansion for an all-NUL body is still under the reader-RPC request cap of 256 KiB.
+CloudWatch event bodies may contain NUL bytes (binary build output, malformed UTF-8 from third-party libraries). Bash variable assignment strips NULs silently, which would produce a truncated `LOG_TAIL` that launders cleanly but misrepresents the failure. Strip NULs explicitly and replace each with the Unicode replacement character (U+FFFD, encoded as the three-byte octal `\357\277\275`).
+
+Size bound: a realistic 20-event tail is at most a few KB of text. Even if every byte were NUL, the 3× expansion lands well under the reader-RPC request cap of 256 KiB. The cap does not bind in practice for this skill.
 
 Launder the tail through the reader RPC. `source: "web_content"` is the closest-fitting source type for CloudWatch log bodies (no CloudWatch-specific enum exists; same fallback convention as github-digest uses for workflow names).
 
@@ -139,7 +141,7 @@ for JOB_ID in "${FAILED_JOB_IDS[@]}"; do
 done
 ```
 
-Extract the reader fields from `$READER_RESPONSE` inside the loop (before the next iteration overwrites it):
+Inside the loop, after the shape-check, render the per-job block immediately from the validated reader fields:
 
 - `.intent` — one-sentence summary of what the log tail shows (errors, crash mode, resource limits, etc.)
 - `.extracted_data` — structured facts (exit codes, file paths, failed step names, out-of-memory signals)
