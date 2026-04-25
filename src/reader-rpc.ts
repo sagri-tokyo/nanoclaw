@@ -21,6 +21,10 @@ import {
   FetchUntrustedError,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
+import {
+  fetchUntrustedList,
+  type FetchUntrustedListResult,
+} from './fetch-untrusted-list.js';
 import { logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
@@ -260,6 +264,22 @@ async function handleFetchUntrusted(
   }
 }
 
+async function handleFetchUntrustedList(
+  params: unknown,
+  deps?: FetchUntrustedDeps,
+): Promise<FetchUntrustedListResult> {
+  try {
+    return await fetchUntrustedList(params, deps);
+  } catch (err) {
+    if (err instanceof FetchUntrustedError) {
+      const map = FETCH_ERROR_TO_RPC[err.code];
+      throw new RpcError(map.rpcCode, map.statusCode, map.message);
+    }
+    logger.error({ err }, 'reader-rpc: fetch_untrusted_list unexpected error');
+    throw new RpcError('fetch_failure', 502, 'fetch failure');
+  }
+}
+
 interface ReaderRpcOptions {
   fetchUntrustedDeps?: FetchUntrustedDeps;
 }
@@ -301,6 +321,15 @@ async function handleRequest(
 
   if (rpc.method === 'fetch_untrusted') {
     const output = await handleFetchUntrusted(
+      rpc.params,
+      options.fetchUntrustedDeps,
+    );
+    sendJson(res, 200, output);
+    return;
+  }
+
+  if (rpc.method === 'fetch_untrusted_list') {
+    const output = await handleFetchUntrustedList(
       rpc.params,
       options.fetchUntrustedDeps,
     );
