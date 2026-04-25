@@ -82,7 +82,7 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { SlackChannel, SlackChannelOpts } from './slack.js';
+import { SlackChannel, SlackChannelOpts, splitForSlack } from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 
@@ -622,20 +622,18 @@ describe('SlackChannel', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('splits long messages at 4000 character boundary', async () => {
+    it('hard-splits long messages with no boundaries at 3500 chars', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      // Create a message longer than 4000 chars
-      const longText = 'A'.repeat(4500);
+      const longText = 'A'.repeat(4000);
       await channel.sendMessage('slack:C0123456789', longText);
 
-      // Should be split into 2 messages: 4000 + 500
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
       expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
         channel: 'C0123456789',
-        text: 'A'.repeat(4000),
+        text: 'A'.repeat(3500),
       });
       expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
         channel: 'C0123456789',
@@ -643,12 +641,12 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('sends exactly-4000-char messages as a single message', async () => {
+    it('sends exactly-3500-char messages as a single message', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
 
-      const text = 'B'.repeat(4000);
+      const text = 'B'.repeat(3500);
       await channel.sendMessage('slack:C0123456789', text);
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(1);
@@ -658,7 +656,7 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('splits messages into 3 parts when over 8000 chars', async () => {
+    it('splits messages into 3 parts when over 7000 chars', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
@@ -666,8 +664,115 @@ describe('SlackChannel', () => {
       const longText = 'C'.repeat(8500);
       await channel.sendMessage('slack:C0123456789', longText);
 
-      // 4000 + 4000 + 500 = 3 messages
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(3);
+    });
+
+    it('prefers paragraph break (\\n\\n) over hard cut', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const before = 'X'.repeat(3000);
+      const after = 'Y'.repeat(1000);
+      const text = `${before}\n\n${after}`;
+      await channel.sendMessage('slack:C0123456789', text);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
+        channel: 'C0123456789',
+        text: before,
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
+        channel: 'C0123456789',
+        text: after,
+      });
+    });
+
+    it('falls back to single newline when no paragraph break', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const before = 'X'.repeat(3000);
+      const after = 'Y'.repeat(1000);
+      const text = `${before}\n${after}`;
+      await channel.sendMessage('slack:C0123456789', text);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
+        channel: 'C0123456789',
+        text: before,
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
+        channel: 'C0123456789',
+        text: after,
+      });
+    });
+
+    it('falls back to space when no newline', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const before = 'X'.repeat(3000);
+      const after = 'Y'.repeat(1000);
+      const text = `${before} ${after}`;
+      await channel.sendMessage('slack:C0123456789', text);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
+        channel: 'C0123456789',
+        text: before,
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
+        channel: 'C0123456789',
+        text: after,
+      });
+    });
+
+    it('does not split a bold span across chunks when paragraph boundary is available', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Boundary at 3500 would land mid-`*bold*`; paragraph break before keeps it intact.
+      const filler = 'X'.repeat(3000);
+      const span = `*${'B'.repeat(800)}*`;
+      const text = `${filler}\n\n${span}`;
+      await channel.sendMessage('slack:C0123456789', text);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
+        channel: 'C0123456789',
+        text: filler,
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
+        channel: 'C0123456789',
+        text: span,
+      });
+    });
+
+    it('rejects boundaries earlier than half the limit and uses next preference', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Paragraph break is way too early (offset 100); single newline is acceptable (offset 3000).
+      const tinyHead = 'H'.repeat(100);
+      const middle = 'M'.repeat(2900);
+      const tail = 'T'.repeat(1000);
+      const text = `${tinyHead}\n\n${middle}\n${tail}`;
+      await channel.sendMessage('slack:C0123456789', text);
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(1, {
+        channel: 'C0123456789',
+        text: `${tinyHead}\n\n${middle}`,
+      });
+      expect(currentApp().client.chat.postMessage).toHaveBeenNthCalledWith(2, {
+        channel: 'C0123456789',
+        text: tail,
+      });
     });
 
     it('flushes queued messages on connect', async () => {
@@ -683,13 +788,19 @@ describe('SlackChannel', () => {
       // Connect triggers flush
       await channel.connect();
 
+      // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
+      // The expected payload omits thread_ts to document the current
+      // (deficient) behavior — replies that should be in-thread post to
+      // the channel after recovery.
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'First queued',
+        thread_ts: undefined,
       });
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'Second queued',
+        thread_ts: undefined,
       });
     });
   });
@@ -855,5 +966,46 @@ describe('SlackChannel', () => {
       const channel = new SlackChannel(createTestOpts());
       expect(channel.name).toBe('slack');
     });
+  });
+});
+
+describe('splitForSlack', () => {
+  it('returns a single chunk for empty input', () => {
+    expect(splitForSlack('', 100)).toEqual(['']);
+  });
+
+  it('returns a single chunk when length equals max', () => {
+    const text = 'a'.repeat(100);
+    expect(splitForSlack(text, 100)).toEqual([text]);
+  });
+
+  it('emits a one-character second chunk when length is max + 1 with no boundary', () => {
+    const text = 'a'.repeat(101);
+    expect(splitForSlack(text, 100)).toEqual(['a'.repeat(100), 'a']);
+  });
+
+  it('hard-cuts past a leading paragraph break that would land below the half-limit', () => {
+    // Leading '\n\n' is at index 0, far below minBoundary (50). The splitter
+    // must skip it and fall back to a hard cut so the first chunk is non-empty.
+    const text = '\n\n' + 'x'.repeat(150);
+    expect(splitForSlack(text, 100)).toEqual([
+      '\n\n' + 'x'.repeat(98),
+      'x'.repeat(52),
+    ]);
+  });
+
+  it('hard-cuts a single oversized token with no boundary characters', () => {
+    const text = 'z'.repeat(250);
+    expect(splitForSlack(text, 100)).toEqual([
+      'z'.repeat(100),
+      'z'.repeat(100),
+      'z'.repeat(50),
+    ]);
+  });
+
+  it('reconstructs the original text (modulo separators) for boundary-driven splits', () => {
+    const text = 'a'.repeat(60) + '\n\n' + 'b'.repeat(60);
+    const chunks = splitForSlack(text, 100);
+    expect(chunks).toEqual(['a'.repeat(60), 'b'.repeat(60)]);
   });
 });

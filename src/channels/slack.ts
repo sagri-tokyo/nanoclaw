@@ -13,14 +13,52 @@ import {
   RegisteredGroup,
 } from '../types.js';
 
-// Slack's chat.postMessage API limits text to ~4000 characters per call.
-// Messages exceeding this are split into sequential chunks.
-const MAX_MESSAGE_LENGTH = 4000;
+// Slack's chat.postMessage API accepts up to 4000 chars, but the rendered UI
+// inserts an avatar/timestamp row around ~3500 chars and can split a chunk
+// mid-mrkdwn span (e.g. inside `*bold*`). 3500 leaves margin and forces
+// breaks on natural boundaries before the UI does it for us.
+const MAX_MESSAGE_LENGTH = 3500;
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
 type HandledMessageEvent = GenericMessageEvent | BotMessageEvent;
+
+// Split `text` into chunks no longer than `max`, preferring natural boundaries
+// in this order: paragraph break, line break, space, then a hard cut.
+// Boundaries earlier than half the limit are rejected so we don't emit a
+// tiny chunk followed by a near-full one.
+export function splitForSlack(text: string, max: number): string[] {
+  if (text.length <= max) return [text];
+
+  const minBoundary = Math.floor(max / 2);
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > max) {
+    const window = remaining.slice(0, max);
+    let breakAt = window.lastIndexOf('\n\n');
+    let separatorLength = 2;
+    if (breakAt < minBoundary) {
+      breakAt = window.lastIndexOf('\n');
+      separatorLength = 1;
+    }
+    if (breakAt < minBoundary) {
+      breakAt = window.lastIndexOf(' ');
+      separatorLength = 1;
+    }
+    if (breakAt < minBoundary) {
+      breakAt = max;
+      separatorLength = 0;
+    }
+
+    chunks.push(remaining.slice(0, breakAt));
+    remaining = remaining.slice(breakAt + separatorLength);
+  }
+
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
 
 export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
@@ -176,24 +214,7 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      const threadTs = this.lastThreadTs.get(jid);
-
-      // Slack limits messages to ~4000 characters; split if needed
-      if (text.length <= MAX_MESSAGE_LENGTH) {
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text,
-          thread_ts: threadTs,
-        });
-      } else {
-        for (let i = 0; i < text.length; i += MAX_MESSAGE_LENGTH) {
-          await this.app.client.chat.postMessage({
-            channel: channelId,
-            text: text.slice(i, i + MAX_MESSAGE_LENGTH),
-            thread_ts: threadTs,
-          });
-        }
-      }
+      await this.postChunks(channelId, text, this.lastThreadTs.get(jid));
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
       this.outgoingQueue.push({ jid, text });
@@ -286,10 +307,8 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: item.text,
-        });
+        // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
+        await this.postChunks(channelId, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
@@ -297,6 +316,20 @@ export class SlackChannel implements Channel {
       }
     } finally {
       this.flushing = false;
+    }
+  }
+
+  private async postChunks(
+    channelId: string,
+    text: string,
+    threadTs?: string,
+  ): Promise<void> {
+    for (const chunk of splitForSlack(text, MAX_MESSAGE_LENGTH)) {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        text: chunk,
+        thread_ts: threadTs,
+      });
     }
   }
 }
