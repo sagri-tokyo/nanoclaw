@@ -11,9 +11,11 @@ import {
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
+  READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { startReaderRpc } from './reader-rpc.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -28,7 +30,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
+  getProxyBindHost,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -50,7 +52,11 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessagesViaReader,
+  formatOutbound,
+} from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -66,9 +72,6 @@ import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-
-// Re-export for backwards compatibility during refactor
-export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -228,7 +231,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt = await formatMessagesViaReader(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -489,7 +492,10 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const formatted = await formatMessagesViaReader(
+            messagesToSend,
+            TIMEZONE,
+          );
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -555,16 +561,26 @@ async function main(): Promise<void> {
   loadState();
   restoreRemoteControl();
 
+  const proxyBindHost = getProxyBindHost();
+  logger.info(
+    { host: proxyBindHost },
+    'Credential proxy and reader RPC bind address resolved',
+  );
+
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
+    proxyBindHost,
   );
+
+  // Start reader RPC (containers launder untrusted fetches through this)
+  const readerRpcServer = await startReaderRpc(READER_RPC_PORT, proxyBindHost);
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
+    readerRpcServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);

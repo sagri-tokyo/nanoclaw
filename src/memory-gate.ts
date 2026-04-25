@@ -126,15 +126,46 @@ export interface DecideWriteInput {
 // creating `/tmp/link -> /workspace/group/memory` cannot smuggle a write
 // through `/tmp/link/poison.md` — realpath resolves the parent to the real
 // memory directory, so the write is recognised as inside. See sagri-ai#74.
+//
+// Also follows dangling symlinks at the leaf or at a missing ancestor:
+// `realpathSync` fails ENOENT if a symlink's target doesn't exist yet, which
+// would otherwise let an attacker smuggle writes via
+// `/tmp/link -> /workspace/group/memory/poison.md` while poison.md is
+// absent. We readlink manually in that case. See sagri-ai#64.
+//
+// Errors propagate. ELOOP from `realpathSync` and an exceeded manual hop
+// cap both throw; callers must treat unresolvable paths as a hard failure
+// rather than implicit allow, because `memoryDir` resolution is a string
+// comparison (no kernel write would block a bypass) — see sagri-ai#64
+// review. The hop cap bounds only the manual readlink chain (kernel
+// already enforces SYMLOOP_MAX inside `realpathSync`).
+const MAX_MANUAL_SYMLINK_HOPS = 40;
 function canonicalize(p: string): string {
   let current = path.resolve(p);
   const suffix: string[] = [];
+  let hops = 0;
   while (true) {
     try {
       const real = fs.realpathSync(current);
       return suffix.length === 0 ? real : path.join(real, ...suffix.reverse());
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      let linkTarget: string | null = null;
+      try {
+        linkTarget = fs.readlinkSync(current);
+      } catch (linkErr) {
+        if ((linkErr as NodeJS.ErrnoException).code !== 'ENOENT') throw linkErr;
+      }
+      if (linkTarget !== null) {
+        if (++hops > MAX_MANUAL_SYMLINK_HOPS)
+          throw new Error(
+            `canonicalize: manual symlink chain exceeds ${MAX_MANUAL_SYMLINK_HOPS} hops at ${p}`,
+          );
+        current = path.isAbsolute(linkTarget)
+          ? linkTarget
+          : path.resolve(path.dirname(current), linkTarget);
+        continue;
+      }
       const parent = path.dirname(current);
       if (parent === current) return path.resolve(p);
       suffix.push(path.basename(current));

@@ -788,6 +788,10 @@ describe('SlackChannel', () => {
       // Connect triggers flush
       await channel.connect();
 
+      // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
+      // The expected payload omits thread_ts to document the current
+      // (deficient) behavior — replies that should be in-thread post to
+      // the channel after recovery.
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
         channel: 'C0123456789',
         text: 'First queued',

@@ -15,13 +15,31 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
 
 /**
- * Address the credential proxy binds to.
- * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
- * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
- *   falling back to 0.0.0.0 if the interface isn't found.
+ * Resolve the address the credential proxy and reader RPC bind to.
+ * Docker Desktop (macOS/WSL): 127.0.0.1 — the VM routes host.docker.internal to loopback.
+ * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it.
+ *
+ * Fails closed: throws if the docker0 bridge isn't present and the operator
+ * hasn't set CREDENTIAL_PROXY_HOST. Binding to 0.0.0.0 would expose the reader
+ * RPC and credential proxy on every interface, including LAN.
+ *
+ * An explicit CREDENTIAL_PROXY_HOST overrides detection. Non-loopback overrides
+ * are permitted (for Podman, rootless Docker, custom bridges) but logged as a
+ * warning so operators see what they bound to.
  */
-export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
+export function getProxyBindHost(): string {
+  const override = process.env.CREDENTIAL_PROXY_HOST;
+  if (override) {
+    if (!isLoopback(override)) {
+      logger.warn(
+        { host: override },
+        'CREDENTIAL_PROXY_HOST is not a loopback address — credential proxy and reader RPC will be reachable on that interface',
+      );
+    }
+    return override;
+  }
+  return detectProxyBindHost();
+}
 
 function detectProxyBindHost(): string {
   if (os.platform() === 'darwin') return '127.0.0.1';
@@ -37,7 +55,16 @@ function detectProxyBindHost(): string {
     const ipv4 = docker0.find((a) => a.family === 'IPv4');
     if (ipv4) return ipv4.address;
   }
-  return '0.0.0.0';
+  throw new Error(
+    'Cannot determine a safe bind address: docker0 interface not found and CREDENTIAL_PROXY_HOST is not set. ' +
+      'Set CREDENTIAL_PROXY_HOST=127.0.0.1 (loopback) or to the bridge IP containers can reach. ' +
+      'Refusing to fall back to 0.0.0.0 — that would expose the credential proxy and reader RPC on every interface, including LAN.',
+  );
+}
+
+function isLoopback(host: string): boolean {
+  if (host === 'localhost' || host === '::1') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
 /** CLI args needed for the container to resolve the host gateway. */
