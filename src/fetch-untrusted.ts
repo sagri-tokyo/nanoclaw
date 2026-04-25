@@ -155,7 +155,7 @@ interface ValidatedUrl {
   resolvedAddress: string;
 }
 
-async function validatePublicHttpsUrl(
+export async function validatePublicHttpsUrl(
   url: string,
   deps: Required<Pick<FetchUntrustedDeps, 'lookup'>>,
 ): Promise<ValidatedUrl> {
@@ -285,7 +285,7 @@ interface FollowRedirectArgs {
   deps: Required<FetchUntrustedDeps>;
 }
 
-async function fetchWithRedirects(
+export async function fetchWithRedirects(
   args: FollowRedirectArgs,
 ): Promise<FetchedResponse> {
   const { headers, deps } = args;
@@ -323,14 +323,16 @@ async function fetchWithRedirects(
   throw new FetchUntrustedError('fetch_failure', 'too many redirects');
 }
 
-function resolveDeps(deps?: FetchUntrustedDeps): Required<FetchUntrustedDeps> {
+export function resolveDeps(
+  deps?: FetchUntrustedDeps,
+): Required<FetchUntrustedDeps> {
   return {
     lookup: deps?.lookup ?? defaultLookup,
     httpsRequestFactory: deps?.httpsRequestFactory ?? httpsRequest,
   };
 }
 
-function requireEnv(name: string): string {
+export function requireEnv(name: string): string {
   const env = readEnvFile([name]);
   const value = env[name];
   if (!value) {
@@ -339,7 +341,7 @@ function requireEnv(name: string): string {
   return value;
 }
 
-async function fetchJsonObject(
+export async function fetchJsonObject(
   url: string,
   headers: Record<string, string>,
   deps: Required<FetchUntrustedDeps>,
