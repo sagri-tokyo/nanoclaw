@@ -72,7 +72,11 @@ export class SlackChannel implements Channel {
   private app: App;
   private botUserId: string | undefined;
   private connected = false;
-  private outgoingQueue: Array<{ jid: string; text: string }> = [];
+  private outgoingQueue: Array<{
+    jid: string;
+    text: string;
+    threadTs?: string;
+  }> = [];
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private lastThreadTs = new Map<string, string>();
@@ -203,9 +207,10 @@ export class SlackChannel implements Channel {
 
   async sendMessage(jid: string, text: string): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
+    const threadTs = this.lastThreadTs.get(jid);
 
     if (!this.connected) {
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text, threadTs });
       logger.info(
         { jid, queueSize: this.outgoingQueue.length },
         'Slack disconnected, message queued',
@@ -214,10 +219,10 @@ export class SlackChannel implements Channel {
     }
 
     try {
-      await this.postChunks(channelId, text, this.lastThreadTs.get(jid));
+      await this.postChunks(channelId, text, threadTs);
       logger.info({ jid, length: text.length }, 'Slack message sent');
     } catch (err) {
-      this.outgoingQueue.push({ jid, text });
+      this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
@@ -307,8 +312,7 @@ export class SlackChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         const channelId = item.jid.replace(/^slack:/, '');
-        // TODO: thread_ts is not preserved across the queue (sagri-ai-13).
-        await this.postChunks(channelId, item.text);
+        await this.postChunks(channelId, item.text, item.threadTs);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',
