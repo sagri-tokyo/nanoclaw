@@ -100,8 +100,7 @@ function buildLocalRedirectDeps(args: {
       // After the DNS-rebinding fix, `options.hostname` is the resolved IP.
       // Map IP -> port. As a transitional convenience also accept the
       // logical hostname (in case any callers still pass that).
-      const port =
-        ipToPort[hostname] ?? args.redirects[hostname]?.port ?? null;
+      const port = ipToPort[hostname] ?? args.redirects[hostname]?.port ?? null;
       if (port === null) {
         throw new Error(`unexpected https request: ${hostname}`);
       }
@@ -152,9 +151,7 @@ describe('fetch-untrusted', () => {
         res.end(JSON.stringify(body));
       });
     });
-    await new Promise<void>((r) =>
-      upstreamReader.listen(0, '127.0.0.1', r),
-    );
+    await new Promise<void>((r) => upstreamReader.listen(0, '127.0.0.1', r));
     upstreamReaderPort = (upstreamReader.address() as AddressInfo).port;
 
     Object.assign(mockEnv, {
@@ -463,8 +460,7 @@ describe('fetch-untrusted', () => {
       });
       const result = await fetchUntrusted(
         {
-          url_or_id:
-            'https://github.com/foo/bar/issues/3#issuecomment-99',
+          url_or_id: 'https://github.com/foo/bar/issues/3#issuecomment-99',
           source_type: 'github_comment',
         },
         deps,
@@ -561,10 +557,7 @@ describe('fetch-untrusted', () => {
         },
       });
       const id = 'c'.repeat(32);
-      await fetchUntrusted(
-        { url_or_id: id, source_type: 'notion_page' },
-        deps,
-      );
+      await fetchUntrusted({ url_or_id: id, source_type: 'notion_page' }, deps);
       expect(apiServer.captured[0].headers['notion-version']).toBe(
         '2022-06-28',
       );
@@ -715,7 +708,7 @@ describe('fetch-untrusted', () => {
     }
   });
 
-  it('redirect re-validation: second hop uses the second hostname\'s resolved IP', async () => {
+  it("redirect re-validation: second hop uses the second hostname's resolved IP", async () => {
     // First hop returns a 302 to a different host. Each hop must be resolved
     // independently and the connection must be made to that hop's IP.
     const firstHop = await startFakeServer((_req, res) => {

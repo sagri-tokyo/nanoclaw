@@ -672,8 +672,7 @@ describe('reader-rpc fetch_untrusted', () => {
       JSON.stringify({
         method: 'fetch_untrusted',
         params: {
-          url_or_id:
-            'https://github.com/foo/bar/issues/3#issuecomment-99',
+          url_or_id: 'https://github.com/foo/bar/issues/3#issuecomment-99',
           source_type: 'github_comment',
         },
       }),

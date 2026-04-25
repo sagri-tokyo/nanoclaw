@@ -60,12 +60,8 @@ export interface FetchUntrustedInput {
 }
 
 export interface FetchUntrustedDeps {
-  lookup?: (
-    hostname: string,
-  ) => Promise<{ address: string; family: 4 | 6 }>;
-  httpsRequestFactory?: (
-    options: RequestOptions,
-  ) => ClientRequest;
+  lookup?: (hostname: string) => Promise<{ address: string; family: 4 | 6 }>;
+  httpsRequestFactory?: (options: RequestOptions) => ClientRequest;
 }
 
 const VALID_SOURCE_TYPES: ReadonlySet<FetchUntrustedSourceType> = new Set([
@@ -226,10 +222,7 @@ function performHttpsGet(args: {
         ? `[${resolvedAddress}]`
         : resolvedAddress;
     const finalHeaders: Record<string, string> = { ...headers };
-    if (
-      finalHeaders.host === undefined &&
-      finalHeaders.Host === undefined
-    ) {
+    if (finalHeaders.host === undefined && finalHeaders.Host === undefined) {
       finalHeaders.host = parsed.hostname;
     }
     const req = deps.httpsRequestFactory({
@@ -304,7 +297,8 @@ async function fetchWithRedirects(
       response = await performHttpsGet({ validated, headers, deps });
     } catch (err) {
       if (err instanceof FetchUntrustedError) throw err;
-      const message = err instanceof Error ? err.message : 'http request failed';
+      const message =
+        err instanceof Error ? err.message : 'http request failed';
       throw new FetchUntrustedError('fetch_failure', message);
     }
     if (response.status >= 300 && response.status < 400) {
@@ -340,10 +334,7 @@ function requireEnv(name: string): string {
   const env = readEnvFile([name]);
   const value = env[name];
   if (!value) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      `${name} not configured`,
-    );
+    throw new FetchUntrustedError('fetch_failure', `${name} not configured`);
   }
   return value;
 }
@@ -361,7 +352,10 @@ async function fetchJsonObject(
     throw new FetchUntrustedError('fetch_failure', 'response was not json');
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new FetchUntrustedError('fetch_failure', 'response was not an object');
+    throw new FetchUntrustedError(
+      'fetch_failure',
+      'response was not an object',
+    );
   }
   return parsed as Record<string, unknown>;
 }
@@ -389,10 +383,7 @@ function parseNotionInput(input: string): ParsedNotionId {
   } catch {
     throw new FetchUntrustedError('bad_url', 'not a notion id or url');
   }
-  if (
-    parsed.hostname !== 'www.notion.so' &&
-    parsed.hostname !== 'notion.so'
-  ) {
+  if (parsed.hostname !== 'www.notion.so' && parsed.hostname !== 'notion.so') {
     throw new FetchUntrustedError('bad_url', 'not a notion url');
   }
   // Notion URL convention: id is the trailing 32-hex chars of the final path
@@ -509,10 +500,7 @@ function validateInput(input: unknown): FetchUntrustedInput {
     throw new FetchUntrustedError('invalid_params', 'params must be an object');
   }
   const record = input as Record<string, unknown>;
-  if (
-    typeof record.url_or_id !== 'string' ||
-    record.url_or_id.length === 0
-  ) {
+  if (typeof record.url_or_id !== 'string' || record.url_or_id.length === 0) {
     throw new FetchUntrustedError(
       'invalid_params',
       'url_or_id must be a non-empty string',
@@ -530,10 +518,7 @@ function validateInput(input: unknown): FetchUntrustedInput {
   const allowed = new Set(['url_or_id', 'source_type']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
-      throw new FetchUntrustedError(
-        'invalid_params',
-        `unknown param: ${key}`,
-      );
+      throw new FetchUntrustedError('invalid_params', `unknown param: ${key}`);
     }
   }
   return {
