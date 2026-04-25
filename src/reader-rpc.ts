@@ -16,6 +16,11 @@
  */
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 
+import {
+  fetchUntrusted,
+  FetchUntrustedError,
+  type FetchUntrustedDeps,
+} from './fetch-untrusted.js';
 import { logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
@@ -36,6 +41,8 @@ type RpcErrorCode =
   | 'missing_method'
   | 'unknown_method'
   | 'invalid_params'
+  | 'bad_url'
+  | 'fetch_failure'
   | 'reader_failure';
 
 interface RpcRequest {
@@ -211,9 +218,56 @@ async function handleReadUntrusted(params: unknown): Promise<ReaderOutput> {
   }
 }
 
+const FETCH_ERROR_TO_RPC: Record<
+  FetchUntrustedError['code'],
+  { rpcCode: RpcErrorCode; statusCode: number; message: string }
+> = {
+  invalid_params: {
+    rpcCode: 'invalid_params',
+    statusCode: 400,
+    message: 'invalid params',
+  },
+  bad_url: {
+    rpcCode: 'bad_url',
+    statusCode: 400,
+    message: 'bad url',
+  },
+  fetch_failure: {
+    rpcCode: 'fetch_failure',
+    statusCode: 502,
+    message: 'fetch failure',
+  },
+  reader_failure: {
+    rpcCode: 'reader_failure',
+    statusCode: 502,
+    message: 'upstream reader call failed',
+  },
+};
+
+async function handleFetchUntrusted(
+  params: unknown,
+  deps?: FetchUntrustedDeps,
+): Promise<ReaderOutput> {
+  try {
+    return await fetchUntrusted(params, deps);
+  } catch (err) {
+    if (err instanceof FetchUntrustedError) {
+      const map = FETCH_ERROR_TO_RPC[err.code];
+      throw new RpcError(map.rpcCode, map.statusCode, map.message);
+    }
+    logger.error({ err }, 'reader-rpc: fetch_untrusted unexpected error');
+    throw new RpcError('fetch_failure', 502, 'fetch failure');
+  }
+}
+
+interface ReaderRpcOptions {
+  fetchUntrustedDeps?: FetchUntrustedDeps;
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
+  options: ReaderRpcOptions,
 ): Promise<void> {
   if (req.method !== 'POST') {
     sendError(res, new RpcError('bad_method', 405, 'only POST is supported'));
@@ -245,16 +299,26 @@ async function handleRequest(
     return;
   }
 
+  if (rpc.method === 'fetch_untrusted') {
+    const output = await handleFetchUntrusted(
+      rpc.params,
+      options.fetchUntrustedDeps,
+    );
+    sendJson(res, 200, output);
+    return;
+  }
+
   throw new RpcError('unknown_method', 404, 'unknown method');
 }
 
 export function startReaderRpc(
   port: number,
   host = '127.0.0.1',
+  options: ReaderRpcOptions = {},
 ): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
-      handleRequest(req, res).catch((err) => {
+      handleRequest(req, res, options).catch((err) => {
         if (err instanceof RpcError) {
           sendError(res, err);
           return;
