@@ -21,10 +21,7 @@ import {
   FetchUntrustedError,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
-import {
-  fetchUntrustedList,
-  type FetchUntrustedListResult,
-} from './fetch-untrusted-list.js';
+import { fetchUntrustedList } from './fetch-untrusted-list.js';
 import { logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
@@ -149,6 +146,7 @@ class RpcError extends Error {
     readonly code: RpcErrorCode,
     readonly statusCode: number,
     message: string,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -168,9 +166,12 @@ function sendJson(
 }
 
 function sendError(res: ServerResponse, err: RpcError): void {
-  sendJson(res, err.statusCode, {
-    error: { code: err.code, message: err.message },
-  });
+  const errorBody: Record<string, unknown> = {
+    code: err.code,
+    message: err.message,
+  };
+  if (err.details !== undefined) errorBody.details = err.details;
+  sendJson(res, err.statusCode, { error: errorBody });
 }
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -248,34 +249,22 @@ const FETCH_ERROR_TO_RPC: Record<
   },
 };
 
-async function handleFetchUntrusted(
-  params: unknown,
-  deps?: FetchUntrustedDeps,
-): Promise<ReaderOutput> {
+async function runFetchAsRpc<T>(
+  method: 'fetch_untrusted' | 'fetch_untrusted_list',
+  fn: () => Promise<T>,
+): Promise<T> {
   try {
-    return await fetchUntrusted(params, deps);
+    return await fn();
   } catch (err) {
     if (err instanceof FetchUntrustedError) {
       const map = FETCH_ERROR_TO_RPC[err.code];
-      throw new RpcError(map.rpcCode, map.statusCode, map.message);
+      const details =
+        err.httpStatus !== undefined
+          ? { upstream_http_status: err.httpStatus }
+          : undefined;
+      throw new RpcError(map.rpcCode, map.statusCode, map.message, details);
     }
-    logger.error({ err }, 'reader-rpc: fetch_untrusted unexpected error');
-    throw new RpcError('fetch_failure', 502, 'fetch failure');
-  }
-}
-
-async function handleFetchUntrustedList(
-  params: unknown,
-  deps?: FetchUntrustedDeps,
-): Promise<FetchUntrustedListResult> {
-  try {
-    return await fetchUntrustedList(params, deps);
-  } catch (err) {
-    if (err instanceof FetchUntrustedError) {
-      const map = FETCH_ERROR_TO_RPC[err.code];
-      throw new RpcError(map.rpcCode, map.statusCode, map.message);
-    }
-    logger.error({ err }, 'reader-rpc: fetch_untrusted_list unexpected error');
+    logger.error({ err }, `reader-rpc: ${method} unexpected error`);
     throw new RpcError('fetch_failure', 502, 'fetch failure');
   }
 }
@@ -320,18 +309,16 @@ async function handleRequest(
   }
 
   if (rpc.method === 'fetch_untrusted') {
-    const output = await handleFetchUntrusted(
-      rpc.params,
-      options.fetchUntrustedDeps,
+    const output = await runFetchAsRpc('fetch_untrusted', () =>
+      fetchUntrusted(rpc.params, options.fetchUntrustedDeps),
     );
     sendJson(res, 200, output);
     return;
   }
 
   if (rpc.method === 'fetch_untrusted_list') {
-    const output = await handleFetchUntrustedList(
-      rpc.params,
-      options.fetchUntrustedDeps,
+    const output = await runFetchAsRpc('fetch_untrusted_list', () =>
+      fetchUntrustedList(rpc.params, options.fetchUntrustedDeps),
     );
     sendJson(res, 200, output);
     return;

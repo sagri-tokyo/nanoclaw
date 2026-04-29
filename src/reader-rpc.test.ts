@@ -591,7 +591,7 @@ describe('reader-rpc fetch_untrusted', () => {
     expect(res.body).toMatchObject({ error: { code: 'bad_url' } });
   });
 
-  it('returns 502 fetch_failure when target returns 500', async () => {
+  it('returns 502 fetch_failure with upstream_http_status when target returns 500', async () => {
     targetRespond = () => ({
       status: 500,
       headers: { 'content-type': 'text/plain' },
@@ -607,7 +607,61 @@ describe('reader-rpc fetch_untrusted', () => {
       }),
     );
     expect(res.statusCode).toBe(502);
+    expect(res.body).toMatchObject({
+      error: {
+        code: 'fetch_failure',
+        details: { upstream_http_status: 500 },
+      },
+    });
+  });
+
+  it('returns 502 fetch_failure with upstream_http_status for fetch_untrusted_list non-2xx', async () => {
+    targetRespond = () => ({
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'unauthorized' }),
+    });
+    Object.assign(mockEnv, { NOTION_API_KEY: 'secret_test' });
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted_list',
+        params: {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(502);
+    expect(res.body).toMatchObject({
+      error: {
+        code: 'fetch_failure',
+        details: { upstream_http_status: 401 },
+      },
+    });
+  });
+
+  it('omits upstream_http_status when fetch_untrusted_list fails for a non-status reason', async () => {
+    Object.assign(mockEnv, { NOTION_API_KEY: 'secret_test' });
+    // 200 with unparseable body — failure mode is not an upstream status; the
+    // RPC body must NOT carry an upstream_http_status hint.
+    targetRespond = () => ({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: 'not-json-at-all',
+    });
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted_list',
+        params: {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(502);
     expect(res.body).toMatchObject({ error: { code: 'fetch_failure' } });
+    const errorBody = (res.body as { error: Record<string, unknown> }).error;
+    expect(errorBody.details).toBeUndefined();
   });
 
   it('returns 502 reader_failure when reader API returns 500', async () => {
