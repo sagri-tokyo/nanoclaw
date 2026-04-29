@@ -1,16 +1,25 @@
 /**
  * List-source adapters that complement `fetchUntrusted`. Each adapter fetches
  * a paginated upstream list (arXiv search, GitHub repo/PR/issue/run lists,
- * Notion database query), launders every item's free-text fields through the
- * existing reader pipeline (`readUntrustedContent`), and returns a structured
- * list. Constrained fields (numeric ids, urls, ISO timestamps, GitHub logins)
- * are surfaced raw alongside each item's `ReaderOutput`. Free-text titles,
- * descriptions and abstracts only escape via the laundered reader output.
+ * Notion database query) and returns a structured list. Constrained fields
+ * (numeric ids, urls, ISO timestamps, GitHub logins) are always surfaced raw
+ * on each item.
+ *
+ * By default, each item's free-text fields (titles, descriptions, abstracts,
+ * Notion page properties) are dropped entirely — they never reach the agent
+ * and the host-side reader pipeline (`readUntrustedContent`) is not invoked.
+ * Callers that need a laundered paraphrase to rank or summarize items pass
+ * `include_reader: true`; for those callers the free-text body is run through
+ * the reader pipeline and the resulting `ReaderOutput` is attached as
+ * `items[].reader`. See sagri-ai#119 for the threat model — the prior
+ * always-launder behavior surfaced attacker-influenced wording in
+ * `reader.intent` / `reader.extracted_data`, which the agent treated as
+ * trusted context even though the prompt instructed otherwise.
  *
  * Same SSRF defences as `fetchUntrusted`: HTTPS only, public addresses only,
  * connection bound to the resolved IP. Reuses helpers from `./fetch-untrusted`.
  *
- * sagri-ai#99.
+ * sagri-ai#99 (initial), sagri-ai#119 (default-omit reader).
  */
 import { XMLParser } from 'fast-xml-parser';
 import { RequestOptions } from 'https';
@@ -58,9 +67,13 @@ const VALID_LIST_SOURCE_TYPES: ReadonlySet<ListSourceType> = new Set([
   'notion_database_query',
 ]);
 
+// Post-validation shape produced by `validateInput`. The raw RPC payload may
+// omit `include_reader` — the validator normalises it to a concrete boolean
+// before any adapter runs.
 export interface FetchUntrustedListInput {
   source_type: ListSourceType;
   params: Record<string, unknown>;
+  include_reader: boolean;
 }
 
 export interface ArxivItem {
@@ -69,7 +82,7 @@ export interface ArxivItem {
   published: string;
   updated: string;
   authors: string[];
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export interface GithubSearchItem {
@@ -79,7 +92,7 @@ export interface GithubSearchItem {
   stars: number;
   language: string | null;
   updated_at: string;
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export interface GithubPrItem {
@@ -90,7 +103,7 @@ export interface GithubPrItem {
   draft: boolean;
   created_at: string;
   updated_at: string;
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export interface GithubIssueItem {
@@ -101,7 +114,7 @@ export interface GithubIssueItem {
   labels: string[];
   created_at: string;
   updated_at: string;
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export interface GithubRunItem {
@@ -113,7 +126,7 @@ export interface GithubRunItem {
   head_sha: string;
   workflow_id: number;
   created_at: string;
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export interface NotionDatabaseItem {
@@ -122,7 +135,7 @@ export interface NotionDatabaseItem {
   created_time: string;
   last_edited_time: string;
   archived: boolean;
-  reader: ReaderOutput;
+  reader?: ReaderOutput;
 }
 
 export type ListItem =
@@ -262,6 +275,7 @@ function parseArxivFeed(xml: string): ArxivAtomEntry[] {
 async function arxivSearch(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<ArxivItem[]> {
   rejectUnknownKeys(params, new Set(['query', 'limit']));
   const query = requireString(params, 'query');
@@ -280,19 +294,21 @@ async function arxivSearch(
   const entries = parseArxivFeed(response.body);
   const items: ArxivItem[] = [];
   for (const entry of entries) {
-    const reader = await launder({
-      raw: `${entry.title}\n\n${entry.summary}`,
-      source: 'web_content',
-      url: entry.id,
-    });
-    items.push({
+    const item: ArxivItem = {
       id: entry.id,
       url: entry.id,
       published: entry.published,
       updated: entry.updated,
       authors: entry.authors,
-      reader,
-    });
+    };
+    if (includeReader) {
+      item.reader = await launder({
+        raw: `${entry.title}\n\n${entry.summary}`,
+        source: 'web_content',
+        url: entry.id,
+      });
+    }
+    items.push(item);
   }
   return items;
 }
@@ -302,6 +318,7 @@ async function arxivSearch(
 async function githubSearch(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<GithubSearchItem[]> {
   rejectUnknownKeys(params, new Set(['query', 'limit']));
   const query = requireString(params, 'query');
@@ -339,22 +356,24 @@ async function githubSearch(
     const updatedAt =
       typeof repo.updated_at === 'string' ? repo.updated_at : null;
     if (id === null || fullName === null || htmlUrl === null) continue;
-    const description =
-      typeof repo.description === 'string' ? repo.description : '';
-    const reader = await launder({
-      raw: description.length > 0 ? description : '(no description)',
-      source: 'web_content',
-      url: htmlUrl,
-    });
-    out.push({
+    const item: GithubSearchItem = {
       id,
       full_name: fullName,
       url: htmlUrl,
       stars: stars ?? 0,
       language,
       updated_at: updatedAt ?? '',
-      reader,
-    });
+    };
+    if (includeReader) {
+      const description =
+        typeof repo.description === 'string' ? repo.description : '';
+      item.reader = await launder({
+        raw: description.length > 0 ? description : '(no description)',
+        source: 'web_content',
+        url: htmlUrl,
+      });
+    }
+    out.push(item);
   }
   return out;
 }
@@ -390,6 +409,7 @@ function readGithubListEnvelope(
 async function githubPrList(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<GithubPrItem[]> {
   const env = readGithubListEnvelope(params);
   const token = requireEnv('GITHUB_TOKEN');
@@ -449,13 +469,7 @@ async function githubPrList(
           : ''
         : '';
     if (number === null || htmlUrl === null || state === null) continue;
-    const title = typeof pr.title === 'string' ? pr.title : '';
-    const reader = await launder({
-      raw: title.length > 0 ? title : '(no title)',
-      source: 'web_content',
-      url: htmlUrl,
-    });
-    out.push({
+    const item: GithubPrItem = {
       number,
       url: htmlUrl,
       state,
@@ -463,8 +477,16 @@ async function githubPrList(
       draft,
       created_at: createdAt ?? '',
       updated_at: updatedAt ?? '',
-      reader,
-    });
+    };
+    if (includeReader) {
+      const title = typeof pr.title === 'string' ? pr.title : '';
+      item.reader = await launder({
+        raw: title.length > 0 ? title : '(no title)',
+        source: 'web_content',
+        url: htmlUrl,
+      });
+    }
+    out.push(item);
   }
   return out;
 }
@@ -472,6 +494,7 @@ async function githubPrList(
 async function githubIssueList(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<GithubIssueItem[]> {
   const env = readGithubListEnvelope(params);
   const token = requireEnv('GITHUB_TOKEN');
@@ -544,13 +567,7 @@ async function githubIssueList(
           .filter((n): n is string => n !== null)
       : [];
     if (number === null || htmlUrl === null || state === null) continue;
-    const title = typeof issue.title === 'string' ? issue.title : '';
-    const reader = await launder({
-      raw: title.length > 0 ? title : '(no title)',
-      source: 'web_content',
-      url: htmlUrl,
-    });
-    out.push({
+    const item: GithubIssueItem = {
       number,
       url: htmlUrl,
       state,
@@ -558,8 +575,16 @@ async function githubIssueList(
       labels,
       created_at: createdAt ?? '',
       updated_at: updatedAt ?? '',
-      reader,
-    });
+    };
+    if (includeReader) {
+      const title = typeof issue.title === 'string' ? issue.title : '';
+      item.reader = await launder({
+        raw: title.length > 0 ? title : '(no title)',
+        source: 'web_content',
+        url: htmlUrl,
+      });
+    }
+    out.push(item);
   }
   return out;
 }
@@ -569,6 +594,7 @@ async function githubIssueList(
 async function githubRunList(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<GithubRunItem[]> {
   rejectUnknownKeys(
     params,
@@ -626,18 +652,7 @@ async function githubRunList(
     ) {
       continue;
     }
-    const name = typeof run.name === 'string' ? run.name : '';
-    const displayTitle =
-      typeof run.display_title === 'string' ? run.display_title : '';
-    const raw =
-      [name, displayTitle].filter((s) => s.length > 0).join(' — ') ||
-      '(no name)';
-    const reader = await launder({
-      raw,
-      source: 'web_content',
-      url: htmlUrl,
-    });
-    out.push({
+    const item: GithubRunItem = {
       id,
       url: htmlUrl,
       status: statusValue,
@@ -646,8 +661,21 @@ async function githubRunList(
       head_sha: headSha,
       workflow_id: workflowId,
       created_at: createdAt ?? '',
-      reader,
-    });
+    };
+    if (includeReader) {
+      const name = typeof run.name === 'string' ? run.name : '';
+      const displayTitle =
+        typeof run.display_title === 'string' ? run.display_title : '';
+      const raw =
+        [name, displayTitle].filter((s) => s.length > 0).join(' — ') ||
+        '(no name)';
+      item.reader = await launder({
+        raw,
+        source: 'web_content',
+        url: htmlUrl,
+      });
+    }
+    out.push(item);
   }
   return out;
 }
@@ -742,6 +770,7 @@ function performNotionPost(args: {
 async function notionDatabaseQuery(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
 ): Promise<NotionDatabaseItem[]> {
   rejectUnknownKeys(params, new Set(['database_id', 'filter', 'limit']));
   const databaseId = requireString(params, 'database_id');
@@ -817,20 +846,22 @@ async function notionDatabaseQuery(
       typeof page.last_edited_time === 'string' ? page.last_edited_time : null;
     const archived = typeof page.archived === 'boolean' ? page.archived : false;
     if (id === null || pageUrl === null) continue;
-    const properties = page.properties ?? {};
-    const reader = await launder({
-      raw: JSON.stringify(properties),
-      source: 'notion_page',
-      url: pageUrl,
-    });
-    out.push({
+    const item: NotionDatabaseItem = {
       id,
       url: pageUrl,
       created_time: createdTime ?? '',
       last_edited_time: lastEditedTime ?? '',
       archived,
-      reader,
-    });
+    };
+    if (includeReader) {
+      const properties = page.properties ?? {};
+      item.reader = await launder({
+        raw: JSON.stringify(properties),
+        source: 'notion_page',
+        url: pageUrl,
+      });
+    }
+    out.push(item);
   }
   return out;
 }
@@ -854,13 +885,18 @@ function validateInput(input: unknown): FetchUntrustedListInput {
   if (!params || typeof params !== 'object' || Array.isArray(params)) {
     paramErr('params must be a JSON object');
   }
-  const allowed = new Set(['source_type', 'params']);
+  const includeReaderRaw = record.include_reader;
+  if (includeReaderRaw !== undefined && typeof includeReaderRaw !== 'boolean') {
+    paramErr('include_reader must be a boolean when provided');
+  }
+  const allowed = new Set(['source_type', 'params', 'include_reader']);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) paramErr(`unknown top-level param: ${key}`);
   }
   return {
     source_type: record.source_type as ListSourceType,
     params: params as Record<string, unknown>,
+    include_reader: includeReaderRaw === true,
   };
 }
 
@@ -870,25 +906,26 @@ export async function fetchUntrustedList(
 ): Promise<FetchUntrustedListResult> {
   const input = validateInput(rawInput);
   const deps = resolveDeps(depsInput);
+  const includeReader = input.include_reader;
   let items: ListItem[];
   switch (input.source_type) {
     case 'arxiv_search':
-      items = await arxivSearch(input.params, deps);
+      items = await arxivSearch(input.params, deps, includeReader);
       break;
     case 'github_search':
-      items = await githubSearch(input.params, deps);
+      items = await githubSearch(input.params, deps, includeReader);
       break;
     case 'github_pr_list':
-      items = await githubPrList(input.params, deps);
+      items = await githubPrList(input.params, deps, includeReader);
       break;
     case 'github_issue_list':
-      items = await githubIssueList(input.params, deps);
+      items = await githubIssueList(input.params, deps, includeReader);
       break;
     case 'github_run_list':
-      items = await githubRunList(input.params, deps);
+      items = await githubRunList(input.params, deps, includeReader);
       break;
     case 'notion_database_query':
-      items = await notionDatabaseQuery(input.params, deps);
+      items = await notionDatabaseQuery(input.params, deps, includeReader);
       break;
     default: {
       const _exhaustive: never = input.source_type;
