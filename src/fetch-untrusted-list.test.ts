@@ -565,6 +565,62 @@ describe('fetch-untrusted-list', () => {
     ).rejects.toMatchObject({ code: 'invalid_params' });
   });
 
+  it('notion_database_query throws fetch_failure with httpStatus on non-2xx', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'unauthorized' }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      await expect(
+        fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        ),
+      ).rejects.toMatchObject({ code: 'fetch_failure', httpStatus: 401 });
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_database_query throws fetch_failure without httpStatus when 2xx body is unparseable', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('not-json-at-all');
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedError);
+      expect(caught).toMatchObject({ code: 'fetch_failure' });
+      expect((caught as FetchUntrustedError).httpStatus).toBeUndefined();
+    } finally {
+      await notion.close();
+    }
+  });
+
   it('notion_database_query rejects RFC1918 hostname with bad_url', async () => {
     // Fake the resolver to return an RFC1918 address; the SSRF guard should catch it.
     const deps: FetchUntrustedDeps = {

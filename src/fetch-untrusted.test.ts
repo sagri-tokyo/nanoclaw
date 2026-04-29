@@ -255,6 +255,31 @@ describe('fetch-untrusted', () => {
     }
   });
 
+  it('web_content surfaces upstream HTTP status in httpStatus on non-2xx', async () => {
+    const target = await startFakeServer((_req, res) => {
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      res.end('upstream broken');
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'flaky.example': { port: target.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      await expect(
+        fetchUntrusted(
+          {
+            url_or_id: 'https://flaky.example/x',
+            source_type: 'web_content',
+          },
+          deps,
+        ),
+      ).rejects.toMatchObject({ code: 'fetch_failure', httpStatus: 503 });
+    } finally {
+      await target.close();
+    }
+  });
+
   it('web_content enforces 256 KiB body cap with fetch_failure', async () => {
     const huge = 'x'.repeat(300 * 1024);
     const target = await startFakeServer((_req, res) => {

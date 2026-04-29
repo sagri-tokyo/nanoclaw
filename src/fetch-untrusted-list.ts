@@ -780,6 +780,7 @@ async function notionDatabaseQuery(
     throw new FetchUntrustedError(
       'fetch_failure',
       `notion returned non-2xx status ${response.status}`,
+      response.status,
     );
   }
   let parsed: unknown;

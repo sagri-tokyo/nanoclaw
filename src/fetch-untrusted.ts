@@ -49,6 +49,7 @@ export class FetchUntrustedError extends Error {
   constructor(
     readonly code: FetchUntrustedErrorCode,
     message: string,
+    readonly httpStatus?: number,
   ) {
     super(message);
   }
@@ -316,6 +317,7 @@ export async function fetchWithRedirects(
       throw new FetchUntrustedError(
         'fetch_failure',
         `target returned non-2xx status ${response.status}`,
+        response.status,
       );
     }
     return response;
