@@ -559,7 +559,9 @@ source_type values:
 
 server.tool(
   'fetch_untrusted_list',
-  `Fetch untrusted list-shaped sources (arXiv search, GitHub repo/PR/issue/run lists, Notion database queries) and return a structured list of items where each item's free-text fields have been laundered through the host's Reader (Sonnet). Constrained fields (numeric ids, urls, ISO timestamps, GitHub logins) are surfaced raw alongside each item's ReaderOutput under \`reader\`. Embedded prompt-injections in titles/descriptions/abstracts are classified, not obeyed.
+  `Fetch untrusted list-shaped sources (arXiv search, GitHub repo/PR/issue/run lists, Notion database queries) and return a structured list of items. Constrained fields (numeric ids, urls, ISO timestamps, GitHub logins) are surfaced raw on each item.
+
+By default, items[].reader is omitted from the response and the host-side Reader RPC is skipped — only the constrained fields reach the agent, eliminating any path for laundered free-text bodies (titles, descriptions, abstracts, page properties) to surface attacker-influenced wording in the agent context. Set \`include_reader: true\` only when the consumer needs the laundered ReaderOutput to rank or summarize items (search/research adapters); enumeration consumers (e.g. polling a Notion queue, listing recent PRs by id) should leave it false.
 
 Use this in place of \`gh ... list --json\`, \`curl https://api.github.com/search/...\`, \`curl https://export.arxiv.org/api/query?...\`, and \`curl POST https://api.notion.com/v1/databases/{id}/query\` when enumerating untrusted items. Returns the FetchUntrustedListResult JSON as a string.
 
@@ -586,6 +588,12 @@ source_type values and required params:
       .describe(
         'Adapter-specific params (see source_type description for required keys)',
       ),
+    include_reader: z
+      .boolean()
+      .optional()
+      .describe(
+        'Default false. When true, each item carries a laundered ReaderOutput under `reader` (intent paraphrase + extracted_data + risk_flags). Currently only meaningful for `arxiv_search` and `github_search`, where the laundered body is needed to rank items; enumeration consumers (notion_database_query, github_pr_list, github_issue_list, github_run_list) should leave it false.',
+      ),
   },
   async (args) => {
     const rpcUrl = process.env.NANOCLAW_READER_RPC_URL;
@@ -602,6 +610,7 @@ source_type values and required params:
         params: {
           source_type: args.source_type,
           params: args.params,
+          include_reader: args.include_reader === true,
         },
       }),
     });

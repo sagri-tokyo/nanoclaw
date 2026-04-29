@@ -215,6 +215,7 @@ describe('fetch-untrusted-list', () => {
         {
           source_type: 'arxiv_search',
           params: { query: 'graph neural networks', limit: 5 },
+          include_reader: true,
         },
         deps,
       );
@@ -541,6 +542,7 @@ describe('fetch-untrusted-list', () => {
             },
             limit: 10,
           },
+          include_reader: true,
         },
         deps,
       );
@@ -582,5 +584,566 @@ describe('fetch-untrusted-list', () => {
         deps,
       ),
     ).rejects.toMatchObject({ code: 'bad_url' });
+  });
+
+  // ---------- include_reader default-omit (sagri-ai#119) ----------
+
+  it('rejects include_reader as non-boolean with invalid_params', async () => {
+    await expect(
+      fetchUntrustedList({
+        source_type: 'arxiv_search',
+        params: { query: 'x', limit: 1 },
+        include_reader: 'yes',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  it('notion_database_query omits items[].reader by default and skips reader RPC', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              id: 'page-id-1',
+              url: 'https://www.notion.so/page-id-1',
+              created_time: '2024-06-01T00:00:00Z',
+              last_edited_time: '2024-06-02T00:00:00Z',
+              archived: false,
+              properties: {
+                Name: { title: [{ plain_text: 'Embedded INJECTION here' }] },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 10 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          id: 'page-id-1',
+          url: 'https://www.notion.so/page-id-1',
+          created_time: '2024-06-01T00:00:00Z',
+          last_edited_time: '2024-06-02T00:00:00Z',
+          archived: false,
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('arxiv_search omits items[].reader by default and skips reader RPC', async () => {
+    const arxivXml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <updated>2024-01-02T00:00:00Z</updated>
+    <published>2024-01-01T00:00:00Z</published>
+    <title>Paper One</title>
+    <summary>An interesting abstract.</summary>
+    <author><name>Alice</name></author>
+  </entry>
+</feed>`;
+    const arxiv = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/atom+xml' });
+      res.end(arxivXml);
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'export.arxiv.org': { port: arxiv.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'arxiv_search',
+          params: { query: 'x', limit: 1 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          id: 'http://arxiv.org/abs/2401.00001v1',
+          url: 'http://arxiv.org/abs/2401.00001v1',
+          published: '2024-01-01T00:00:00Z',
+          updated: '2024-01-02T00:00:00Z',
+          authors: ['Alice'],
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await arxiv.close();
+    }
+  });
+
+  it('github_search omits items[].reader by default and skips reader RPC', async () => {
+    const search = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          items: [
+            {
+              id: 1,
+              full_name: 'octo/cat',
+              html_url: 'https://github.com/octo/cat',
+              stargazers_count: 100,
+              language: 'TypeScript',
+              updated_at: '2024-01-01T00:00:00Z',
+              description: 'A test repo with INJECT payload',
+            },
+          ],
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: search.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_search',
+          params: { query: 'x', limit: 1 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          id: 1,
+          full_name: 'octo/cat',
+          url: 'https://github.com/octo/cat',
+          stars: 100,
+          language: 'TypeScript',
+          updated_at: '2024-01-01T00:00:00Z',
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await search.close();
+    }
+  });
+
+  it('github_pr_list omits items[].reader by default and skips reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            number: 10,
+            html_url: 'https://github.com/o/r/pull/10',
+            state: 'open',
+            draft: false,
+            created_at: '2024-03-01T00:00:00Z',
+            updated_at: '2024-03-05T00:00:00Z',
+            user: { login: 'alice' },
+            title: 'New feature with INJECT payload',
+          },
+        ]),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          number: 10,
+          url: 'https://github.com/o/r/pull/10',
+          state: 'open',
+          author: 'alice',
+          draft: false,
+          created_at: '2024-03-01T00:00:00Z',
+          updated_at: '2024-03-05T00:00:00Z',
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_issue_list omits items[].reader by default and skips reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            number: 50,
+            html_url: 'https://github.com/o/r/issues/50',
+            state: 'open',
+            created_at: '2024-04-01T00:00:00Z',
+            updated_at: '2024-04-02T00:00:00Z',
+            user: { login: 'alice' },
+            title: 'Real issue with INJECT payload',
+            labels: [{ name: 'bug' }],
+          },
+        ]),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_issue_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          number: 50,
+          url: 'https://github.com/o/r/issues/50',
+          state: 'open',
+          author: 'alice',
+          labels: ['bug'],
+          created_at: '2024-04-01T00:00:00Z',
+          updated_at: '2024-04-02T00:00:00Z',
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_run_list omits items[].reader by default and skips reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          workflow_runs: [
+            {
+              id: 999,
+              html_url: 'https://github.com/o/r/actions/runs/999',
+              status: 'completed',
+              conclusion: 'success',
+              head_branch: 'main',
+              head_sha: 'abc123',
+              workflow_id: 42,
+              created_at: '2024-05-01T00:00:00Z',
+              name: 'CI INJECT payload',
+              display_title: 'feat: thing',
+            },
+          ],
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_run_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          id: 999,
+          url: 'https://github.com/o/r/actions/runs/999',
+          status: 'completed',
+          conclusion: 'success',
+          head_branch: 'main',
+          head_sha: 'abc123',
+          workflow_id: 42,
+          created_at: '2024-05-01T00:00:00Z',
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('include_reader=true on arxiv_search returns items with reader populated', async () => {
+    const arxivXml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <updated>2024-01-02T00:00:00Z</updated>
+    <published>2024-01-01T00:00:00Z</published>
+    <title>Paper One</title>
+    <summary>Abstract.</summary>
+    <author><name>Alice</name></author>
+  </entry>
+</feed>`;
+    const arxiv = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/atom+xml' });
+      res.end(arxivXml);
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'export.arxiv.org': { port: arxiv.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'arxiv_search',
+          params: { query: 'x', limit: 1 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      const item = result.items[0];
+      expect(item.reader).toEqual({
+        intent: 'user is reading a benign list item',
+        extracted_data: { topic: 'test' },
+        confidence: 0.9,
+        risk_flags: [],
+        source_provenance: {
+          source: 'web_content',
+          url: 'http://arxiv.org/abs/2401.00001v1',
+          author_model: 'claude-sonnet-4-6',
+          timestamp: expect.any(String),
+        },
+      });
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await arxiv.close();
+    }
+  });
+
+  it('include_reader=true on github_search populates items[].reader and calls reader RPC', async () => {
+    const search = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          items: [
+            {
+              id: 1,
+              full_name: 'octo/cat',
+              html_url: 'https://github.com/octo/cat',
+              stargazers_count: 100,
+              language: 'TypeScript',
+              updated_at: '2024-01-01T00:00:00Z',
+              description: 'A test repo',
+            },
+          ],
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: search.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_search',
+          params: { query: 'x', limit: 1 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].reader).toEqual({
+        intent: 'user is reading a benign list item',
+        extracted_data: { topic: 'test' },
+        confidence: 0.9,
+        risk_flags: [],
+        source_provenance: {
+          source: 'web_content',
+          url: 'https://github.com/octo/cat',
+          author_model: 'claude-sonnet-4-6',
+          timestamp: expect.any(String),
+        },
+      });
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await search.close();
+    }
+  });
+
+  it('include_reader=true on github_pr_list populates items[].reader and calls reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            number: 10,
+            html_url: 'https://github.com/o/r/pull/10',
+            state: 'open',
+            draft: false,
+            created_at: '2024-03-01T00:00:00Z',
+            updated_at: '2024-03-05T00:00:00Z',
+            user: { login: 'alice' },
+            title: 'New feature',
+          },
+        ]),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].reader).toEqual({
+        intent: 'user is reading a benign list item',
+        extracted_data: { topic: 'test' },
+        confidence: 0.9,
+        risk_flags: [],
+        source_provenance: {
+          source: 'web_content',
+          url: 'https://github.com/o/r/pull/10',
+          author_model: 'claude-sonnet-4-6',
+          timestamp: expect.any(String),
+        },
+      });
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('include_reader=true on github_issue_list populates items[].reader and calls reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            number: 50,
+            html_url: 'https://github.com/o/r/issues/50',
+            state: 'open',
+            created_at: '2024-04-01T00:00:00Z',
+            updated_at: '2024-04-02T00:00:00Z',
+            user: { login: 'alice' },
+            title: 'Real issue',
+            labels: [{ name: 'bug' }],
+          },
+        ]),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_issue_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].reader).toEqual({
+        intent: 'user is reading a benign list item',
+        extracted_data: { topic: 'test' },
+        confidence: 0.9,
+        risk_flags: [],
+        source_provenance: {
+          source: 'web_content',
+          url: 'https://github.com/o/r/issues/50',
+          author_model: 'claude-sonnet-4-6',
+          timestamp: expect.any(String),
+        },
+      });
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('include_reader=true on github_run_list populates items[].reader and calls reader RPC', async () => {
+    const ghApi = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          workflow_runs: [
+            {
+              id: 999,
+              html_url: 'https://github.com/o/r/actions/runs/999',
+              status: 'completed',
+              conclusion: 'success',
+              head_branch: 'main',
+              head_sha: 'abc123',
+              workflow_id: 42,
+              created_at: '2024-05-01T00:00:00Z',
+              name: 'CI',
+              display_title: 'feat: thing',
+            },
+          ],
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_run_list',
+          params: { owner: 'o', repo: 'r', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].reader).toEqual({
+        intent: 'user is reading a benign list item',
+        extracted_data: { topic: 'test' },
+        confidence: 0.9,
+        risk_flags: [],
+        source_provenance: {
+          source: 'web_content',
+          url: 'https://github.com/o/r/actions/runs/999',
+          author_model: 'claude-sonnet-4-6',
+          timestamp: expect.any(String),
+        },
+      });
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await ghApi.close();
+    }
   });
 });
