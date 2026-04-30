@@ -1,0 +1,328 @@
+/**
+ * Tests for the activity-log schema validator + logger.action() emitter.
+ *
+ * Schema target (sagri-tokyo/sagri-ai#110):
+ *   ts: ISO 8601 string
+ *   level: "info" | "warn" | "error"
+ *   session_id: string
+ *   trigger: string
+ *   trigger_source: string
+ *   tool: string
+ *   inputs_hash: bare-hex sha256
+ *   outputs_hash: bare-hex sha256
+ *   duration_ms: number (non-negative)
+ *   outcome: "ok" | "error" | "timeout" | "rejected"
+ *   error_class: string | null (string required when outcome=error)
+ *   group: string
+ *
+ * Hashing: sha256(canonical(payload)). Canonical JSON has stable key order so
+ * hashes match regardless of object key insertion order.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+import {
+  hashPayload,
+  canonicalJson,
+  validateActionRecord,
+  ActionRecord,
+  logger,
+} from './logger.js';
+
+function validRecord(overrides: Partial<ActionRecord> = {}): ActionRecord {
+  return {
+    ts: '2026-04-30T12:34:56.789Z',
+    level: 'info',
+    session_id: 'sess-1',
+    trigger: 'slack_mention',
+    trigger_source: '#sagri-ai-dev',
+    tool: 'message_send',
+    inputs_hash: hashPayload('hello'),
+    outputs_hash: hashPayload('world'),
+    duration_ms: 42,
+    outcome: 'ok',
+    error_class: null,
+    group: 'sagri-ai',
+    ...overrides,
+  };
+}
+
+describe('canonicalJson', () => {
+  it('serializes objects with sorted keys', () => {
+    expect(canonicalJson({ b: 2, a: 1 })).toBe('{"a":1,"b":2}');
+  });
+
+  it('produces identical output regardless of key order', () => {
+    const left = canonicalJson({ a: 1, b: { y: 2, x: 1 } });
+    const right = canonicalJson({ b: { x: 1, y: 2 }, a: 1 });
+    expect(left).toBe(right);
+  });
+
+  it('preserves array order', () => {
+    expect(canonicalJson([3, 1, 2])).toBe('[3,1,2]');
+  });
+
+  it('handles nested objects with mixed types', () => {
+    expect(canonicalJson({ list: [{ b: 2, a: 1 }, 's'], num: 7 })).toBe(
+      '{"list":[{"a":1,"b":2},"s"],"num":7}',
+    );
+  });
+
+  it('serializes null and primitives directly', () => {
+    expect(canonicalJson(null)).toBe('null');
+    expect(canonicalJson(7)).toBe('7');
+    expect(canonicalJson('s')).toBe('"s"');
+    expect(canonicalJson(true)).toBe('true');
+  });
+});
+
+describe('hashPayload', () => {
+  it('returns bare hex sha256 of utf-8 bytes for strings', () => {
+    const h = hashPayload('hello');
+    expect(h).toBe(
+      '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+    );
+    expect(h).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('hashes UTF-8 bytes for multibyte strings', () => {
+    expect(hashPayload('日本語')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('canonicalises objects before hashing — key order is irrelevant', () => {
+    expect(hashPayload({ a: 1, b: 2 })).toBe(hashPayload({ b: 2, a: 1 }));
+  });
+
+  it('hashes Buffers as raw bytes (not as their JSON form)', () => {
+    const buf = Buffer.from([0x01, 0x02, 0x03]);
+    const h = hashPayload(buf);
+    expect(h).toMatch(/^[0-9a-f]{64}$/);
+    expect(h).not.toBe(hashPayload('123'));
+  });
+
+  it('hashes the empty string deterministically', () => {
+    expect(hashPayload('')).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+  });
+
+  it('hashes the empty object deterministically', () => {
+    expect(hashPayload({})).toBe(hashPayload({}));
+  });
+});
+
+describe('validateActionRecord', () => {
+  it('accepts a canonical record', () => {
+    expect(() => validateActionRecord(validRecord())).not.toThrow();
+  });
+
+  it('rejects missing ts', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).ts;
+    expect(() => validateActionRecord(r)).toThrow(/ts/);
+  });
+
+  it('rejects non-ISO ts', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ ts: 'yesterday' })),
+    ).toThrow(/ts/);
+  });
+
+  it('rejects missing session_id', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).session_id;
+    expect(() => validateActionRecord(r)).toThrow(/session_id/);
+  });
+
+  it('rejects empty session_id', () => {
+    expect(() => validateActionRecord(validRecord({ session_id: '' }))).toThrow(
+      /session_id/,
+    );
+  });
+
+  it('rejects missing trigger', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).trigger;
+    expect(() => validateActionRecord(r)).toThrow(/trigger/);
+  });
+
+  it('rejects missing trigger_source', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).trigger_source;
+    expect(() => validateActionRecord(r)).toThrow(/trigger_source/);
+  });
+
+  it('rejects missing tool', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).tool;
+    expect(() => validateActionRecord(r)).toThrow(/tool/);
+  });
+
+  it('rejects non-hex inputs_hash', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ inputs_hash: 'sha256:abcd' })),
+    ).toThrow(/inputs_hash/);
+    expect(() =>
+      validateActionRecord(validRecord({ inputs_hash: 'not-a-hash' })),
+    ).toThrow(/inputs_hash/);
+  });
+
+  it('rejects non-hex outputs_hash', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ outputs_hash: 'XYZ' })),
+    ).toThrow(/outputs_hash/);
+  });
+
+  it('rejects non-numeric duration_ms', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ duration_ms: 'fast' as unknown as number }),
+      ),
+    ).toThrow(/duration_ms/);
+  });
+
+  it('rejects negative duration_ms', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ duration_ms: -1 })),
+    ).toThrow(/duration_ms/);
+  });
+
+  it('rejects non-finite duration_ms', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ duration_ms: Infinity })),
+    ).toThrow(/duration_ms/);
+  });
+
+  it('rejects unknown level', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ level: 'debug' as unknown as 'info' }),
+      ),
+    ).toThrow(/level/);
+  });
+
+  it('rejects unknown outcome', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'maybe' as unknown as 'ok' }),
+      ),
+    ).toThrow(/outcome/);
+  });
+
+  it('accepts each documented outcome', () => {
+    for (const outcome of ['ok', 'timeout', 'rejected'] as const) {
+      expect(() =>
+        validateActionRecord(validRecord({ outcome })),
+      ).not.toThrow();
+    }
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'error', error_class: 'BoomError' }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects missing group', () => {
+    const r = validRecord();
+    delete (r as Partial<ActionRecord>).group;
+    expect(() => validateActionRecord(r)).toThrow(/group/);
+  });
+
+  it('accepts null error_class on ok outcome', () => {
+    expect(() =>
+      validateActionRecord(validRecord({ outcome: 'ok', error_class: null })),
+    ).not.toThrow();
+  });
+
+  it('requires error_class to be a string when outcome is error', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'error', error_class: null }),
+      ),
+    ).toThrow(/error_class/);
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'error', error_class: 'TypeError' }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects extra unknown fields (closed schema)', () => {
+    const r = {
+      ...validRecord(),
+      extra_field: 'oops',
+    } as unknown as ActionRecord;
+    expect(() => validateActionRecord(r)).toThrow(/extra_field/);
+  });
+});
+
+describe('logger.action emission', () => {
+  let writes: string[];
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    writes = [];
+    stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+  });
+
+  it('emits one NDJSON line per action', () => {
+    logger.action(validRecord());
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/\n$/);
+    const parsed = JSON.parse(writes[0]);
+    expect(parsed).toEqual({
+      ts: '2026-04-30T12:34:56.789Z',
+      level: 'info',
+      session_id: 'sess-1',
+      trigger: 'slack_mention',
+      trigger_source: '#sagri-ai-dev',
+      tool: 'message_send',
+      inputs_hash: hashPayload('hello'),
+      outputs_hash: hashPayload('world'),
+      duration_ms: 42,
+      outcome: 'ok',
+      error_class: null,
+      group: 'sagri-ai',
+    });
+  });
+
+  it('routes info to stdout and warn/error to stderr', () => {
+    logger.action(validRecord({ level: 'info' }));
+    expect(stdoutSpy).toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
+
+    stdoutSpy.mockClear();
+    stderrSpy.mockClear();
+    logger.action(
+      validRecord({
+        level: 'error',
+        outcome: 'error',
+        error_class: 'BoomError',
+      }),
+    );
+    expect(stderrSpy).toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws synchronously on invalid records (fail fast)', () => {
+    expect(() => logger.action(validRecord({ inputs_hash: 'bogus' }))).toThrow(
+      /inputs_hash/,
+    );
+  });
+});
