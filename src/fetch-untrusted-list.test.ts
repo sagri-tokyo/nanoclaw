@@ -106,7 +106,7 @@ function buildLocalRedirectDeps(args: {
 }
 
 const READER_RESPONSE = {
-  model: 'claude-sonnet-4-6',
+  model: 'claude-haiku-4-5',
   content: [
     {
       type: 'text',
@@ -984,7 +984,7 @@ describe('fetch-untrusted-list', () => {
         source_provenance: {
           source: 'web_content',
           url: 'http://arxiv.org/abs/2401.00001v1',
-          author_model: 'claude-sonnet-4-6',
+          author_model: 'claude-haiku-4-5',
           timestamp: expect.any(String),
         },
       });
@@ -1036,7 +1036,7 @@ describe('fetch-untrusted-list', () => {
         source_provenance: {
           source: 'web_content',
           url: 'https://github.com/octo/cat',
-          author_model: 'claude-sonnet-4-6',
+          author_model: 'claude-haiku-4-5',
           timestamp: expect.any(String),
         },
       });
@@ -1087,7 +1087,7 @@ describe('fetch-untrusted-list', () => {
         source_provenance: {
           source: 'web_content',
           url: 'https://github.com/o/r/pull/10',
-          author_model: 'claude-sonnet-4-6',
+          author_model: 'claude-haiku-4-5',
           timestamp: expect.any(String),
         },
       });
@@ -1138,7 +1138,7 @@ describe('fetch-untrusted-list', () => {
         source_provenance: {
           source: 'web_content',
           url: 'https://github.com/o/r/issues/50',
-          author_model: 'claude-sonnet-4-6',
+          author_model: 'claude-haiku-4-5',
           timestamp: expect.any(String),
         },
       });
@@ -1193,7 +1193,7 @@ describe('fetch-untrusted-list', () => {
         source_provenance: {
           source: 'web_content',
           url: 'https://github.com/o/r/actions/runs/999',
-          author_model: 'claude-sonnet-4-6',
+          author_model: 'claude-haiku-4-5',
           timestamp: expect.any(String),
         },
       });

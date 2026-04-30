@@ -6,7 +6,7 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 
-export const READER_MODEL = 'claude-sonnet-4-6';
+export const READER_MODEL = 'claude-haiku-4-5';
 const READER_MAX_TOKENS = 1024;
 const READER_TIMEOUT_MS = 30000;
 const ANTHROPIC_VERSION = '2023-06-01';
