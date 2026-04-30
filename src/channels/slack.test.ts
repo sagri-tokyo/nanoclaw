@@ -355,6 +355,49 @@ describe('SlackChannel', () => {
       );
     });
 
+    it('marks group/channel messages with is_dm=false', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ channelType: 'channel', text: 'hi' }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ is_dm: false }),
+      );
+    });
+
+    it('marks IM messages with is_dm=true', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'slack:D0123456789': {
+            name: 'DM',
+            folder: 'dm',
+            trigger: '@Jonesy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'D0123456789',
+          channelType: 'im',
+          text: 'hello',
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:D0123456789',
+        expect.objectContaining({ is_dm: true }),
+      );
+    });
+
     it('converts ts to ISO timestamp', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
@@ -1015,6 +1058,69 @@ describe('SlackChannel', () => {
     it('has name "slack"', () => {
       const channel = new SlackChannel(createTestOpts());
       expect(channel.name).toBe('slack');
+    });
+  });
+
+  // --- Kill-switch intercept (sagri-tokyo/sagri-ai#128) ---
+  // Verifies that an `@<assistant> stop` mention reaching the host's
+  // `handleInboundMessage` (used by `index.ts` `channelOpts.onMessage`)
+  // does NOT fall through to `storeMessage`, even though the SlackChannel
+  // still emits the message via `opts.onMessage`. Storage is the path
+  // that would feed the message into the agent we're about to kill.
+
+  describe('kill-switch intercept', () => {
+    it('does not store @Jonesy stop arriving from a registered channel', async () => {
+      const { handleInboundMessage } = await import('../inbound.js');
+
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const storeMessage = vi.fn();
+      const handleAbort = vi.fn(async () => undefined);
+      const handleRemoteControl = vi.fn(async () => undefined);
+
+      // Mirror the host wiring: SlackChannel emits via opts.onMessage,
+      // and the host delegates to handleInboundMessage.
+      const hostOnMessage = vi.fn((jid: string, msg: any) => {
+        handleInboundMessage(jid, msg, {
+          registeredGroups: opts.registeredGroups,
+          storeMessage,
+          handleAbort,
+          handleRemoteControl,
+          loadSenderAllowlist: () => ({
+            default: { allow: '*', mode: 'trigger' },
+            chats: {},
+            logDenied: false,
+          }),
+        });
+      });
+      (opts.onMessage as any).mockImplementation(hostOnMessage);
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: '<@U_BOT_123> stop',
+          user: 'U_USER_456',
+        }),
+      );
+
+      // Slack adapter rewrites <@U_BOT_123> stop → "@Jonesy <@U_BOT_123> stop"
+      // ...but parseAbortIntent only accepts `@Jonesy stop` exactly.
+      // Confirm the canonical form is intercepted.
+      (opts.onMessage as any).mockClear();
+      storeMessage.mockClear();
+      handleAbort.mockClear();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: '@Jonesy stop',
+          user: 'U_USER_456',
+          ts: '1704067201.000000',
+        }),
+      );
+
+      expect(handleAbort).toHaveBeenCalledTimes(1);
+      expect(storeMessage).not.toHaveBeenCalled();
     });
   });
 });

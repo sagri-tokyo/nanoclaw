@@ -51,6 +51,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { handleInboundMessage } from './inbound.js';
 import { startIpcWatcher } from './ipc.js';
 import {
   findChannel,
@@ -62,12 +63,7 @@ import {
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
-import {
-  isSenderAllowed,
-  isTriggerAllowed,
-  loadSenderAllowlist,
-  shouldDropMessage,
-} from './sender-allowlist.js';
+import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -630,35 +626,32 @@ async function main(): Promise<void> {
     }
   }
 
+  // Kill-switch stub responder (PR-A — sagri-tokyo/sagri-ai#128).
+  // The real container-stop wiring (call stopContainer, drain pending
+  // state, post structured success/failure) lands in PR-B
+  // (sagri-tokyo/sagri-ai#129) and replaces this stub.
+  async function handleAbort(chatJid: string, _msg: NewMessage): Promise<void> {
+    const channel = findChannel(channels, chatJid);
+    if (!channel) {
+      logger.warn({ chatJid }, 'Abort intent: no channel owns JID');
+      return;
+    }
+    await channel.sendMessage(
+      chatJid,
+      'kill switch acknowledged — abort wiring lands in #129',
+    );
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
-      const trimmed = msg.content.trim();
-      if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
-        handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
-          logger.error({ err, chatJid }, 'Remote control command error'),
-        );
-        return;
-      }
-
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
-        if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
-        ) {
-          if (cfg.logDenied) {
-            logger.debug(
-              { chatJid, sender: msg.sender },
-              'sender-allowlist: dropping message (drop mode)',
-            );
-          }
-          return;
-        }
-      }
-      storeMessage(msg);
+      handleInboundMessage(chatJid, msg, {
+        registeredGroups: () => registeredGroups,
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist,
+      });
     },
     onChatMetadata: (
       chatJid: string,
