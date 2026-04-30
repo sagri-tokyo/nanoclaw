@@ -135,7 +135,7 @@ describe('reader', () => {
     expect(captured[0].headers['anthropic-beta']).toContain('oauth');
   });
 
-  it('requests the configured Sonnet model', async () => {
+  it('requests the configured Haiku model', async () => {
     await readUntrustedContent({
       raw: 'anything',
       source: 'slack_message',
@@ -144,7 +144,7 @@ describe('reader', () => {
 
     const requestBody = JSON.parse(captured[0].body);
     expect(requestBody.model).toBe(READER_MODEL);
-    expect(requestBody.model).toMatch(/sonnet/);
+    expect(requestBody.model).toMatch(/haiku/);
   });
 
   it('prompt-injection payload is classified via risk_flags, not echoed verbatim into intent', async () => {
@@ -352,7 +352,7 @@ describe('reader', () => {
     respondWith = () => ({
       status: 200,
       body: {
-        model: 'claude-sonnet-4-6-20250101',
+        model: 'claude-haiku-4-5-20250101',
         content: [
           {
             type: 'text',
@@ -373,7 +373,7 @@ describe('reader', () => {
       sourceMetadata: {},
     });
     expect(out.source_provenance.author_model).toBe(
-      'claude-sonnet-4-6-20250101',
+      'claude-haiku-4-5-20250101',
     );
   });
 
