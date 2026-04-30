@@ -22,7 +22,7 @@ import {
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
 import { fetchUntrustedList } from './fetch-untrusted-list.js';
-import { logger } from './logger.js';
+import { hashPayload, logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
   readUntrustedContent,
@@ -208,17 +208,51 @@ function readRequestBody(req: IncomingMessage): Promise<string> {
 
 async function handleReadUntrusted(params: unknown): Promise<ReaderOutput> {
   const parsed = parseReadUntrustedParams(params);
+  const startTime = Date.now();
+  // Hash the raw input for the action record. We never log the raw text —
+  // the source metadata's chat_jid (if present) gives session context.
+  const inputsHash = hashPayload(parsed.raw);
+  const sessionId = parsed.source_metadata.chat_jid || parsed.source;
   try {
-    return await readUntrustedContent({
+    const output = await readUntrustedContent({
       raw: parsed.raw,
       source: parsed.source,
       sourceMetadata: parsed.source_metadata,
     });
+    logger.action({
+      ts: new Date().toISOString(),
+      level: 'info',
+      session_id: sessionId,
+      trigger: 'sub_request',
+      trigger_source: parsed.source,
+      tool: 'reader_rpc',
+      inputs_hash: inputsHash,
+      outputs_hash: hashPayload(output),
+      duration_ms: Date.now() - startTime,
+      outcome: 'ok',
+      error_class: null,
+      group: parsed.source,
+    });
+    return output;
   } catch (err) {
     // Re-raise with a scoped code and a static message. Reader errors can
     // embed Anthropic response snippets that might echo the untrusted
     // input back to the caller — never forward err.message to containers.
     logger.error({ err }, 'reader-rpc: upstream reader call failed');
+    logger.action({
+      ts: new Date().toISOString(),
+      level: 'error',
+      session_id: sessionId,
+      trigger: 'sub_request',
+      trigger_source: parsed.source,
+      tool: 'reader_rpc',
+      inputs_hash: inputsHash,
+      outputs_hash: hashPayload(''),
+      duration_ms: Date.now() - startTime,
+      outcome: 'error',
+      error_class: err instanceof Error ? err.constructor.name : 'Error',
+      group: parsed.source,
+    });
     throw new RpcError('reader_failure', 502, 'upstream reader call failed');
   }
 }

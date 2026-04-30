@@ -9,6 +9,8 @@ const { mockEnv, loggerMock } = vi.hoisted(() => ({
     error: vi.fn(),
     debug: vi.fn(),
     warn: vi.fn(),
+    fatal: vi.fn(),
+    action: vi.fn(),
   },
 }));
 
@@ -22,9 +24,16 @@ vi.mock('./env.js', () => ({
   }),
 }));
 
-vi.mock('./logger.js', () => ({
-  logger: loggerMock,
-}));
+vi.mock('./logger.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./logger.js')>();
+  // Wire `action` through the real validator so any reader-rpc record that
+  // violates the schema fails the test loudly.
+  loggerMock.action.mockImplementation(real.logger.action);
+  return {
+    ...real,
+    logger: loggerMock,
+  };
+});
 
 import { startReaderRpc } from './reader-rpc.js';
 import type { FetchUntrustedDeps } from './fetch-untrusted.js';
