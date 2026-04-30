@@ -147,6 +147,53 @@ describe('reader', () => {
     expect(requestBody.model).toMatch(/haiku/);
   });
 
+  it('strips a markdown ```json fence around the response body', async () => {
+    const inner = JSON.stringify({
+      intent: 'user asks for the weather',
+      extracted_data: { topic: 'weather' },
+      confidence: 0.9,
+      risk_flags: [],
+    });
+    respondWith = () => ({
+      status: 200,
+      body: {
+        model: READER_MODEL,
+        content: [{ type: 'text', text: '```json\n' + inner + '\n```' }],
+      },
+    });
+
+    const out = await readUntrustedContent({
+      raw: 'x',
+      source: 'slack_message',
+      sourceMetadata: {},
+    });
+    expect(out.intent).toBe('user asks for the weather');
+    expect(out.extracted_data).toEqual({ topic: 'weather' });
+  });
+
+  it('strips a bare ``` fence with no language tag', async () => {
+    const inner = JSON.stringify({
+      intent: 'ok',
+      extracted_data: {},
+      confidence: 0.5,
+      risk_flags: [],
+    });
+    respondWith = () => ({
+      status: 200,
+      body: {
+        model: READER_MODEL,
+        content: [{ type: 'text', text: '```\n' + inner + '\n```' }],
+      },
+    });
+
+    const out = await readUntrustedContent({
+      raw: 'x',
+      source: 'slack_message',
+      sourceMetadata: {},
+    });
+    expect(out.intent).toBe('ok');
+  });
+
   it('prompt-injection payload is classified via risk_flags, not echoed verbatim into intent', async () => {
     respondWith = () => ({
       status: 200,
@@ -273,37 +320,6 @@ describe('reader', () => {
         sourceMetadata: {},
       }),
     ).rejects.toThrow(/invalid source/);
-  });
-
-  it('rejects a fenced code-block response (system prompt forbids fences)', async () => {
-    respondWith = () => ({
-      status: 200,
-      body: {
-        model: READER_MODEL,
-        content: [
-          {
-            type: 'text',
-            text:
-              '```json\n' +
-              JSON.stringify({
-                intent: 'ok',
-                extracted_data: {},
-                confidence: 0.5,
-                risk_flags: [],
-              }) +
-              '\n```',
-          },
-        ],
-      },
-    });
-
-    await expect(
-      readUntrustedContent({
-        raw: 'x',
-        source: 'slack_message',
-        sourceMetadata: {},
-      }),
-    ).rejects.toThrow();
   });
 
   it('rejects API response when content is not an array', async () => {
