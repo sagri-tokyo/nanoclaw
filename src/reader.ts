@@ -155,13 +155,19 @@ function postMessages(
   });
 }
 
+function stripOptionalCodeFence(text: string): string {
+  const trimmed = text.trim();
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  return fenceMatch ? fenceMatch[1].trim() : trimmed;
+}
+
 function parseAndValidateReaderOutput(
   text: string,
 ): Pick<
   ReaderOutput,
   'intent' | 'extracted_data' | 'confidence' | 'risk_flags'
 > {
-  const parsed: unknown = JSON.parse(text.trim());
+  const parsed: unknown = JSON.parse(stripOptionalCodeFence(text));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
     throw new Error('reader: response is not a JSON object');
   const r = parsed as Record<string, unknown>;
