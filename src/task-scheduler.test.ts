@@ -248,7 +248,9 @@ describe('task scheduler', () => {
         });
         expect(record.inputs_hash).toMatch(/^[0-9a-f]{64}$/);
         expect(record.outputs_hash).toMatch(/^[0-9a-f]{64}$/);
-        expect(record.error_class).toBe('Error');
+        // Reflects a real Error subclass thrown by resolveGroupFolderPath
+        // for the traversal-pattern input — not a synthetic 'Error' literal.
+        expect(record.error_class).toBe('InvalidGroupFolderError');
         expect(typeof record.duration_ms).toBe('number');
       } finally {
         stdoutSpy.mockRestore();

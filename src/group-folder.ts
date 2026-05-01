@@ -5,6 +5,42 @@ import { DATA_DIR, GROUPS_DIR } from './config.js';
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RESERVED_FOLDERS = new Set(['global']);
 
+/**
+ * Thrown when a group folder name fails validation (illegal characters,
+ * traversal pattern, reserved name). `error_class` in action records will
+ * surface as `'InvalidGroupFolderError'`.
+ */
+export class InvalidGroupFolderError extends Error {
+  constructor(folder: string) {
+    super(`Invalid group folder "${folder}"`);
+    this.name = 'InvalidGroupFolderError';
+  }
+}
+
+/**
+ * Thrown when a resolved path would escape the configured base directory
+ * (paranoid check after pattern-validation). `error_class` in action
+ * records surfaces as `'PathEscapeError'`.
+ */
+export class PathEscapeError extends Error {
+  constructor(resolvedPath: string) {
+    super(`Path escapes base directory: ${resolvedPath}`);
+    this.name = 'PathEscapeError';
+  }
+}
+
+/**
+ * Thrown by callers that look up a group by folder name and find no
+ * match (e.g. `task-scheduler` resolving the registered-group entry).
+ * Surfaces in action records as `'GroupNotFoundError'`.
+ */
+export class GroupNotFoundError extends Error {
+  constructor(folder: string) {
+    super(`Group not found: ${folder}`);
+    this.name = 'GroupNotFoundError';
+  }
+}
+
 export function isValidGroupFolder(folder: string): boolean {
   if (!folder) return false;
   if (folder !== folder.trim()) return false;
@@ -17,14 +53,14 @@ export function isValidGroupFolder(folder: string): boolean {
 
 export function assertValidGroupFolder(folder: string): void {
   if (!isValidGroupFolder(folder)) {
-    throw new Error(`Invalid group folder "${folder}"`);
+    throw new InvalidGroupFolderError(folder);
   }
 }
 
 function ensureWithinBase(baseDir: string, resolvedPath: string): void {
   const rel = path.relative(baseDir, resolvedPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Path escapes base directory: ${resolvedPath}`);
+    throw new PathEscapeError(resolvedPath);
   }
 }
 

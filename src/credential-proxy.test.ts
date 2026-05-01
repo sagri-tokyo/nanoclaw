@@ -292,4 +292,19 @@ describe('redactUrlPath', () => {
     expect(redactUrlPath(undefined)).toBe('<unknown>');
     expect(redactUrlPath('')).toBe('<unknown>');
   });
+
+  it('drops everything from the first # onward (URL fragment)', () => {
+    expect(redactUrlPath('/v1/messages#section')).toBe('/v1/messages');
+  });
+
+  it('drops both ? query and # fragment, whichever comes first', () => {
+    expect(redactUrlPath('/v1/messages?foo=bar#frag')).toBe('/v1/messages');
+    expect(redactUrlPath('/v1/messages#frag?foo=bar')).toBe('/v1/messages');
+  });
+
+  it('returns "<unparseable>" for inputs that fail URL parse', () => {
+    // An unbalanced bracket in the authority section makes the URL
+    // constructor throw "Invalid URL".
+    expect(redactUrlPath('//[')).toBe('<unparseable>');
+  });
 });
