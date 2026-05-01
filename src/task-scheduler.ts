@@ -17,8 +17,8 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
-import { hashPayload, logger } from './logger.js';
+import { GroupNotFoundError, resolveGroupFolderPath } from './group-folder.js';
+import { hashFailureOutput, hashPayload, logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -152,7 +152,8 @@ async function runTask(
   );
 
   if (!group) {
-    const error = `Group not found: ${task.group_folder}`;
+    const groupNotFound = new GroupNotFoundError(task.group_folder);
+    const error = groupNotFound.message;
     logger.error(
       { taskId: task.id, groupFolder: task.group_folder },
       'Group not found for task',
@@ -173,10 +174,14 @@ async function runTask(
       trigger_source: task.schedule_value,
       tool: 'container_run',
       inputs_hash: inputsHash,
-      outputs_hash: hashPayload(error),
+      outputs_hash: hashFailureOutput({
+        error_class: groupNotFound.constructor.name,
+        error_message_preview: error.slice(0, 200),
+      }),
       duration_ms: Date.now() - startTime,
       outcome: 'rejected',
-      error_class: 'GroupNotFoundError',
+      // Reflects the real Error subclass, not a synthetic literal.
+      error_class: groupNotFound.constructor.name,
       group: task.group_folder,
     });
     return;

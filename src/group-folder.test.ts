@@ -3,6 +3,9 @@ import path from 'path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  GroupNotFoundError,
+  InvalidGroupFolderError,
+  PathEscapeError,
   isValidGroupFolder,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
@@ -39,5 +42,32 @@ describe('group folder validation', () => {
   it('throws for unsafe folder names', () => {
     expect(() => resolveGroupFolderPath('../../etc')).toThrow();
     expect(() => resolveGroupIpcPath('/tmp')).toThrow();
+  });
+
+  it('throws InvalidGroupFolderError (real Error subclass) for invalid names', () => {
+    // Pin the constructor name — action records use `err.constructor.name`
+    // for `error_class`, so a real subclass keeps log filters meaningful.
+    let caught: unknown;
+    try {
+      resolveGroupFolderPath('../../etc');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(InvalidGroupFolderError);
+    expect((caught as Error).constructor.name).toBe('InvalidGroupFolderError');
+    expect((caught as Error).name).toBe('InvalidGroupFolderError');
+  });
+
+  it('exports GroupNotFoundError and PathEscapeError as named Error subclasses', () => {
+    const a = new GroupNotFoundError('some-folder');
+    expect(a).toBeInstanceOf(Error);
+    expect(a.constructor.name).toBe('GroupNotFoundError');
+    expect(a.name).toBe('GroupNotFoundError');
+    expect(a.message).toContain('some-folder');
+
+    const b = new PathEscapeError('/bad/path');
+    expect(b).toBeInstanceOf(Error);
+    expect(b.constructor.name).toBe('PathEscapeError');
+    expect(b.name).toBe('PathEscapeError');
   });
 });

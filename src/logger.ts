@@ -102,6 +102,13 @@ export interface ActionRecord {
   outputs_hash: string;
   duration_ms: number;
   outcome: ActionOutcome;
+  /**
+   * Required to be a non-empty string when `outcome` is `'error'` or
+   * `'rejected'`; required to be `null` when `outcome` is `'ok'` or
+   * `'timeout'`. CloudWatch Logs Insights queries can therefore filter
+   * `outcome IN ('error','rejected')` and rely on `error_class` always
+   * being populated for those rows.
+   */
   error_class: string | null;
   group: string;
 }
@@ -148,8 +155,21 @@ export class ActionSchemaError extends Error {
  * payloads before hashing so `{a:1,b:2}` and `{b:2,a:1}` hash to the same
  * value. Arrays preserve insertion order. Non-finite numbers serialise as
  * null (matches `JSON.stringify` default).
+ *
+ * `undefined` is rejected at every position (top-level, object value, array
+ * slot). `JSON.stringify` silently drops undefined-valued object keys and
+ * coerces undefined array slots to null, which would let
+ * `canonicalJson({a: undefined, b: 1})` and `canonicalJson({b: 1})` collide
+ * to the same hash. Forensic correlation needs distinct payloads to stay
+ * distinct, so we fail-fast instead. Callers must omit absent fields rather
+ * than passing `undefined`.
  */
 export function canonicalJson(value: unknown): string {
+  if (value === undefined) {
+    throw new ActionSchemaError(
+      'canonicalJson: undefined is not serialisable — omit the field instead',
+    );
+  }
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) {
     return '[' + value.map((v) => canonicalJson(v)).join(',') + ']';
@@ -181,6 +201,38 @@ export function hashPayload(payload: unknown): string {
     hash.update(canonicalJson(payload), 'utf8');
   }
   return hash.digest('hex');
+}
+
+/**
+ * Build an outputs_hash for action records whose call has no real output
+ * payload (rejected requests, error paths that never produced a response
+ * body). The hash is over a struct of whatever distinguishing context is
+ * available — at minimum the `error_class`, optionally a redacted
+ * `error_message_preview` (first 200 chars, callers must redact secrets
+ * upstream).
+ *
+ * Replaces the previous `hashPayload('')` pattern, which collapsed every
+ * error row across every tool to the same SHA-256 digest of empty bytes
+ * and silently broke `WHERE outputs_hash = ?` correlation queries.
+ *
+ * Callers must pass a non-empty `error_class`. If you genuinely have no
+ * error class (e.g. a rejection that isn't an error), invent a stable
+ * sentinel string for that case ("EmptyResponse", "NoOp") rather than
+ * passing an empty string.
+ */
+export function hashFailureOutput(failure: {
+  error_class: string;
+  error_message_preview?: string;
+}): string {
+  if (
+    typeof failure.error_class !== 'string' ||
+    failure.error_class.length === 0
+  ) {
+    throw new ActionSchemaError(
+      'hashFailureOutput: error_class must be a non-empty string',
+    );
+  }
+  return hashPayload(failure);
 }
 
 function fail(field: string, reason: string): never {
@@ -271,16 +323,20 @@ export function validateActionRecord(record: ActionRecord): void {
   if (!ALLOWED_OUTCOMES.includes(record.outcome)) {
     fail('outcome', `must be one of ${ALLOWED_OUTCOMES.join(', ')}`);
   }
-  if (record.outcome === 'error') {
+  if (record.outcome === 'error' || record.outcome === 'rejected') {
     if (
       typeof record.error_class !== 'string' ||
       record.error_class.length === 0
     ) {
-      fail('error_class', 'must be a non-empty string when outcome=error');
+      fail(
+        'error_class',
+        `must be a non-empty string when outcome=${record.outcome}`,
+      );
     }
   } else {
-    if (record.error_class !== null && typeof record.error_class !== 'string') {
-      fail('error_class', 'must be a string or null');
+    // outcome is 'ok' or 'timeout' — error_class must be exactly null.
+    if (record.error_class !== null) {
+      fail('error_class', `must be null when outcome=${record.outcome}`);
     }
   }
   if (typeof record.group !== 'string' || record.group.length === 0) {
