@@ -92,6 +92,7 @@ vi.mock('../env.js', () => ({
 import { SlackChannel, SlackChannelOpts, splitForSlack } from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
+import type { NewMessage } from '../types.js';
 
 // --- Test helpers ---
 
@@ -537,7 +538,7 @@ describe('SlackChannel', () => {
   // --- @mention translation ---
 
   describe('@mention translation', () => {
-    it('prepends trigger when bot is @mentioned via Slack format', async () => {
+    it('prepends trigger and strips the raw <@UBOTID> mention when bot is @mentioned', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect(); // sets botUserId to 'U_BOT_123'
@@ -548,10 +549,32 @@ describe('SlackChannel', () => {
       });
       await triggerMessageEvent(event);
 
+      // After prepending the trigger, the raw Slack mention is removed so
+      // the parser's `^@<NAME>\s+(verb)$` shape stays intact for kill-switch
+      // detection (sagri-tokyo/sagri-ai#128).
       expect(opts.onMessage).toHaveBeenCalledWith(
         'slack:C0123456789',
         expect.objectContaining({
-          content: '@Jonesy Hey <@U_BOT_123> what do you think?',
+          content: '@Jonesy Hey what do you think?',
+        }),
+      );
+    });
+
+    it('strips a leading <@UBOTID> mention so abort verbs match the parser', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        text: '<@U_BOT_123> stop',
+        user: 'U_USER_456',
+      });
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: '@Jonesy stop',
         }),
       );
     });
@@ -567,7 +590,8 @@ describe('SlackChannel', () => {
       });
       await triggerMessageEvent(event);
 
-      // Content should be unchanged since it already matches TRIGGER_PATTERN
+      // Content is unchanged: the trigger already matches, so no rewrite
+      // runs and the raw <@UBOTID> stays in place.
       expect(opts.onMessage).toHaveBeenCalledWith(
         'slack:C0123456789',
         expect.objectContaining({
@@ -1076,7 +1100,7 @@ describe('SlackChannel', () => {
   // that would feed the message into the agent we're about to kill.
 
   describe('kill-switch intercept', () => {
-    it('does not store @Jonesy stop arriving from a registered channel', async () => {
+    it('intercepts canonical @Jonesy stop arriving from a registered channel', async () => {
       const { handleInboundMessage } = await import('../inbound.js');
 
       const opts = createTestOpts();
@@ -1089,7 +1113,7 @@ describe('SlackChannel', () => {
 
       // Mirror the host wiring: SlackChannel emits via opts.onMessage,
       // and the host delegates to handleInboundMessage.
-      const hostOnMessage = vi.fn((jid: string, msg: any) => {
+      const hostOnMessage = vi.fn((jid: string, msg: NewMessage) => {
         handleInboundMessage(jid, msg, {
           registeredGroups: opts.registeredGroups,
           storeMessage,
@@ -1102,21 +1126,7 @@ describe('SlackChannel', () => {
           }),
         });
       });
-      (opts.onMessage as any).mockImplementation(hostOnMessage);
-
-      await triggerMessageEvent(
-        createMessageEvent({
-          text: '<@U_BOT_123> stop',
-          user: 'U_USER_456',
-        }),
-      );
-
-      // Slack adapter rewrites <@U_BOT_123> stop → "@Jonesy <@U_BOT_123> stop"
-      // ...but parseAbortIntent only accepts `@Jonesy stop` exactly.
-      // Confirm the canonical form is intercepted.
-      (opts.onMessage as any).mockClear();
-      storeMessage.mockClear();
-      handleAbort.mockClear();
+      vi.mocked(opts.onMessage).mockImplementation(hostOnMessage);
 
       await triggerMessageEvent(
         createMessageEvent({
@@ -1127,6 +1137,55 @@ describe('SlackChannel', () => {
       );
 
       expect(handleAbort).toHaveBeenCalledTimes(1);
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
+
+    it('intercepts the Slack-encoded mention form <@UBOTID> stop end-to-end', async () => {
+      const { handleInboundMessage } = await import('../inbound.js');
+
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const storeMessage = vi.fn();
+      const handleAbort = vi.fn(async () => undefined);
+      const handleRemoteControl = vi.fn(async () => undefined);
+
+      const hostOnMessage = vi.fn((jid: string, msg: NewMessage) => {
+        handleInboundMessage(jid, msg, {
+          registeredGroups: opts.registeredGroups,
+          storeMessage,
+          handleAbort,
+          handleRemoteControl,
+          loadSenderAllowlist: () => ({
+            default: { allow: '*', mode: 'trigger' },
+            chats: {},
+            logDenied: false,
+          }),
+        });
+      });
+      vi.mocked(opts.onMessage).mockImplementation(hostOnMessage);
+
+      // Raw form Slack delivers when a user types `@sagri-ai stop` in a
+      // channel: the bot user id arrives as `<@U_BOT_123>`. This must
+      // round-trip through the adapter rewrite into `@Jonesy stop`, which
+      // the parser then recognises as an abort intent.
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: '<@U_BOT_123> stop',
+          user: 'U_USER_456',
+          ts: '1704067202.000000',
+        }),
+      );
+
+      expect(handleAbort).toHaveBeenCalledTimes(1);
+      expect(handleAbort).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          chat_jid: 'slack:C0123456789',
+          content: '@Jonesy stop',
+        }),
+      );
       expect(storeMessage).not.toHaveBeenCalled();
     });
   });

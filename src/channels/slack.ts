@@ -157,7 +157,11 @@ export class SlackChannel implements Channel {
 
       // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
       // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
-      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
+      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot
+      // is @mentioned. After prepending, strip the raw `<@UBOTID>` (with any
+      // surrounding whitespace) so the rewritten content keeps the canonical
+      // `^@<NAME>\s+<rest>` shape the kill-switch parser requires
+      // (sagri-tokyo/sagri-ai#128).
       let content = msg.text;
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
@@ -165,7 +169,12 @@ export class SlackChannel implements Channel {
           content.includes(mentionPattern) &&
           !TRIGGER_PATTERN.test(content)
         ) {
-          content = `@${ASSISTANT_NAME} ${content}`;
+          const stripPattern = new RegExp(`\\s*<@${this.botUserId}>\\s*`, 'g');
+          const stripped = content.replace(stripPattern, ' ').trim();
+          content =
+            stripped.length > 0
+              ? `@${ASSISTANT_NAME} ${stripped}`
+              : `@${ASSISTANT_NAME}`;
         }
       }
 
