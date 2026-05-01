@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { GroupQueue } from './group-queue.js';
+import { GroupQueue, abortMessage } from './group-queue.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -21,6 +21,12 @@ vi.mock('fs', async () => {
     },
   };
 });
+
+// Mock container-runtime so abort() can be tested without docker
+const stopContainerMock = vi.hoisted(() => vi.fn());
+vi.mock('./container-runtime.js', () => ({
+  stopContainer: stopContainerMock,
+}));
 
 describe('GroupQueue', () => {
   let queue: GroupQueue;
@@ -433,6 +439,148 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- abort() (kill switch — sagri-tokyo/sagri-ai#129) ---
+
+  describe('abort', () => {
+    beforeEach(() => {
+      stopContainerMock.mockReset();
+      stopContainerMock.mockImplementation(() => {});
+    });
+
+    it('returns no_active_container for a never-seen group', () => {
+      const result = queue.abort('unseen@g.us');
+      expect(result).toEqual({
+        stopped: false,
+        reason: 'no_active_container',
+      });
+      expect(stopContainerMock).not.toHaveBeenCalled();
+    });
+
+    it('returns no_active_container when group state has no containerName', async () => {
+      const processMessages = vi.fn(async () => new Promise<boolean>(() => {}));
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+
+      const result = queue.abort('group1@g.us');
+      expect(result).toEqual({
+        stopped: false,
+        reason: 'no_active_container',
+      });
+      expect(stopContainerMock).not.toHaveBeenCalled();
+    });
+
+    it('calls stopContainer once and returns the containerName on success', async () => {
+      const processMessages = vi.fn(async () => new Promise<boolean>(() => {}));
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+      queue.registerProcess(
+        'group1@g.us',
+        {} as any,
+        'nanoclaw-group1-abc',
+        'group1-folder',
+      );
+
+      const result = queue.abort('group1@g.us');
+
+      expect(stopContainerMock).toHaveBeenCalledTimes(1);
+      expect(stopContainerMock).toHaveBeenCalledWith('nanoclaw-group1-abc');
+      expect(result).toEqual({
+        stopped: true,
+        containerName: 'nanoclaw-group1-abc',
+      });
+    });
+
+    it('returns stop_failed and does not throw when stopContainer throws', async () => {
+      stopContainerMock.mockImplementation(() => {
+        throw new Error('docker daemon unreachable');
+      });
+      const processMessages = vi.fn(async () => new Promise<boolean>(() => {}));
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+      queue.registerProcess(
+        'group1@g.us',
+        {} as any,
+        'nanoclaw-group1-abc',
+        'group1-folder',
+      );
+
+      const result = queue.abort('group1@g.us');
+
+      expect(result).toEqual({ stopped: false, reason: 'stop_failed' });
+      expect(stopContainerMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops pending tasks and pendingMessages so drain does not auto-resume', async () => {
+      let resolveFirst: () => void;
+      const processMessages = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        });
+        return true;
+      });
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+      queue.registerProcess(
+        'group1@g.us',
+        {} as any,
+        'nanoclaw-group1-abc',
+        'group1-folder',
+      );
+
+      const queuedTaskFn = vi.fn(async () => {});
+      queue.enqueueTask('group1@g.us', 'queued-task-1', queuedTaskFn);
+      queue.enqueueMessageCheck('group1@g.us'); // sets pendingMessages while active
+
+      const result = queue.abort('group1@g.us');
+      expect(result.stopped).toBe(true);
+
+      resolveFirst!();
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Drain ran but found nothing (pending was cleared on abort)
+      expect(processMessages).toHaveBeenCalledTimes(1);
+      expect(queuedTaskFn).not.toHaveBeenCalled();
+    });
+
+    it('leaves the group in a clean state so a fresh enqueue spawns a new container', async () => {
+      let resolveFirst: () => void;
+      let runCount = 0;
+      const processMessages = vi.fn(async () => {
+        runCount++;
+        if (runCount === 1) {
+          await new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return true;
+      });
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+      queue.registerProcess(
+        'group1@g.us',
+        {} as any,
+        'nanoclaw-group1-abc',
+        'group1-folder',
+      );
+
+      queue.abort('group1@g.us');
+      // Container exit (docker stop) lets runForGroup's await resolve
+      resolveFirst!();
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Fresh message after a clean abort starts a brand-new container
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(processMessages).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('preempts when idle arrives with pending tasks', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;
@@ -480,5 +628,25 @@ describe('GroupQueue', () => {
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+});
+
+describe('abortMessage', () => {
+  it('formats success with the container name', () => {
+    expect(
+      abortMessage({ stopped: true, containerName: 'nanoclaw-grp-abc' }),
+    ).toBe('stopped task (container nanoclaw-grp-abc)');
+  });
+
+  it('reports no_active_container plainly', () => {
+    expect(
+      abortMessage({ stopped: false, reason: 'no_active_container' }),
+    ).toBe('no active task to abort');
+  });
+
+  it('reports stop_failed and points operators at the logs', () => {
+    expect(abortMessage({ stopped: false, reason: 'stop_failed' })).toBe(
+      'abort attempted but stop failed — see logs',
+    );
   });
 });
