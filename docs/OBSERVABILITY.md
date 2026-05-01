@@ -6,7 +6,7 @@ In production, container stdout/stderr is shipped to CloudWatch Logs group `/sag
 
 ## Schema
 
-Twelve fields, all required, no unknown keys permitted. Defined as `ActionRecord` in `src/logger.ts` with `validateActionRecord` as the closed-schema gate.
+Twelve required fields, no unknown keys. See `ActionRecord` and `validateActionRecord` in `src/logger.ts`.
 
 | Field | Type | Semantics |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Twelve fields, all required, no unknown keys permitted. Defined as `ActionRecord
 | `outputs_hash` | string | sha256 of the canonicalised output. 64-char lowercase hex. Empty/missing output hashes the empty string. |
 | `duration_ms` | number | Wall-clock duration of the action, milliseconds. Non-negative finite number. |
 | `outcome` | string | One of `ok`, `error`, `timeout`, `rejected`. `rejected` covers authorisation/validation refusals; `error` is reserved for runtime failures with a populated `error_class`. |
-| `error_class` | string \| null | Constructor name (or HTTP status sentinel for `sub_request`) when `outcome=error`. MUST be a non-empty string when `outcome=error`, and `null` otherwise. The key is required — omission throws. |
+| `error_class` | string \| null | Constructor name (or HTTP status sentinel for `sub_request`) when `outcome=error`. MUST be a non-empty string when `outcome=error`; otherwise `null` or a string (validator rejects only non-null non-string values). The key is required — omission throws. By convention, all current call sites pass `null` when `outcome != error`; downstream queries should still test `outcome = "error"` rather than `error_class IS NOT NULL`. |
 | `group` | string | Logical owner of the action. Usually the NanoClaw group folder; for `slack/message_send` it is the Slack JID, for `sub_request/anthropic_api` it is the synthetic value `credential-proxy`, for `sub_request/reader_rpc` it is the reader source name. Non-empty. |
 
 The validator rejects: missing keys, unknown keys, wrong types, non-finite or negative `duration_ms`, hashes that don't match `/^[0-9a-f]{64}$/`, `outcome=error` with empty `error_class`, and any string field whose value contains `process.env.ANTHROPIC_API_KEY` as a substring (defence-in-depth secret leak guard).
@@ -47,16 +47,16 @@ The action record carries hashes only. The following are deliberately excluded f
 - Credential-proxy request bodies and response bodies. Both are hashed; neither is logged. The upstream URL is logged as path-only — query string is stripped via `redactUrlPath` in `src/credential-proxy.ts`.
 - Notion page content fetched through the reader RPC. `tool=reader_rpc` hashes the laundered output; the source content is held in memory only for the duration of the call.
 
-If a future call site needs to record additional context, it MUST be a hash of the value, not the value itself. The closed-schema validator will reject any new top-level field.
+If a future call site needs to record additional context, it MUST be a hash of the value, not the value itself.
 
 ## Where plaintext lives instead
 
 Per-session conversation state is on local disk on the EC2 host, under the install root `/opt/nanoclaw`:
 
 - `/opt/nanoclaw/data/sessions/<group folder>/.claude/` — Claude Code session jsonl, conversation history, file reads. One subtree per group; not shared across groups.
-- `/opt/nanoclaw/data/sessions/<group folder>/policy/` — read-only policy overlay (settings.json + hooks). Not session content; included for reference because it shares the path prefix.
-- `/opt/nanoclaw/groups/<group folder>/` — group-scoped configuration (CLAUDE.md, mounted into the container). Not conversation content.
 - `/opt/nanoclaw/data/ipc/<group folder>/current_tasks.json` — IPC task queue snapshot.
+
+(Sibling paths under `/opt/nanoclaw/data/sessions/<group folder>/policy/` and `/opt/nanoclaw/groups/<group folder>/` hold configuration, not conversation content.)
 
 These paths are not shipped to CloudWatch. Operator access requires either SSM session manager into the EC2 host or the planned vault export (#112).
 
@@ -71,11 +71,7 @@ Snapshot of action emissions on `sagri-tokyo/nanoclaw` as of this document. The 
 | `scheduled` / `container_run` | `src/task-scheduler.ts` | Scheduled task id | One per `runTask` invocation. Covers early exits (invalid folder, group not found — `outcome=rejected`) and the post-agent path (`outcome=ok`/`error`). |
 | `sub_request` / `anthropic_api` | `src/credential-proxy.ts` | Per-request UUID | One per proxied upstream call. Success, upstream HTTP error (`error_class=HttpStatus<n>`), and response stream error all emit. `trigger_source` is the redacted request path. |
 | `sub_request` / `reader_rpc` | `src/reader-rpc.ts` | Chat JID, falling back to the reader source name | One per `read_untrusted` call. |
-| `ipc` / `ipc_schedule_task` | `src/ipc.ts` | Source group or task id depending on branch | Authorised + unauthorised branches both emit (`outcome=ok` or `outcome=rejected`). |
-| `ipc` / `ipc_pause_task` | `src/ipc.ts` | As above | As above. |
-| `ipc` / `ipc_resume_task` | `src/ipc.ts` | As above | As above. |
-| `ipc` / `ipc_cancel_task` | `src/ipc.ts` | As above | As above. |
-| `ipc` / `ipc_update_task` | `src/ipc.ts` | As above | As above. |
+| `ipc` / `ipc_{schedule,pause,resume,cancel,update}_task` | `src/ipc.ts` | Source group or task id depending on branch | Authorised and unauthorised branches both emit (`outcome=ok` or `outcome=rejected`) so the audit trail covers blocked attempts. |
 
 Adding a new emission site means adding a new row here.
 
