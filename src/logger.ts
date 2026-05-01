@@ -132,8 +132,11 @@ const ALLOWED_OUTCOMES: ReadonlyArray<ActionOutcome> = [
 const HEX_64 = /^[0-9a-f]{64}$/;
 // ISO 8601 UTC, milliseconds optional. Matches `new Date().toISOString()`.
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+// Below this length the env var is presumed to be a stub/test placeholder and
+// the sentinel is skipped to avoid flagging coincidental short-string matches.
+const MIN_REDACT_TOKEN_LENGTH = 16;
 
-class ActionSchemaError extends Error {
+export class ActionSchemaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ActionSchemaError';
@@ -182,6 +185,32 @@ export function hashPayload(payload: unknown): string {
 
 function fail(field: string, reason: string): never {
   throw new ActionSchemaError(`ActionRecord field "${field}" ${reason}`);
+}
+
+/**
+ * Defence-in-depth sentinel. Throws if any string-typed field value contains
+ * the literal value of `process.env.ANTHROPIC_API_KEY` as a substring. The
+ * canonical convention is that call sites only ever log hashes; this guard
+ * catches accidental plaintext leakage (e.g. an error message that quoted a
+ * request header) before it reaches stdout/stderr.
+ *
+ * Reads the env var on every call so a token rotated mid-process is still
+ * scanned. Skipped when the env var is unset, empty, or shorter than
+ * `MIN_REDACT_TOKEN_LENGTH` — short stubs and test placeholders would yield
+ * false positives.
+ *
+ * Shallow scan: `ActionRecord` is currently all scalar fields. If a nested
+ * object field is ever added, this loop will silently skip it — either walk
+ * recursively or extend the closed-schema validator to reject the new shape.
+ */
+function checkAnthropicApiKeyLeak(record: ActionRecord): void {
+  const token = process.env.ANTHROPIC_API_KEY;
+  if (!token || token.length < MIN_REDACT_TOKEN_LENGTH) return;
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === 'string' && value.includes(token)) {
+      fail(key, 'contains ANTHROPIC_API_KEY value (refusing to log secret)');
+    }
+  }
 }
 
 /**
@@ -257,6 +286,7 @@ export function validateActionRecord(record: ActionRecord): void {
   if (typeof record.group !== 'string' || record.group.length === 0) {
     fail('group', 'must be a non-empty string');
   }
+  checkAnthropicApiKeyLeak(record);
 }
 
 function emitAction(record: ActionRecord): void {

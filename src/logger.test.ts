@@ -25,6 +25,7 @@ import {
   canonicalJson,
   validateActionRecord,
   ActionRecord,
+  ActionSchemaError,
   logger,
 } from './logger.js';
 
@@ -324,5 +325,111 @@ describe('logger.action emission', () => {
     expect(() => logger.action(validRecord({ inputs_hash: 'bogus' }))).toThrow(
       /inputs_hash/,
     );
+  });
+});
+
+describe('logger.action ANTHROPIC_API_KEY redaction sentinel', () => {
+  const TOKEN = 'sk-ant-test-key-1234567890';
+  let originalKey: string | undefined;
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    originalKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = TOKEN;
+    stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = originalKey;
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+  });
+
+  it('throws when token substring appears in tool', () => {
+    expect(() =>
+      logger.action(validRecord({ tool: `prefix-${TOKEN}-suffix` })),
+    ).toThrow(/ANTHROPIC_API_KEY/);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws when token substring appears in trigger_source', () => {
+    expect(() => logger.action(validRecord({ trigger_source: TOKEN }))).toThrow(
+      /ANTHROPIC_API_KEY/,
+    );
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws when token substring appears in error_class', () => {
+    expect(() =>
+      logger.action(
+        validRecord({
+          level: 'error',
+          outcome: 'error',
+          error_class: `BoomError(${TOKEN})`,
+        }),
+      ),
+    ).toThrow(/ANTHROPIC_API_KEY/);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws when token substring appears in session_id', () => {
+    expect(() => logger.action(validRecord({ session_id: TOKEN }))).toThrow(
+      /ANTHROPIC_API_KEY/,
+    );
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not fire when env var is unset', () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    expect(() => logger.action(validRecord({ tool: TOKEN }))).not.toThrow();
+    expect(stdoutSpy).toHaveBeenCalledOnce();
+  });
+
+  it('does not fire when env var is empty', () => {
+    process.env.ANTHROPIC_API_KEY = '';
+    expect(() => logger.action(validRecord({ tool: TOKEN }))).not.toThrow();
+    expect(stdoutSpy).toHaveBeenCalledOnce();
+  });
+
+  it('does not fire when env var is shorter than 16 chars', () => {
+    process.env.ANTHROPIC_API_KEY = 'short-key';
+    expect(() =>
+      logger.action(validRecord({ tool: 'short-key-something' })),
+    ).not.toThrow();
+    expect(stdoutSpy).toHaveBeenCalledOnce();
+  });
+
+  it('does not fire when only the sha256 hex of the token appears (hashes are fine)', () => {
+    expect(() =>
+      logger.action(
+        validRecord({
+          inputs_hash: hashPayload(TOKEN),
+          outputs_hash: hashPayload(TOKEN),
+        }),
+      ),
+    ).not.toThrow();
+    expect(stdoutSpy).toHaveBeenCalledOnce();
+  });
+
+  it('throws ActionSchemaError, the same class as other validator failures', () => {
+    expect(() => logger.action(validRecord({ tool: TOKEN }))).toThrow(
+      ActionSchemaError,
+    );
+    expect(() =>
+      logger.action(validRecord({ inputs_hash: 'not-a-hash' })),
+    ).toThrow(ActionSchemaError);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).not.toHaveBeenCalled();
   });
 });
