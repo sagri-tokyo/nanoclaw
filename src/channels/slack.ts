@@ -178,6 +178,7 @@ export class SlackChannel implements Channel {
         timestamp,
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
+        is_dm: !isGroup,
       });
     });
   }

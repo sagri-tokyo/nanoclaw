@@ -51,6 +51,10 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  // True when the source is a 1:1 DM (Slack `channel_type === 'im'`,
+  // WhatsApp/Telegram personal chats). Channels populate this so the
+  // host-side abort-trigger parser can branch on bare-verb acceptance.
+  is_dm?: boolean;
   thread_id?: string;
   reply_to_message_id?: string;
   reply_to_message_content?: string;
