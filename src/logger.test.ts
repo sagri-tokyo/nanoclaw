@@ -22,6 +22,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
   hashPayload,
+  hashFailureOutput,
   canonicalJson,
   validateActionRecord,
   ActionRecord,
@@ -99,7 +100,12 @@ describe('hashPayload', () => {
     expect(h).not.toBe(hashPayload('123'));
   });
 
-  it('hashes the empty string deterministically', () => {
+  // Pin this as EMPTY_STRING_HASH — it is NOT the canonical "empty output"
+  // value. Call sites with no real output should hash a meaningful failure
+  // payload (e.g. error_class) rather than reusing this digest, otherwise
+  // every error row collapses to the same outputs_hash and forensic
+  // correlation breaks.
+  it('hashes the empty string deterministically (EMPTY_STRING_HASH)', () => {
     expect(hashPayload('')).toBe(
       'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     );
@@ -107,6 +113,73 @@ describe('hashPayload', () => {
 
   it('hashes the empty object deterministically', () => {
     expect(hashPayload({})).toBe(hashPayload({}));
+  });
+
+  it('throws on undefined-valued object keys (no silent collision)', () => {
+    expect(() => hashPayload({ a: undefined, b: 1 })).toThrow(/undefined/);
+    expect(() => canonicalJson({ a: undefined })).toThrow(/undefined/);
+  });
+
+  it('throws on undefined-valued array slots (no silent collision)', () => {
+    expect(() => canonicalJson([1, undefined, 2])).toThrow(/undefined/);
+  });
+
+  it('throws on top-level undefined', () => {
+    expect(() => canonicalJson(undefined)).toThrow(/undefined/);
+  });
+
+  it('produces distinct hashes for different failure payloads', () => {
+    const a = hashPayload({ error_class: 'TargetGroupNotRegistered' });
+    const b = hashPayload({ error_class: 'Unauthorized' });
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(b).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('hashFailureOutput', () => {
+  it('returns a 64-char lowercase hex sha256', () => {
+    expect(hashFailureOutput({ error_class: 'Unauthorized' })).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+  });
+
+  it('produces DIFFERENT hashes for different error classes', () => {
+    // BLOCKER 1 regression guard: every error path used to share
+    // hashPayload('') = e3b0c44... which broke forensic correlation.
+    // Two different error classes from the same call site MUST hash
+    // differently now.
+    const a = hashFailureOutput({ error_class: 'Unauthorized' });
+    const b = hashFailureOutput({ error_class: 'TaskNotFound' });
+    const c = hashFailureOutput({ error_class: 'TargetGroupNotRegistered' });
+    expect(a).not.toBe(b);
+    expect(b).not.toBe(c);
+    expect(a).not.toBe(c);
+    // And none of them collapse to the empty-string sentinel.
+    const EMPTY_STRING_HASH =
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    expect(a).not.toBe(EMPTY_STRING_HASH);
+    expect(b).not.toBe(EMPTY_STRING_HASH);
+    expect(c).not.toBe(EMPTY_STRING_HASH);
+  });
+
+  it('factors in error_message_preview when present', () => {
+    const a = hashFailureOutput({
+      error_class: 'HttpError',
+      error_message_preview: 'connection refused',
+    });
+    const b = hashFailureOutput({
+      error_class: 'HttpError',
+      error_message_preview: 'connection timed out',
+    });
+    expect(a).not.toBe(b);
+  });
+
+  it('throws when error_class is empty or missing', () => {
+    expect(() => hashFailureOutput({ error_class: '' })).toThrow(/error_class/);
+    expect(() =>
+      hashFailureOutput({} as unknown as { error_class: string }),
+    ).toThrow(/error_class/);
   });
 });
 
@@ -208,17 +281,21 @@ describe('validateActionRecord', () => {
     ).toThrow(/outcome/);
   });
 
-  it('accepts each documented outcome', () => {
-    for (const outcome of ['ok', 'timeout', 'rejected'] as const) {
+  it('accepts each documented outcome with the contract-correct error_class', () => {
+    // outcome=ok and outcome=timeout: error_class MUST be null
+    for (const outcome of ['ok', 'timeout'] as const) {
       expect(() =>
-        validateActionRecord(validRecord({ outcome })),
+        validateActionRecord(validRecord({ outcome, error_class: null })),
       ).not.toThrow();
     }
-    expect(() =>
-      validateActionRecord(
-        validRecord({ outcome: 'error', error_class: 'BoomError' }),
-      ),
-    ).not.toThrow();
+    // outcome=error and outcome=rejected: error_class MUST be a non-empty string
+    for (const outcome of ['error', 'rejected'] as const) {
+      expect(() =>
+        validateActionRecord(
+          validRecord({ outcome, error_class: 'BoomError' }),
+        ),
+      ).not.toThrow();
+    }
   });
 
   it('rejects missing group', () => {
@@ -233,17 +310,54 @@ describe('validateActionRecord', () => {
     ).not.toThrow();
   });
 
-  it('requires error_class to be a string when outcome is error', () => {
+  it('requires error_class to be a non-empty string when outcome is error', () => {
     expect(() =>
       validateActionRecord(
         validRecord({ outcome: 'error', error_class: null }),
       ),
     ).toThrow(/error_class/);
     expect(() =>
+      validateActionRecord(validRecord({ outcome: 'error', error_class: '' })),
+    ).toThrow(/error_class/);
+    expect(() =>
       validateActionRecord(
         validRecord({ outcome: 'error', error_class: 'TypeError' }),
       ),
     ).not.toThrow();
+  });
+
+  it('requires error_class to be a non-empty string when outcome is rejected', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'rejected', error_class: null }),
+      ),
+    ).toThrow(/error_class/);
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'rejected', error_class: '' }),
+      ),
+    ).toThrow(/error_class/);
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'rejected', error_class: 'Unauthorized' }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('requires error_class to be null when outcome is ok', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'ok', error_class: 'BoomError' }),
+      ),
+    ).toThrow(/error_class/);
+  });
+
+  it('requires error_class to be null when outcome is timeout', () => {
+    expect(() =>
+      validateActionRecord(
+        validRecord({ outcome: 'timeout', error_class: 'BoomError' }),
+      ),
+    ).toThrow(/error_class/);
   });
 
   it('rejects extra unknown fields (closed schema)', () => {
