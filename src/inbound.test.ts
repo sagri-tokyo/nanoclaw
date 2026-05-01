@@ -157,7 +157,7 @@ describe('handleInboundMessage — abort intercept', () => {
     expect(storeMessage).toHaveBeenCalledWith(msg);
   });
 
-  it('runs abort intercept BEFORE the sender-allowlist drop check', () => {
+  it('blocks abort from a non-allowlisted sender in drop mode', () => {
     const msg = buildMessage({ content: '@Sagri-AI stop', is_dm: false });
 
     handleInboundMessage('slack:C0123456789', msg, {
@@ -167,6 +167,29 @@ describe('handleInboundMessage — abort intercept', () => {
       handleRemoteControl,
       loadSenderAllowlist: () => ({
         default: { allow: ['someone-else'], mode: 'drop' },
+        chats: {},
+        logDenied: false,
+      }),
+    });
+
+    expect(handleAbort).not.toHaveBeenCalled();
+    expect(storeMessage).not.toHaveBeenCalled();
+  });
+
+  it('still aborts when the sender IS on the allowlist in drop mode', () => {
+    const msg = buildMessage({
+      content: '@Sagri-AI stop',
+      is_dm: false,
+      sender: 'U_USER_456',
+    });
+
+    handleInboundMessage('slack:C0123456789', msg, {
+      registeredGroups: () => registeredGroups,
+      storeMessage,
+      handleAbort,
+      handleRemoteControl,
+      loadSenderAllowlist: () => ({
+        default: { allow: ['U_USER_456'], mode: 'drop' },
         chats: {},
         logDenied: false,
       }),

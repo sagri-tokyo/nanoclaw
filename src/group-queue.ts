@@ -3,7 +3,23 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
+
+export type AbortResult =
+  | { stopped: true; containerName: string }
+  | { stopped: false; reason: 'no_active_container' | 'stop_failed' };
+
+/** Compose the single user-facing line for an abort outcome. */
+export function abortMessage(result: AbortResult): string {
+  if (result.stopped) {
+    return `stopped task (container ${result.containerName})`;
+  }
+  if (result.reason === 'no_active_container') {
+    return 'no active task to abort';
+  }
+  return 'abort attempted but stop failed — see logs';
+}
 
 interface QueuedTask {
   id: string;
@@ -139,6 +155,35 @@ export class GroupQueue {
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+  }
+
+  /**
+   * Stop the container currently running for `groupJid` and discard any work
+   * queued behind it. Used by the kill-switch (sagri-tokyo/sagri-ai#129).
+   *
+   * Cleanup of `state.active` / `state.process` / `state.containerName` is
+   * intentionally left to `runForGroup`/`runTask`'s `finally` blocks: docker's
+   * SIGTERM exits the agent, the awaited promise resolves, and the existing
+   * teardown path runs. Touching that state from here would race with it.
+   */
+  abort(groupJid: string): AbortResult {
+    const state = this.groups.get(groupJid);
+    if (!state || !state.containerName) {
+      return { stopped: false, reason: 'no_active_container' };
+    }
+    const containerName = state.containerName;
+    try {
+      stopContainer(containerName);
+    } catch (err) {
+      logger.error(
+        { groupJid, containerName, err },
+        'Abort: stopContainer threw',
+      );
+      return { stopped: false, reason: 'stop_failed' };
+    }
+    state.pendingTasks = [];
+    state.pendingMessages = false;
+    return { stopped: true, containerName };
   }
 
   /**

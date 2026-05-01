@@ -49,7 +49,7 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
+import { GroupQueue, abortMessage } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { handleInboundMessage } from './inbound.js';
 import { startIpcWatcher } from './ipc.js';
@@ -648,20 +648,16 @@ async function main(): Promise<void> {
     }
   }
 
-  // Kill-switch stub responder (PR-A — sagri-tokyo/sagri-ai#128).
-  // The real container-stop wiring (call stopContainer, drain pending
-  // state, post structured success/failure) lands in PR-B
-  // (sagri-tokyo/sagri-ai#129) and replaces this stub.
+  // Kill-switch real wiring (sagri-tokyo/sagri-ai#129). Asks the queue to
+  // docker-stop the active container for the channel and posts a single
+  // confirmation back through the channel that delivered the trigger.
   async function handleAbort(chatJid: string, _msg: NewMessage): Promise<void> {
     const channel = findChannel(channels, chatJid);
     if (!channel) {
       logger.warn({ chatJid }, 'Abort intent: no channel owns JID');
       return;
     }
-    await channel.sendMessage(
-      chatJid,
-      'kill switch acknowledged — abort wiring lands in #129',
-    );
+    await channel.sendMessage(chatJid, abortMessage(queue.abort(chatJid)));
   }
 
   // Channel callbacks (shared by all channels)
