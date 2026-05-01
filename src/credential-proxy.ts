@@ -15,20 +15,30 @@ import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
 
 import { readEnvFile } from './env.js';
-import { hashPayload, logger } from './logger.js';
+import { hashFailureOutput, hashPayload, logger } from './logger.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
 /**
- * Strip query string from a URL path so logs only carry the route, not
- * any auth / session params some clients append. Returns the path-only
- * portion. Falls back to a fixed sentinel for non-string / empty input
- * so logs never leak the raw value via "[object Object]" or similar.
+ * Strip query string AND fragment from a URL path so logs only carry the
+ * route, not any auth / session params some clients append. Uses the URL
+ * constructor with a dummy origin to handle both `?query` and `#fragment`
+ * correctly — naive `indexOf('?')` would let `/foo#bar` through unredacted
+ * because `#bar` is also a non-route component.
+ *
+ * Returns:
+ *   - `<unknown>` for non-string / empty input
+ *   - `<unparseable>` if the URL constructor throws on the input (e.g.
+ *     control characters); we never propagate the raw value because logs
+ *     would render `[object Object]` or leak unexpected bytes.
  */
 export function redactUrlPath(rawUrl: string | undefined): string {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) return '<unknown>';
-  const queryStart = rawUrl.indexOf('?');
-  return queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
+  try {
+    return new URL(rawUrl, 'http://x').pathname;
+  } catch {
+    return '<unparseable>';
+  }
 }
 
 export interface ProxyConfig {
@@ -133,6 +143,8 @@ export function startCredentialProxy(
             });
             upRes.on('error', (err) => {
               if (!res.writableEnded) res.end();
+              const errorClass =
+                err instanceof Error ? err.constructor.name : 'Error';
               logger.action({
                 ts: new Date().toISOString(),
                 level: 'error',
@@ -141,11 +153,14 @@ export function startCredentialProxy(
                 trigger_source: requestPath,
                 tool: 'anthropic_api',
                 inputs_hash: inputsHash,
-                outputs_hash: hashPayload(''),
+                outputs_hash: hashFailureOutput({
+                  error_class: errorClass,
+                  error_message_preview:
+                    err instanceof Error ? err.message.slice(0, 200) : '',
+                }),
                 duration_ms: Date.now() - startTime,
                 outcome: 'error',
-                error_class:
-                  err instanceof Error ? err.constructor.name : 'Error',
+                error_class: errorClass,
                 group: 'credential-proxy',
               });
             });
@@ -157,6 +172,8 @@ export function startCredentialProxy(
             { err, path: requestPath },
             'Credential proxy upstream error',
           );
+          const errorClass =
+            err instanceof Error ? err.constructor.name : 'Error';
           logger.action({
             ts: new Date().toISOString(),
             level: 'error',
@@ -165,10 +182,14 @@ export function startCredentialProxy(
             trigger_source: requestPath,
             tool: 'anthropic_api',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: errorClass,
+              error_message_preview:
+                err instanceof Error ? err.message.slice(0, 200) : '',
+            }),
             duration_ms: Date.now() - startTime,
             outcome: 'error',
-            error_class: err instanceof Error ? err.constructor.name : 'Error',
+            error_class: errorClass,
             group: 'credential-proxy',
           });
           if (!res.headersSent) {

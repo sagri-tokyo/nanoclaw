@@ -4,7 +4,7 @@ import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
-import { hashPayload, logger } from '../logger.js';
+import { hashFailureOutput, hashPayload, logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -222,7 +222,7 @@ export class SlackChannel implements Channel {
     const startTime = Date.now();
     const inputsHash = hashPayload(text);
     try {
-      await this.postChunks(channelId, text, threadTs);
+      const posted = await this.postChunks(channelId, text, threadTs);
       logger.action({
         ts: new Date().toISOString(),
         level: 'info',
@@ -231,7 +231,12 @@ export class SlackChannel implements Channel {
         trigger_source: jid,
         tool: 'message_send',
         inputs_hash: inputsHash,
-        outputs_hash: hashPayload(text),
+        // The "output" of a message_send is the resulting Slack message
+        // identifier list (ts + channel per chunk) — NOT the input text,
+        // which would make inputs_hash and outputs_hash collide. This lets
+        // an operator pivot from a log row to the actual posted message via
+        // its ts.
+        outputs_hash: hashPayload(posted),
         duration_ms: Date.now() - startTime,
         outcome: 'ok',
         error_class: null,
@@ -243,6 +248,7 @@ export class SlackChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+      const errorClass = err instanceof Error ? err.constructor.name : 'Error';
       logger.action({
         ts: new Date().toISOString(),
         level: 'error',
@@ -251,10 +257,14 @@ export class SlackChannel implements Channel {
         trigger_source: jid,
         tool: 'message_send',
         inputs_hash: inputsHash,
-        outputs_hash: hashPayload(''),
+        outputs_hash: hashFailureOutput({
+          error_class: errorClass,
+          error_message_preview:
+            err instanceof Error ? err.message.slice(0, 200) : '',
+        }),
         duration_ms: Date.now() - startTime,
         outcome: 'error',
-        error_class: err instanceof Error ? err.constructor.name : 'Error',
+        error_class: errorClass,
         group: jid,
       });
     }
@@ -357,14 +367,25 @@ export class SlackChannel implements Channel {
     channelId: string,
     text: string,
     threadTs?: string,
-  ): Promise<void> {
+  ): Promise<Array<{ ts: string; channel: string }>> {
+    const posted: Array<{ ts: string; channel: string }> = [];
     for (const chunk of splitForSlack(text, MAX_MESSAGE_LENGTH)) {
-      await this.app.client.chat.postMessage({
+      const response = await this.app.client.chat.postMessage({
         channel: channelId,
         text: chunk,
         thread_ts: threadTs,
       });
+      // Slack's chat.postMessage returns ts (message timestamp, the canonical
+      // message identifier) and channel on success. The output of a
+      // message_send is the resulting message identifier, not the input
+      // text — record that for forensic correlation.
+      posted.push({
+        ts: typeof response.ts === 'string' ? response.ts : '',
+        channel:
+          typeof response.channel === 'string' ? response.channel : channelId,
+      });
     }
+    return posted;
   }
 }
 

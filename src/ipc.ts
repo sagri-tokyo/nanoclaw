@@ -7,7 +7,12 @@ import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
-import { hashPayload, logger, type ActionRecord } from './logger.js';
+import {
+  hashFailureOutput,
+  hashPayload,
+  logger,
+  type ActionRecord,
+} from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 function ipcAction(
@@ -236,7 +241,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_schedule_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'TargetGroupNotRegistered',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'TargetGroupNotRegistered',
@@ -259,7 +266,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_schedule_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'Unauthorized',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'Unauthorized',
@@ -379,7 +388,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_pause_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'Unauthorized',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'Unauthorized',
@@ -422,7 +433,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_resume_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'Unauthorized',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'Unauthorized',
@@ -465,7 +478,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_cancel_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'Unauthorized',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'Unauthorized',
@@ -489,7 +504,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_update_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'TaskNotFound',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'TaskNotFound',
@@ -508,7 +525,9 @@ export async function processTaskIpc(
             trigger_source: sourceGroup,
             tool: 'ipc_update_task',
             inputs_hash: inputsHash,
-            outputs_hash: hashPayload(''),
+            outputs_hash: hashFailureOutput({
+              error_class: 'Unauthorized',
+            }),
             duration_ms: Date.now() - ipcStart,
             outcome: 'rejected',
             error_class: 'Unauthorized',

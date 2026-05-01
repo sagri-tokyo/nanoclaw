@@ -22,7 +22,7 @@ import {
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
 import { fetchUntrustedList } from './fetch-untrusted-list.js';
-import { hashPayload, logger } from './logger.js';
+import { hashFailureOutput, hashPayload, logger } from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
   readUntrustedContent,
@@ -239,6 +239,7 @@ async function handleReadUntrusted(params: unknown): Promise<ReaderOutput> {
     // embed Anthropic response snippets that might echo the untrusted
     // input back to the caller — never forward err.message to containers.
     logger.error({ err }, 'reader-rpc: upstream reader call failed');
+    const errorClass = err instanceof Error ? err.constructor.name : 'Error';
     logger.action({
       ts: new Date().toISOString(),
       level: 'error',
@@ -247,10 +248,14 @@ async function handleReadUntrusted(params: unknown): Promise<ReaderOutput> {
       trigger_source: parsed.source,
       tool: 'reader_rpc',
       inputs_hash: inputsHash,
-      outputs_hash: hashPayload(''),
+      // Hash a meaningful failure payload so different upstream errors
+      // produce distinct outputs_hash values. Never hash err.message
+      // directly — reader errors can echo untrusted input. Use the
+      // constructor name only.
+      outputs_hash: hashFailureOutput({ error_class: errorClass }),
       duration_ms: Date.now() - startTime,
       outcome: 'error',
-      error_class: err instanceof Error ? err.constructor.name : 'Error',
+      error_class: errorClass,
       group: parsed.source,
     });
     throw new RpcError('reader_failure', 502, 'upstream reader call failed');

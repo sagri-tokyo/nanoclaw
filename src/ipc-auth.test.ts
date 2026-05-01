@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -675,5 +675,77 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// BLOCKER 1 regression guard: action records emitted on rejected IPC paths
+// must produce distinct outputs_hash values for distinct error_class
+// values. The pre-fix implementation hashed the empty string at every
+// error site, which collapsed every error row to the same SHA-256 digest
+// and broke `WHERE outputs_hash = ?` correlation queries.
+describe('rejected IPC paths emit distinct outputs_hash per error_class', () => {
+  it('TargetGroupNotRegistered vs Unauthorized produce different outputs_hash', async () => {
+    const writes: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      // schedule_task with unknown targetJid → TargetGroupNotRegistered
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'p',
+          schedule_type: 'cron',
+          schedule_value: '0 * * * *',
+          targetJid: 'unknown@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      // pause_task with no matching task and non-main source → Unauthorized
+      await processTaskIpc(
+        { type: 'pause_task', taskId: 'task-does-not-exist' },
+        'other-group',
+        false,
+        deps,
+      );
+
+      const records = writes
+        .map((w) => w.trim())
+        .filter((w) => w.startsWith('{') && w.includes('"trigger":"ipc"'))
+        .map((w) => JSON.parse(w) as Record<string, unknown>);
+
+      const targetMissing = records.find(
+        (r) => r.error_class === 'TargetGroupNotRegistered',
+      );
+      const unauthorized = records.find(
+        (r) => r.error_class === 'Unauthorized',
+      );
+      expect(targetMissing).toBeDefined();
+      expect(unauthorized).toBeDefined();
+      expect(targetMissing!.outcome).toBe('rejected');
+      expect(unauthorized!.outcome).toBe('rejected');
+      // The crux: distinct error classes hash distinctly, never to the
+      // empty-string sentinel.
+      const EMPTY_STRING_HASH =
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+      expect(targetMissing!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
+      expect(unauthorized!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
+      expect(targetMissing!.outputs_hash).not.toBe(unauthorized!.outputs_hash);
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
   });
 });

@@ -50,7 +50,13 @@ vi.mock('@slack/bolt', () => ({
         test: vi.fn().mockResolvedValue({ user_id: 'U_BOT_123' }),
       },
       chat: {
-        postMessage: vi.fn().mockResolvedValue(undefined),
+        // Slack's chat.postMessage returns ok + ts + channel on success.
+        // postChunks records ts/channel in the action record's outputs_hash.
+        postMessage: vi.fn().mockResolvedValue({
+          ok: true,
+          ts: '1234567890.000100',
+          channel: 'C0123456789',
+        }),
       },
       conversations: {
         list: vi.fn().mockResolvedValue({
@@ -670,6 +676,119 @@ describe('SlackChannel', () => {
       await expect(
         channel.sendMessage('slack:C0123456789', 'Will fail'),
       ).resolves.toBeUndefined();
+    });
+
+    it('hashes the response ts (not the input text) into outputs_hash', async () => {
+      // BLOCKER 1 / HIGH 6 regression guard: the "output" of a message_send
+      // is the resulting Slack message identifier (ts), not the text. Two
+      // identical posts to different threads must produce different
+      // outputs_hash so an operator can pivot from log row to message.
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const writes: string[] = [];
+      const stdoutSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+          return true;
+        });
+      try {
+        currentApp().client.chat.postMessage.mockResolvedValueOnce({
+          ok: true,
+          ts: '1111111111.111111',
+          channel: 'C0123456789',
+        });
+        await channel.sendMessage('slack:C0123456789', 'Hello world');
+
+        currentApp().client.chat.postMessage.mockResolvedValueOnce({
+          ok: true,
+          ts: '2222222222.222222',
+          channel: 'C0123456789',
+        });
+        await channel.sendMessage('slack:C0123456789', 'Hello world');
+
+        const records = writes
+          .map((w) => w.trim())
+          .filter(
+            (w) => w.startsWith('{') && w.includes('"tool":"message_send"'),
+          )
+          .map((w) => JSON.parse(w));
+
+        expect(records).toHaveLength(2);
+        // Same input text → same inputs_hash.
+        expect(records[0].inputs_hash).toBe(records[1].inputs_hash);
+        // Different response ts → different outputs_hash.
+        expect(records[0].outputs_hash).not.toBe(records[1].outputs_hash);
+        // outputs_hash is no longer just hashPayload(text).
+        expect(records[0].outputs_hash).not.toBe(records[0].inputs_hash);
+      } finally {
+        stdoutSpy.mockRestore();
+      }
+    });
+
+    it('hashes failure error_class (not empty) into outputs_hash on send error', async () => {
+      // BLOCKER 1 regression guard: error rows used to share
+      // hashPayload('') = e3b0c44... outputs_hash. Two distinct error
+      // classes from the same call site must hash differently.
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const writes: string[] = [];
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+          return true;
+        });
+      try {
+        class NetworkBoom extends Error {
+          constructor() {
+            super('boom');
+            this.name = 'NetworkBoom';
+          }
+        }
+        class AuthBoom extends Error {
+          constructor() {
+            super('boom');
+            this.name = 'AuthBoom';
+          }
+        }
+        currentApp().client.chat.postMessage.mockRejectedValueOnce(
+          new NetworkBoom(),
+        );
+        await channel.sendMessage('slack:C0123456789', 'first');
+
+        currentApp().client.chat.postMessage.mockRejectedValueOnce(
+          new AuthBoom(),
+        );
+        await channel.sendMessage('slack:C0123456789', 'second');
+
+        const errorRecords = writes
+          .map((w) => w.trim())
+          .filter(
+            (w) =>
+              w.startsWith('{') &&
+              w.includes('"tool":"message_send"') &&
+              w.includes('"outcome":"error"'),
+          )
+          .map((w) => JSON.parse(w));
+
+        expect(errorRecords).toHaveLength(2);
+        expect(errorRecords[0].error_class).toBe('NetworkBoom');
+        expect(errorRecords[1].error_class).toBe('AuthBoom');
+        const EMPTY_STRING_HASH =
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+        expect(errorRecords[0].outputs_hash).not.toBe(EMPTY_STRING_HASH);
+        expect(errorRecords[1].outputs_hash).not.toBe(EMPTY_STRING_HASH);
+        expect(errorRecords[0].outputs_hash).not.toBe(
+          errorRecords[1].outputs_hash,
+        );
+      } finally {
+        stderrSpy.mockRestore();
+      }
     });
 
     it('hard-splits long messages with no boundaries at 3500 chars', async () => {
