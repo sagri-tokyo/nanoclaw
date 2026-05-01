@@ -4,7 +4,7 @@ import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
-import { logger } from '../logger.js';
+import { hashPayload, logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -219,15 +219,44 @@ export class SlackChannel implements Channel {
       return;
     }
 
+    const startTime = Date.now();
+    const inputsHash = hashPayload(text);
     try {
       await this.postChunks(channelId, text, threadTs);
-      logger.info({ jid, length: text.length }, 'Slack message sent');
+      logger.action({
+        ts: new Date().toISOString(),
+        level: 'info',
+        session_id: jid,
+        trigger: 'slack',
+        trigger_source: jid,
+        tool: 'message_send',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(text),
+        duration_ms: Date.now() - startTime,
+        outcome: 'ok',
+        error_class: null,
+        group: jid,
+      });
     } catch (err) {
       this.outgoingQueue.push({ jid, text, threadTs });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+      logger.action({
+        ts: new Date().toISOString(),
+        level: 'error',
+        session_id: jid,
+        trigger: 'slack',
+        trigger_source: jid,
+        tool: 'message_send',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(''),
+        duration_ms: Date.now() - startTime,
+        outcome: 'error',
+        error_class: err instanceof Error ? err.constructor.name : 'Error',
+        group: jid,
+      });
     }
   }
 

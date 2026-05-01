@@ -18,7 +18,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { logger } from './logger.js';
+import { hashPayload, logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -102,11 +102,13 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
+  const inputsHash = hashPayload(task.prompt);
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    const errorClass = err instanceof Error ? err.constructor.name : 'Error';
     // Stop retry churn for malformed legacy rows.
     updateTask(task.id, { status: 'paused' });
     logger.error(
@@ -121,11 +123,25 @@ async function runTask(
       result: null,
       error,
     });
+    logger.action({
+      ts: new Date().toISOString(),
+      level: 'error',
+      session_id: task.id,
+      trigger: 'scheduled',
+      trigger_source: task.schedule_value,
+      tool: 'container_run',
+      inputs_hash: inputsHash,
+      outputs_hash: hashPayload(error),
+      duration_ms: Date.now() - startTime,
+      outcome: 'rejected',
+      error_class: errorClass,
+      group: task.group_folder,
+    });
     return;
   }
   fs.mkdirSync(groupDir, { recursive: true });
 
-  logger.info(
+  logger.debug(
     { taskId: task.id, group: task.group_folder },
     'Running scheduled task',
   );
@@ -136,6 +152,7 @@ async function runTask(
   );
 
   if (!group) {
+    const error = `Group not found: ${task.group_folder}`;
     logger.error(
       { taskId: task.id, groupFolder: task.group_folder },
       'Group not found for task',
@@ -146,7 +163,21 @@ async function runTask(
       duration_ms: Date.now() - startTime,
       status: 'error',
       result: null,
-      error: `Group not found: ${task.group_folder}`,
+      error,
+    });
+    logger.action({
+      ts: new Date().toISOString(),
+      level: 'error',
+      session_id: task.id,
+      trigger: 'scheduled',
+      trigger_source: task.schedule_value,
+      tool: 'container_run',
+      inputs_hash: inputsHash,
+      outputs_hash: hashPayload(error),
+      duration_ms: Date.now() - startTime,
+      outcome: 'rejected',
+      error_class: 'GroupNotFoundError',
+      group: task.group_folder,
     });
     return;
   }
@@ -171,6 +202,7 @@ async function runTask(
 
   let result: string | null = null;
   let error: string | null = null;
+  let errorClass: string | null = null;
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
@@ -233,18 +265,20 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
+      errorClass = 'ContainerAgentError';
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
       result = output.result;
     }
 
-    logger.info(
+    logger.debug(
       { taskId: task.id, durationMs: Date.now() - startTime },
       'Task completed',
     );
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
+    errorClass = err instanceof Error ? err.constructor.name : 'Error';
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
@@ -257,6 +291,21 @@ async function runTask(
     status: error ? 'error' : 'success',
     result,
     error,
+  });
+
+  logger.action({
+    ts: new Date().toISOString(),
+    level: error ? 'error' : 'info',
+    session_id: task.id,
+    trigger: 'scheduled',
+    trigger_source: task.schedule_value,
+    tool: 'container_run',
+    inputs_hash: inputsHash,
+    outputs_hash: hashPayload(result ?? ''),
+    duration_ms: durationMs,
+    outcome: error ? 'error' : 'ok',
+    error_class: error ? errorClass : null,
+    group: task.group_folder,
   });
 
   const nextRun = computeNextRun(task);

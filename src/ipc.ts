@@ -7,8 +7,38 @@ import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
-import { logger } from './logger.js';
+import { hashPayload, logger, type ActionRecord } from './logger.js';
 import { RegisteredGroup } from './types.js';
+
+function ipcAction(
+  args: Pick<
+    ActionRecord,
+    | 'level'
+    | 'session_id'
+    | 'tool'
+    | 'inputs_hash'
+    | 'outputs_hash'
+    | 'duration_ms'
+    | 'outcome'
+    | 'error_class'
+    | 'group'
+  > & { trigger_source: string },
+): void {
+  logger.action({
+    ts: new Date().toISOString(),
+    level: args.level,
+    session_id: args.session_id,
+    trigger: 'ipc',
+    trigger_source: args.trigger_source,
+    tool: args.tool,
+    inputs_hash: args.inputs_hash,
+    outputs_hash: args.outputs_hash,
+    duration_ms: args.duration_ms,
+    outcome: args.outcome,
+    error_class: args.error_class,
+    group: args.group,
+  });
+}
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -180,6 +210,9 @@ export async function processTaskIpc(
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
 
+  const ipcStart = Date.now();
+  const inputsHash = hashPayload(data);
+
   switch (data.type) {
     case 'schedule_task':
       if (
@@ -197,6 +230,18 @@ export async function processTaskIpc(
             { targetJid },
             'Cannot schedule task: target group not registered',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: sourceGroup,
+            trigger_source: sourceGroup,
+            tool: 'ipc_schedule_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'TargetGroupNotRegistered',
+            group: sourceGroup,
+          });
           break;
         }
 
@@ -208,6 +253,18 @@ export async function processTaskIpc(
             { sourceGroup, targetFolder },
             'Unauthorized schedule_task attempt blocked',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: sourceGroup,
+            trigger_source: sourceGroup,
+            tool: 'ipc_schedule_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'Unauthorized',
+            group: sourceGroup,
+          });
           break;
         }
 
@@ -269,10 +326,22 @@ export async function processTaskIpc(
           status: 'active',
           created_at: new Date().toISOString(),
         });
-        logger.info(
+        logger.debug(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',
         );
+        ipcAction({
+          level: 'info',
+          session_id: taskId,
+          trigger_source: sourceGroup,
+          tool: 'ipc_schedule_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashPayload(taskId),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'ok',
+          error_class: null,
+          group: targetFolder,
+        });
         deps.onTasksChanged();
       }
       break;
@@ -282,16 +351,40 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
-          logger.info(
+          logger.debug(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
           );
+          ipcAction({
+            level: 'info',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_pause_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(data.taskId),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'ok',
+            error_class: null,
+            group: task.group_folder,
+          });
           deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task pause attempt',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_pause_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'Unauthorized',
+            group: sourceGroup,
+          });
         }
       }
       break;
@@ -301,16 +394,40 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
-          logger.info(
+          logger.debug(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
           );
+          ipcAction({
+            level: 'info',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_resume_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(data.taskId),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'ok',
+            error_class: null,
+            group: task.group_folder,
+          });
           deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task resume attempt',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_resume_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'Unauthorized',
+            group: sourceGroup,
+          });
         }
       }
       break;
@@ -320,16 +437,40 @@ export async function processTaskIpc(
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           deleteTask(data.taskId);
-          logger.info(
+          logger.debug(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',
           );
+          ipcAction({
+            level: 'info',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_cancel_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(data.taskId),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'ok',
+            error_class: null,
+            group: task.group_folder,
+          });
           deps.onTasksChanged();
         } else {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task cancel attempt',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_cancel_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'Unauthorized',
+            group: sourceGroup,
+          });
         }
       }
       break;
@@ -342,6 +483,18 @@ export async function processTaskIpc(
             { taskId: data.taskId, sourceGroup },
             'Task not found for update',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_update_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'TaskNotFound',
+            group: sourceGroup,
+          });
           break;
         }
         if (!isMain && task.group_folder !== sourceGroup) {
@@ -349,6 +502,18 @@ export async function processTaskIpc(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task update attempt',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: data.taskId,
+            trigger_source: sourceGroup,
+            tool: 'ipc_update_task',
+            inputs_hash: inputsHash,
+            outputs_hash: hashPayload(''),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'Unauthorized',
+            group: sourceGroup,
+          });
           break;
         }
 
@@ -392,10 +557,22 @@ export async function processTaskIpc(
         }
 
         updateTask(data.taskId, updates);
-        logger.info(
+        logger.debug(
           { taskId: data.taskId, sourceGroup, updates },
           'Task updated via IPC',
         );
+        ipcAction({
+          level: 'info',
+          session_id: data.taskId,
+          trigger_source: sourceGroup,
+          tool: 'ipc_update_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashPayload(data.taskId),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'ok',
+          error_class: null,
+          group: task.group_folder,
+        });
         deps.onTasksChanged();
       }
       break;

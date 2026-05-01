@@ -7,11 +7,23 @@ vi.mock('./env.js', () => ({
   readEnvFile: vi.fn(() => ({ ...mockEnv })),
 }));
 
-vi.mock('./logger.js', () => ({
-  logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
-}));
+vi.mock('./logger.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./logger.js')>();
+  return {
+    ...real,
+    logger: {
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      warn: vi.fn(),
+      fatal: vi.fn(),
+      action: vi.fn(real.logger.action),
+    },
+  };
+});
 
-import { startCredentialProxy } from './credential-proxy.js';
+import { logger } from './logger.js';
+import { redactUrlPath, startCredentialProxy } from './credential-proxy.js';
 
 function makeRequest(
   port: number,
@@ -188,5 +200,96 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  it('redacts query string from req.url before logging on upstream error', async () => {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-ant-real-key',
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+    });
+    proxyServer = await startCredentialProxy(0);
+    proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    (logger.error as ReturnType<typeof vi.fn>).mockClear();
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages?api_key=should-not-leak&token=secret',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    const errorCalls = (logger.error as ReturnType<typeof vi.fn>).mock.calls;
+    expect(errorCalls.length).toBeGreaterThanOrEqual(1);
+    const errCall = errorCalls.find(
+      (c: unknown[]) =>
+        Array.isArray(c) &&
+        typeof c[1] === 'string' &&
+        (c[1] as string).includes('Credential proxy upstream error'),
+    );
+    expect(errCall).toBeDefined();
+    const fields = errCall![0] as Record<string, unknown>;
+    // No url field at all (renamed to path), and no query string remnants.
+    const flat = JSON.stringify(fields);
+    expect(flat).not.toContain('api_key=');
+    expect(flat).not.toContain('should-not-leak');
+    expect(flat).not.toContain('token=secret');
+    expect(fields.path).toBe('/v1/messages');
+  });
+
+  it('emits a schema-shaped action record on successful upstream call', async () => {
+    proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+
+    (logger.action as ReturnType<typeof vi.fn>).mockClear();
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    // Wait one tick for the upRes 'end' event to fire after the response is read.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const calls = (logger.action as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const record = calls[0][0] as Record<string, unknown>;
+    expect(record).toMatchObject({
+      level: 'info',
+      trigger: 'sub_request',
+      trigger_source: '/v1/messages',
+      tool: 'anthropic_api',
+      outcome: 'ok',
+      group: 'credential-proxy',
+      error_class: null,
+    });
+    expect(typeof record.session_id).toBe('string');
+    expect((record.session_id as string).length).toBeGreaterThan(0);
+    expect(typeof record.duration_ms).toBe('number');
+    expect(record.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('redactUrlPath', () => {
+  it('returns the path unchanged when there is no query string', () => {
+    expect(redactUrlPath('/v1/messages')).toBe('/v1/messages');
+  });
+
+  it('drops everything from the first ? onward', () => {
+    expect(redactUrlPath('/v1/messages?api_key=secret&foo=bar')).toBe(
+      '/v1/messages',
+    );
+  });
+
+  it('handles empty / undefined / non-string input', () => {
+    expect(redactUrlPath(undefined)).toBe('<unknown>');
+    expect(redactUrlPath('')).toBe('<unknown>');
   });
 });

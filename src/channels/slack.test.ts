@@ -11,15 +11,22 @@ vi.mock('../config.js', () => ({
   TRIGGER_PATTERN: /^@Jonesy\b/i,
 }));
 
-// Mock logger
-vi.mock('../logger.js', () => ({
-  logger: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+// Mock logger — pass through real hashPayload + a real action emitter so any
+// schema violations introduced by call-site changes surface as test failures.
+vi.mock('../logger.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../logger.js')>();
+  return {
+    ...real,
+    logger: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      fatal: vi.fn(),
+      action: vi.fn(real.logger.action),
+    },
+  };
+});
 
 // Mock db
 vi.mock('../db.js', () => ({

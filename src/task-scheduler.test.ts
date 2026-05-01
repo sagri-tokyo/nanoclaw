@@ -183,4 +183,77 @@ describe('task scheduler', () => {
       expect(isSilentResult('__staging__ test — Complete')).toBe(false);
     });
   });
+
+  describe('action emission', () => {
+    it('emits a schema-valid action record on the invalid-folder rejection path', async () => {
+      const writes: string[] = [];
+      const stdoutSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+          return true;
+        });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((chunk) => {
+          writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+          return true;
+        });
+
+      try {
+        createTask({
+          id: 'task-action-rejected',
+          group_folder: '../../outside',
+          chat_jid: 'bad@g.us',
+          prompt: 'run',
+          schedule_type: 'once',
+          schedule_value: '2026-02-22T00:00:00.000Z',
+          context_mode: 'isolated',
+          next_run: new Date(Date.now() - 60_000).toISOString(),
+          status: 'active',
+          created_at: '2026-02-22T00:00:00.000Z',
+        });
+
+        const enqueueTask = vi.fn(
+          (_g: string, _t: string, fn: () => Promise<void>) => {
+            void fn();
+          },
+        );
+
+        startSchedulerLoop({
+          registeredGroups: () => ({}),
+          getSessions: () => ({}),
+          queue: { enqueueTask } as any,
+          onProcess: () => {},
+          sendMessage: async () => {},
+        });
+
+        await vi.advanceTimersByTimeAsync(10);
+
+        // The NDJSON line is the only line that parses as JSON with the
+        // action schema fields.
+        const ndjson = writes
+          .map((w) => w.trim())
+          .filter((w) => w.startsWith('{') && w.includes('"trigger"'))
+          .map((w) => JSON.parse(w));
+        expect(ndjson.length).toBeGreaterThanOrEqual(1);
+        const record = ndjson[0];
+        expect(record).toMatchObject({
+          level: 'error',
+          session_id: 'task-action-rejected',
+          trigger: 'scheduled',
+          tool: 'container_run',
+          outcome: 'rejected',
+          group: '../../outside',
+        });
+        expect(record.inputs_hash).toMatch(/^[0-9a-f]{64}$/);
+        expect(record.outputs_hash).toMatch(/^[0-9a-f]{64}$/);
+        expect(record.error_class).toBe('Error');
+        expect(typeof record.duration_ms).toBe('number');
+      } finally {
+        stdoutSpy.mockRestore();
+        stderrSpy.mockRestore();
+      }
+    });
+  });
 });

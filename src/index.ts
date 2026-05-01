@@ -67,7 +67,7 @@ import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
-import { logger } from './logger.js';
+import { hashPayload, logger } from './logger.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -236,10 +236,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages[missedMessages.length - 1].timestamp;
   saveState();
 
-  logger.info(
+  logger.debug(
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+
+  const actionStart = Date.now();
+  const inputsHash = hashPayload(prompt);
+  let aggregatedOutput = '';
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -268,7 +272,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+      logger.debug({ group: group.name }, `Agent output: ${raw.length} chars`);
+      aggregatedOutput += raw;
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
@@ -288,6 +293,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  const sessionId = sessions[group.folder] || group.folder;
+  const failed = output === 'error' || hadError;
+  logger.action({
+    ts: new Date().toISOString(),
+    level: failed ? 'error' : 'info',
+    session_id: sessionId,
+    trigger: 'slack',
+    trigger_source: chatJid,
+    tool: 'message_handle',
+    inputs_hash: inputsHash,
+    outputs_hash: hashPayload(aggregatedOutput),
+    duration_ms: Date.now() - actionStart,
+    outcome: failed ? 'error' : 'ok',
+    error_class: failed ? 'AgentError' : null,
+    group: group.folder,
+  });
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
