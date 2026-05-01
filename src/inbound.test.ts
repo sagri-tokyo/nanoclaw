@@ -157,8 +157,12 @@ describe('handleInboundMessage — abort intercept', () => {
     expect(storeMessage).toHaveBeenCalledWith(msg);
   });
 
-  it('runs abort intercept BEFORE the sender-allowlist drop check', () => {
-    const msg = buildMessage({ content: '@Sagri-AI stop', is_dm: false });
+  it('runs abort intercept AFTER the sender-allowlist gate when sender is allowed', () => {
+    const msg = buildMessage({
+      content: '@Sagri-AI stop',
+      is_dm: false,
+      sender: 'U_USER_456',
+    });
 
     handleInboundMessage('slack:C0123456789', msg, {
       registeredGroups: () => registeredGroups,
@@ -166,7 +170,7 @@ describe('handleInboundMessage — abort intercept', () => {
       handleAbort,
       handleRemoteControl,
       loadSenderAllowlist: () => ({
-        default: { allow: ['someone-else'], mode: 'drop' },
+        default: { allow: ['U_USER_456'], mode: 'drop' },
         chats: {},
         logDenied: false,
       }),
@@ -213,6 +217,113 @@ describe('handleInboundMessage — abort intercept', () => {
 
     expect(handleAbort).not.toHaveBeenCalled();
     expect(storeMessage).not.toHaveBeenCalled();
+  });
+
+  describe('abort intent from unauthorised sender', () => {
+    const dropConfig = {
+      default: {
+        allow: ['U_OTHER_USER'] as string[],
+        mode: 'drop' as const,
+      },
+      chats: {},
+      logDenied: false,
+    };
+
+    it('drops mention-form abort silently (does not call handleAbort or storeMessage)', () => {
+      const msg = buildMessage({
+        content: '@Sagri-AI stop',
+        is_dm: false,
+        sender: 'U_UNAUTHORISED',
+      });
+
+      handleInboundMessage('slack:C0123456789', msg, {
+        registeredGroups: () => registeredGroups,
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist: () => dropConfig,
+      });
+
+      expect(handleAbort).not.toHaveBeenCalled();
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
+
+    it('drops slash-form abort silently in a registered channel', () => {
+      const msg = buildMessage({
+        content: '/stop',
+        is_dm: false,
+        sender: 'U_UNAUTHORISED',
+      });
+
+      handleInboundMessage('slack:C0123456789', msg, {
+        registeredGroups: () => registeredGroups,
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist: () => dropConfig,
+      });
+
+      expect(handleAbort).not.toHaveBeenCalled();
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
+
+    it('drops bare-verb abort silently in a DM', () => {
+      const msg = buildMessage({
+        chat_jid: 'slack:D9876543210',
+        content: 'stop',
+        is_dm: true,
+        sender: 'U_UNAUTHORISED',
+      });
+
+      handleInboundMessage('slack:D9876543210', msg, {
+        registeredGroups: () => ({ 'slack:D9876543210': REGISTERED_GROUP }),
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist: () => dropConfig,
+      });
+
+      expect(handleAbort).not.toHaveBeenCalled();
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
+
+    it('drops cancel verb silently when sender is not on allowlist', () => {
+      const msg = buildMessage({
+        content: '@Sagri-AI cancel',
+        is_dm: false,
+        sender: 'U_UNAUTHORISED',
+      });
+
+      handleInboundMessage('slack:C0123456789', msg, {
+        registeredGroups: () => registeredGroups,
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist: () => dropConfig,
+      });
+
+      expect(handleAbort).not.toHaveBeenCalled();
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
+
+    it('drops abort verb silently when sender is not on allowlist', () => {
+      const msg = buildMessage({
+        content: '/abort',
+        is_dm: false,
+        sender: 'U_UNAUTHORISED',
+      });
+
+      handleInboundMessage('slack:C0123456789', msg, {
+        registeredGroups: () => registeredGroups,
+        storeMessage,
+        handleAbort,
+        handleRemoteControl,
+        loadSenderAllowlist: () => dropConfig,
+      });
+
+      expect(handleAbort).not.toHaveBeenCalled();
+      expect(storeMessage).not.toHaveBeenCalled();
+    });
   });
 
   it('logs when an abort intent is intercepted', () => {

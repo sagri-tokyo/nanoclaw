@@ -8,11 +8,14 @@
  *
  *   1. `/remote-control` and `/remote-control-end` — slash commands the
  *      host already intercepts before storage. Untouched.
- *   2. Abort intent (`parseAbortIntent`) — intercepted before storage so
+ *   2. Sender-allowlist gate — runs before any host-side intercept that
+ *      would take privileged action. An unauthorised sender's message is
+ *      dropped silently here, matching the behaviour for ordinary
+ *      messages. Abort is no exception: a message from a sender that is
+ *      not on the allowlist must not reach the kill-switch handler.
+ *   3. Abort intent (`parseAbortIntent`) — intercepted before storage so
  *      the message never reaches the agent inside the container we may
  *      be about to kill (PR-B / sagri-tokyo/sagri-ai#129).
- *   3. Sender-allowlist drop mode — only after the host-side intercepts,
- *      because abort is strictly less privileged than dispatch.
  *   4. `storeMessage` — ordinary delivery path.
  */
 
@@ -51,17 +54,6 @@ export function handleInboundMessage(
     return;
   }
 
-  if (parseAbortIntent(msg.content, msg.is_dm === true)) {
-    logger.info(
-      { chatJid, sender: msg.sender, messageId: msg.id },
-      'Abort intent intercepted',
-    );
-    Promise.resolve(deps.handleAbort(chatJid, msg)).catch((err) =>
-      logger.error({ err, chatJid }, 'Abort handler error'),
-    );
-    return;
-  }
-
   if (
     !msg.is_from_me &&
     !msg.is_bot_message &&
@@ -80,6 +72,17 @@ export function handleInboundMessage(
       }
       return;
     }
+  }
+
+  if (parseAbortIntent(msg.content, msg.is_dm === true)) {
+    logger.info(
+      { chatJid, sender: msg.sender, messageId: msg.id },
+      'Abort intent intercepted',
+    );
+    Promise.resolve(deps.handleAbort(chatJid, msg)).catch((err) =>
+      logger.error({ err, chatJid }, 'Abort handler error'),
+    );
+    return;
   }
 
   deps.storeMessage(msg);
