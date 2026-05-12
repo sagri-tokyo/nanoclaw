@@ -129,6 +129,45 @@ describe('hashPayload', () => {
     expect(() => canonicalJson(undefined)).toThrow(/undefined/);
   });
 
+  it('throws ActionSchemaError on top-level BigInt input', () => {
+    let caught: unknown;
+    try {
+      canonicalJson(1n);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ActionSchemaError);
+    expect((caught as ActionSchemaError).message).toBe(
+      'canonicalJson: BigInt is not supported',
+    );
+  });
+
+  it('throws ActionSchemaError on BigInt nested in an object', () => {
+    let caught: unknown;
+    try {
+      canonicalJson({ a: 1, b: 2n });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ActionSchemaError);
+    expect((caught as ActionSchemaError).message).toBe(
+      'canonicalJson: BigInt is not supported',
+    );
+  });
+
+  it('throws ActionSchemaError on BigInt nested in an array', () => {
+    let caught: unknown;
+    try {
+      canonicalJson([1, 2n, 3]);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ActionSchemaError);
+    expect((caught as ActionSchemaError).message).toBe(
+      'canonicalJson: BigInt is not supported',
+    );
+  });
+
   it('produces distinct hashes for different failure payloads', () => {
     const a = hashPayload({ error_class: 'TargetGroupNotRegistered' });
     const b = hashPayload({ error_class: 'Unauthorized' });

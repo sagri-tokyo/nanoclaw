@@ -156,6 +156,9 @@ export class ActionSchemaError extends Error {
  * value. Arrays preserve insertion order. Non-finite numbers serialise as
  * null (matches `JSON.stringify` default).
  *
+ * Supported value types: `string`, `number`, `boolean`, `null`, arrays of
+ * supported values, and plain objects whose values are supported.
+ *
  * `undefined` is rejected at every position (top-level, object value, array
  * slot). `JSON.stringify` silently drops undefined-valued object keys and
  * coerces undefined array slots to null, which would let
@@ -163,12 +166,21 @@ export class ActionSchemaError extends Error {
  * to the same hash. Forensic correlation needs distinct payloads to stay
  * distinct, so we fail-fast instead. Callers must omit absent fields rather
  * than passing `undefined`.
+ *
+ * `bigint` is rejected at every position and throws `ActionSchemaError`.
+ * `JSON.stringify` raises a raw `TypeError` on BigInt, which would escape
+ * the validator's error class and break downstream `instanceof
+ * ActionSchemaError` handling. Callers must convert BigInt to string or
+ * number (with awareness of precision loss) before passing.
  */
 export function canonicalJson(value: unknown): string {
   if (value === undefined) {
     throw new ActionSchemaError(
       'canonicalJson: undefined is not serialisable — omit the field instead',
     );
+  }
+  if (typeof value === 'bigint') {
+    throw new ActionSchemaError('canonicalJson: BigInt is not supported');
   }
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) {
