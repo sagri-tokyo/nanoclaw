@@ -749,3 +749,358 @@ describe('rejected IPC paths emit distinct outputs_hash per error_class', () => 
     }
   });
 });
+
+// sagri-ai#156: previously-silent reject branches in processTaskIpc must
+// emit an ipcAction record so CloudWatch sees every drop with a
+// meaningful error_class.
+
+function captureIpcActions(run: () => Promise<void>) {
+  return async (): Promise<Record<string, unknown>[]> => {
+    const writes: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      await run();
+      return writes
+        .map((w) => w.trim())
+        .filter((w) => w.startsWith('{') && w.includes('"trigger":"ipc"'))
+        .map((w) => JSON.parse(w) as Record<string, unknown>);
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  };
+}
+
+function findIpcAction(
+  records: Record<string, unknown>[],
+  tool: string,
+): Record<string, unknown> | undefined {
+  return records.find((r) => r.tool === tool);
+}
+
+describe('schedule_task silent-drop branches emit reject ipcAction', () => {
+  it('missing prompt emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          schedule_type: 'once',
+          schedule_value: '2025-06-01T00:00:00',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+    expect(record!.level).toEqual('warn');
+    expect(record!.trigger).toEqual('ipc');
+    expect(record!.trigger_source).toEqual('whatsapp_main');
+    expect(record!.group).toEqual('whatsapp_main');
+  });
+
+  it('missing targetJid emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'do it',
+          schedule_type: 'once',
+          schedule_value: '2025-06-01T00:00:00',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+
+  it('invalid cron expression emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad cron',
+          schedule_type: 'cron',
+          schedule_value: 'not a cron',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+
+  it('non-numeric interval emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad interval',
+          schedule_type: 'interval',
+          schedule_value: 'abc',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+
+  it('zero interval emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'zero interval',
+          schedule_type: 'interval',
+          schedule_value: '0',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+
+  it('invalid once timestamp emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad once',
+          schedule_type: 'once',
+          schedule_value: 'not-a-date',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_schedule_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+});
+
+describe('task-id branch silent-drop emits reject ipcAction', () => {
+  it('pause_task without taskId emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc({ type: 'pause_task' }, 'other-group', false, deps);
+    })();
+
+    const record = findIpcAction(records, 'ipc_pause_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+
+  it('resume_task without taskId emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc({ type: 'resume_task' }, 'other-group', false, deps);
+    })();
+
+    const record = findIpcAction(records, 'ipc_resume_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+
+  it('cancel_task without taskId emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc({ type: 'cancel_task' }, 'other-group', false, deps);
+    })();
+
+    const record = findIpcAction(records, 'ipc_cancel_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+
+  it('update_task without taskId emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc({ type: 'update_task' }, 'other-group', false, deps);
+    })();
+
+    const record = findIpcAction(records, 'ipc_update_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+
+  it('update_task with invalid cron in update emits InvalidPayload', async () => {
+    createTask({
+      id: 'task-to-update',
+      group_folder: 'whatsapp_main',
+      chat_jid: 'main@g.us',
+      prompt: 'before',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'update_task',
+          taskId: 'task-to-update',
+          schedule_type: 'cron',
+          schedule_value: 'not a cron',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_update_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+});
+
+describe('refresh_groups and register_group silent-drop emits reject ipcAction', () => {
+  it('non-main refresh_groups emits Unauthorized', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        { type: 'refresh_groups' },
+        'other-group',
+        false,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_refresh_groups');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('Unauthorized');
+  });
+
+  it('non-main register_group emits Unauthorized', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'register_group',
+          jid: 'new@g.us',
+          name: 'New Group',
+          folder: 'new-group',
+          trigger: '@Andy',
+        },
+        'other-group',
+        false,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_register_group');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('Unauthorized');
+  });
+
+  it('register_group with unsafe folder emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'register_group',
+          jid: 'new@g.us',
+          name: 'New Group',
+          folder: '../../outside',
+          trigger: '@Andy',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_register_group');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+
+  it('register_group with missing fields emits MissingRequiredField', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        {
+          type: 'register_group',
+          jid: 'partial@g.us',
+          name: 'Partial',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_register_group');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('MissingRequiredField');
+  });
+});
+
+describe('unknown IPC type emits reject ipcAction', () => {
+  it('unknown type emits InvalidPayload', async () => {
+    const records = await captureIpcActions(async () => {
+      await processTaskIpc(
+        { type: 'totally_unknown_type' },
+        'other-group',
+        false,
+        deps,
+      );
+    })();
+
+    const record = findIpcAction(records, 'ipc_unknown');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toEqual('rejected');
+    expect(record!.error_class).toEqual('InvalidPayload');
+  });
+});

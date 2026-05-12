@@ -221,11 +221,32 @@ export async function processTaskIpc(
   switch (data.type) {
     case 'schedule_task':
       if (
-        data.prompt &&
-        data.schedule_type &&
-        data.schedule_value &&
-        data.targetJid
+        !data.prompt ||
+        !data.schedule_type ||
+        !data.schedule_value ||
+        !data.targetJid
       ) {
+        logger.warn(
+          { data },
+          'Invalid schedule_task request - missing required fields',
+        );
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_schedule_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
+        break;
+      }
+      {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
         const targetGroupEntry = registeredGroups[targetJid];
@@ -291,6 +312,20 @@ export async function processTaskIpc(
               { scheduleValue: data.schedule_value },
               'Invalid cron expression',
             );
+            ipcAction({
+              level: 'warn',
+              session_id: sourceGroup,
+              trigger_source: sourceGroup,
+              tool: 'ipc_schedule_task',
+              inputs_hash: inputsHash,
+              outputs_hash: hashFailureOutput({
+                error_class: 'InvalidPayload',
+              }),
+              duration_ms: Date.now() - ipcStart,
+              outcome: 'rejected',
+              error_class: 'InvalidPayload',
+              group: sourceGroup,
+            });
             break;
           }
         } else if (scheduleType === 'interval') {
@@ -300,6 +335,20 @@ export async function processTaskIpc(
               { scheduleValue: data.schedule_value },
               'Invalid interval',
             );
+            ipcAction({
+              level: 'warn',
+              session_id: sourceGroup,
+              trigger_source: sourceGroup,
+              tool: 'ipc_schedule_task',
+              inputs_hash: inputsHash,
+              outputs_hash: hashFailureOutput({
+                error_class: 'InvalidPayload',
+              }),
+              duration_ms: Date.now() - ipcStart,
+              outcome: 'rejected',
+              error_class: 'InvalidPayload',
+              group: sourceGroup,
+            });
             break;
           }
           nextRun = new Date(Date.now() + ms).toISOString();
@@ -310,6 +359,20 @@ export async function processTaskIpc(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
             );
+            ipcAction({
+              level: 'warn',
+              session_id: sourceGroup,
+              trigger_source: sourceGroup,
+              tool: 'ipc_schedule_task',
+              inputs_hash: inputsHash,
+              outputs_hash: hashFailureOutput({
+                error_class: 'InvalidPayload',
+              }),
+              duration_ms: Date.now() - ipcStart,
+              outcome: 'rejected',
+              error_class: 'InvalidPayload',
+              group: sourceGroup,
+            });
             break;
           }
           nextRun = date.toISOString();
@@ -356,7 +419,25 @@ export async function processTaskIpc(
       break;
 
     case 'pause_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        logger.warn({ data }, 'pause_task missing taskId');
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_pause_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
+        break;
+      }
+      {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'paused' });
@@ -401,7 +482,25 @@ export async function processTaskIpc(
       break;
 
     case 'resume_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        logger.warn({ data }, 'resume_task missing taskId');
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_resume_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
+        break;
+      }
+      {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           updateTask(data.taskId, { status: 'active' });
@@ -446,7 +545,25 @@ export async function processTaskIpc(
       break;
 
     case 'cancel_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        logger.warn({ data }, 'cancel_task missing taskId');
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_cancel_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
+        break;
+      }
+      {
         const task = getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
           deleteTask(data.taskId);
@@ -491,7 +608,25 @@ export async function processTaskIpc(
       break;
 
     case 'update_task':
-      if (data.taskId) {
+      if (!data.taskId) {
+        logger.warn({ data }, 'update_task missing taskId');
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_update_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
+        break;
+      }
+      {
         const task = getTaskById(data.taskId);
         if (!task) {
           logger.warn(
@@ -565,6 +700,20 @@ export async function processTaskIpc(
                 { taskId: data.taskId, value: updatedTask.schedule_value },
                 'Invalid cron in task update',
               );
+              ipcAction({
+                level: 'warn',
+                session_id: data.taskId,
+                trigger_source: sourceGroup,
+                tool: 'ipc_update_task',
+                inputs_hash: inputsHash,
+                outputs_hash: hashFailureOutput({
+                  error_class: 'InvalidPayload',
+                }),
+                duration_ms: Date.now() - ipcStart,
+                outcome: 'rejected',
+                error_class: 'InvalidPayload',
+                group: sourceGroup,
+              });
               break;
             }
           } else if (updatedTask.schedule_type === 'interval') {
@@ -617,6 +766,20 @@ export async function processTaskIpc(
           { sourceGroup },
           'Unauthorized refresh_groups attempt blocked',
         );
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_refresh_groups',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'Unauthorized',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'Unauthorized',
+          group: sourceGroup,
+        });
       }
       break;
 
@@ -627,6 +790,20 @@ export async function processTaskIpc(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
         );
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_register_group',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'Unauthorized',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'Unauthorized',
+          group: sourceGroup,
+        });
         break;
       }
       if (data.jid && data.name && data.folder && data.trigger) {
@@ -635,6 +812,20 @@ export async function processTaskIpc(
             { sourceGroup, folder: data.folder },
             'Invalid register_group request - unsafe folder name',
           );
+          ipcAction({
+            level: 'warn',
+            session_id: sourceGroup,
+            trigger_source: sourceGroup,
+            tool: 'ipc_register_group',
+            inputs_hash: inputsHash,
+            outputs_hash: hashFailureOutput({
+              error_class: 'InvalidPayload',
+            }),
+            duration_ms: Date.now() - ipcStart,
+            outcome: 'rejected',
+            error_class: 'InvalidPayload',
+            group: sourceGroup,
+          });
           break;
         }
         // Defense in depth: agent cannot set isMain via IPC.
@@ -655,10 +846,38 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+        ipcAction({
+          level: 'warn',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_register_group',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({
+            error_class: 'MissingRequiredField',
+          }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'rejected',
+          error_class: 'MissingRequiredField',
+          group: sourceGroup,
+        });
       }
       break;
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+      ipcAction({
+        level: 'warn',
+        session_id: sourceGroup,
+        trigger_source: sourceGroup,
+        tool: 'ipc_unknown',
+        inputs_hash: inputsHash,
+        outputs_hash: hashFailureOutput({
+          error_class: 'InvalidPayload',
+        }),
+        duration_ms: Date.now() - ipcStart,
+        outcome: 'rejected',
+        error_class: 'InvalidPayload',
+        group: sourceGroup,
+      });
   }
 }
