@@ -27,6 +27,7 @@ import {
   validateActionRecord,
   ActionRecord,
   ActionSchemaError,
+  formatErr,
   logger,
 } from './logger.js';
 
@@ -367,6 +368,115 @@ describe('validateActionRecord', () => {
       extra_field: 'oops',
     } as unknown as ActionRecord;
     expect(() => validateActionRecord(r)).toThrow(/extra_field/);
+  });
+});
+
+describe('formatErr JSON escaping (sagri-tokyo/sagri-ai#157)', () => {
+  // Each case is an error whose `message` contains a character class the
+  // previous string-interpolation implementation would have left unescaped,
+  // producing log lines that JSON.parse refused. The fix replaces manual
+  // interpolation with JSON.stringify so each case round-trips losslessly.
+  const corruptingCases: ReadonlyArray<{ name: string; message: string }> = [
+    { name: 'double quote', message: 'unexpected " in payload' },
+    { name: 'newline', message: 'line1\nline2' },
+    { name: 'backslash', message: 'path\\to\\file' },
+    { name: 'control character (U+0007 BEL)', message: 'bell:here' },
+    { name: 'tab', message: 'col1\tcol2' },
+  ];
+
+  for (const { name, message } of corruptingCases) {
+    it(`emits parseable JSON when message contains ${name}`, () => {
+      const err = new Error(message);
+      const out = formatErr(err);
+      expect(() => JSON.parse(out)).not.toThrow();
+      const parsed = JSON.parse(out) as {
+        type: string;
+        message: string;
+        stack: string | undefined;
+      };
+      expect(parsed.message).toBe(message);
+      expect(parsed.type).toBe('Error');
+    });
+  }
+
+  it('emits parseable JSON when stack contains corrupting characters', () => {
+    const err = new Error('outer');
+    err.stack = 'Error: outer\n    at "file"\\with\ttab\n';
+    const parsed = JSON.parse(formatErr(err)) as {
+      type: string;
+      message: string;
+      stack: string;
+    };
+    expect(parsed.stack).toBe('Error: outer\n    at "file"\\with\ttab\n');
+    expect(parsed.message).toBe('outer');
+  });
+
+  it('emits parseable JSON for the combined Notion-style failure mode', () => {
+    // Realistic regression: a Notion/Anthropic response body interpolated
+    // into an Error message — quotes, backslashes, and newlines together.
+    const message =
+      'Notion API: {"error":"validation_error","details":"bad path \\\\u200b\\nfield: \\"title\\""}';
+    const parsed = JSON.parse(formatErr(new Error(message))) as {
+      message: string;
+    };
+    expect(parsed.message).toBe(message);
+  });
+
+  it('uses the Error subclass constructor name as type', () => {
+    class HttpError extends Error {
+      constructor(msg: string) {
+        super(msg);
+        this.name = 'HttpError';
+      }
+    }
+    const parsed = JSON.parse(formatErr(new HttpError('boom "quoted"'))) as {
+      type: string;
+      message: string;
+    };
+    expect(parsed.type).toBe('HttpError');
+    expect(parsed.message).toBe('boom "quoted"');
+  });
+
+  it('falls back to JSON.stringify for non-Error values', () => {
+    expect(formatErr('plain string')).toBe(JSON.stringify('plain string'));
+    expect(formatErr({ code: 'ENOENT' })).toBe(
+      JSON.stringify({ code: 'ENOENT' }),
+    );
+    expect(formatErr(null)).toBe('null');
+  });
+
+  it('produces a parseable line inside the diagnostic log surface (logger.error)', () => {
+    // formatErr is reused by the diagnostic path via formatData. Even though
+    // the surrounding text isn't pure JSON, the err payload itself must be
+    // a valid JSON fragment that downstream parsers can extract.
+    const captured: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        captured.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      const err = new Error('quoted "thing"\nnext line\\path');
+      logger.error({ err }, 'boom');
+      expect(captured).toHaveLength(1);
+      // Extract the err JSON fragment from the formatted line. The line
+      // shape is `... err: {<json>}` where the JSON starts at the first `{`
+      // following `err:` and runs to end-of-line (minus the trailing newline).
+      const line = captured[0];
+      const marker = 'err\x1b[39m: ';
+      const start = line.indexOf(marker);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const fragment = line.slice(start + marker.length).replace(/\n$/, '');
+      const parsed = JSON.parse(fragment) as {
+        type: string;
+        message: string;
+      };
+      expect(parsed.message).toBe('quoted "thing"\nnext line\\path');
+      expect(parsed.type).toBe('Error');
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
 

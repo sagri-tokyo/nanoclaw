@@ -39,9 +39,13 @@ const FULL_RESET = '\x1b[0m';
 const threshold =
   LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
-function formatErr(err: unknown): string {
+export function formatErr(err: unknown): string {
   if (err instanceof Error) {
-    return `{\n      "type": "${err.constructor.name}",\n      "message": "${err.message}",\n      "stack":\n          ${err.stack}\n    }`;
+    return JSON.stringify({
+      type: err.constructor.name,
+      message: err.message,
+      stack: err.stack,
+    });
   }
   return JSON.stringify(err);
 }
