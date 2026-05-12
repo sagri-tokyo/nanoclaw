@@ -453,6 +453,7 @@ describe('reader-rpc fetch_untrusted', () => {
     loggerMock.error.mockClear();
     loggerMock.debug.mockClear();
     loggerMock.warn.mockClear();
+    loggerMock.action.mockClear();
 
     upstreamRespond = () => ({
       status: 200,
@@ -841,5 +842,141 @@ describe('reader-rpc fetch_untrusted', () => {
     expect(serialized).not.toContain('$NOTION_API_KEY');
     expect(serialized).not.toContain('evil.example');
     expect(serialized).toContain('prompt_injection');
+  });
+
+  it('emits logger.action on fetch_untrusted ok branch', async () => {
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted',
+        params: {
+          url_or_id: 'https://research.example/paper',
+          source_type: 'web_content',
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+
+    const actionCalls = loggerMock.action.mock.calls;
+    expect(actionCalls).toHaveLength(1);
+    const record = actionCalls[0][0];
+    expect(record).toMatchObject({
+      level: 'info',
+      trigger: 'sub_request',
+      trigger_source: 'web_content',
+      tool: 'fetch_untrusted',
+      outcome: 'ok',
+      error_class: null,
+      group: 'web_content',
+    });
+    expect(typeof record.session_id).toBe('string');
+    expect(record.session_id.length).toBeGreaterThan(0);
+    expect(record.inputs_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.outputs_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(typeof record.duration_ms).toBe('number');
+    expect(record.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('emits logger.action on fetch_untrusted error branch', async () => {
+    targetRespond = () => ({
+      status: 500,
+      headers: { 'content-type': 'text/plain' },
+      body: 'upstream broken',
+    });
+
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted',
+        params: {
+          url_or_id: 'https://research.example/paper',
+          source_type: 'web_content',
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(502);
+
+    const actionCalls = loggerMock.action.mock.calls;
+    expect(actionCalls).toHaveLength(1);
+    const record = actionCalls[0][0];
+    expect(record).toMatchObject({
+      level: 'error',
+      trigger: 'sub_request',
+      trigger_source: 'web_content',
+      tool: 'fetch_untrusted',
+      outcome: 'error',
+      group: 'web_content',
+    });
+    expect(typeof record.error_class).toBe('string');
+    expect(record.error_class.length).toBeGreaterThan(0);
+    expect(record.inputs_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.outputs_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('emits logger.action on fetch_untrusted_list ok branch', async () => {
+    Object.assign(mockEnv, { NOTION_API_KEY: 'secret_test' });
+    targetRespond = () => ({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ results: [], has_more: false }),
+    });
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted_list',
+        params: {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+
+    const actionCalls = loggerMock.action.mock.calls;
+    expect(actionCalls).toHaveLength(1);
+    const record = actionCalls[0][0];
+    expect(record).toMatchObject({
+      level: 'info',
+      trigger: 'sub_request',
+      trigger_source: 'notion_database_query',
+      tool: 'fetch_untrusted_list',
+      outcome: 'ok',
+      error_class: null,
+      group: 'notion_database_query',
+    });
+    expect(typeof record.session_id).toBe('string');
+    expect(record.session_id.length).toBeGreaterThan(0);
+    expect(record.inputs_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.outputs_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('emits logger.action on fetch_untrusted_list error branch', async () => {
+    Object.assign(mockEnv, { NOTION_API_KEY: 'secret_test' });
+    targetRespond = () => ({
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'unauthorized' }),
+    });
+    const res = await postRpc(
+      JSON.stringify({
+        method: 'fetch_untrusted_list',
+        params: {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(502);
+
+    const actionCalls = loggerMock.action.mock.calls;
+    expect(actionCalls).toHaveLength(1);
+    const record = actionCalls[0][0];
+    expect(record).toMatchObject({
+      level: 'error',
+      trigger: 'sub_request',
+      trigger_source: 'notion_database_query',
+      tool: 'fetch_untrusted_list',
+      outcome: 'error',
+      group: 'notion_database_query',
+    });
+    expect(typeof record.error_class).toBe('string');
+    expect(record.error_class.length).toBeGreaterThan(0);
   });
 });
