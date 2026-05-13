@@ -39,15 +39,17 @@ const FULL_RESET = '\x1b[0m';
 const threshold =
   LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 
-export function formatErr(err: unknown): string {
-  if (err instanceof Error) {
-    return JSON.stringify({
-      type: err.constructor.name,
-      message: err.message,
-      stack: err.stack,
-    });
+function formatErr(err: unknown): string {
+  if (!(err instanceof Error)) {
+    throw new TypeError(
+      `formatErr: expected an Error instance, got ${typeof err}`,
+    );
   }
-  return JSON.stringify(err);
+  return JSON.stringify({
+    type: err.constructor.name,
+    message: err.message,
+    stack: err.stack,
+  });
 }
 
 function formatData(data: Record<string, unknown>): string {
@@ -375,6 +377,14 @@ export const logger = {
   action: (record: ActionRecord) => emitAction(record),
 };
 
+/**
+ * Test-only re-export of internal helpers. Not part of the module's public
+ * API — anything reached through this object may change without a semver
+ * bump. Kept on a separate symbol so the underscored name makes call sites
+ * outside tests obvious in review.
+ */
+export const __test_internals__ = { formatErr };
+
 // Route uncaught errors through logger so they get timestamps in stderr
 process.on('uncaughtException', (err) => {
   logger.fatal({ err }, 'Uncaught exception');
@@ -382,5 +392,9 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {
-  logger.error({ err: reason }, 'Unhandled rejection');
+  const err =
+    reason instanceof Error
+      ? reason
+      : new Error(`Non-Error rejection: ${JSON.stringify(reason)}`);
+  logger.error({ err }, 'Unhandled rejection');
 });

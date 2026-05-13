@@ -27,9 +27,11 @@ import {
   validateActionRecord,
   ActionRecord,
   ActionSchemaError,
-  formatErr,
   logger,
+  __test_internals__,
 } from './logger.js';
+
+const { formatErr } = __test_internals__;
 
 function validRecord(overrides: Partial<ActionRecord> = {}): ActionRecord {
   return {
@@ -371,56 +373,64 @@ describe('validateActionRecord', () => {
   });
 });
 
-describe('formatErr JSON escaping (sagri-tokyo/sagri-ai#157)', () => {
-  // Each case is an error whose `message` contains a character class the
-  // previous string-interpolation implementation would have left unescaped,
-  // producing log lines that JSON.parse refused. The fix replaces manual
-  // interpolation with JSON.stringify so each case round-trips losslessly.
-  const corruptingCases: ReadonlyArray<{ name: string; message: string }> = [
-    { name: 'double quote', message: 'unexpected " in payload' },
-    { name: 'newline', message: 'line1\nline2' },
-    { name: 'backslash', message: 'path\\to\\file' },
-    { name: 'control character (U+0007 BEL)', message: 'bell:here' },
-    { name: 'tab', message: 'col1\tcol2' },
+// sagri-tokyo/sagri-ai#157 — formatErr must JSON-escape every field so log
+// lines round-trip through JSON.parse even when message or stack contains
+// quotes, backslashes, newlines, tabs, or other control characters.
+describe('formatErr JSON escaping', () => {
+  // Each case carries character classes the previous string-interpolation
+  // implementation would have left unescaped, producing log lines that
+  // JSON.parse refused. The fix replaces manual interpolation with
+  // JSON.stringify so message and stack both round-trip losslessly.
+  const corruptingCases: ReadonlyArray<{
+    name: string;
+    message: string;
+    stack: string;
+  }> = [
+    {
+      name: 'double quote',
+      message: 'unexpected " in payload',
+      stack: 'Error: unexpected " in payload\n    at frame "0"',
+    },
+    {
+      name: 'newline',
+      message: 'line1\nline2',
+      stack: 'Error: line1\nline2\n    at frame0\n    at frame1',
+    },
+    {
+      name: 'backslash',
+      message: 'path\\to\\file',
+      stack: 'Error: path\\to\\file\n    at C:\\Users\\x\\file.js',
+    },
+    {
+      name: 'control character (U+0007 BEL)',
+      message: 'bell:\u0007here',
+      stack: 'Error: bell:\u0007here\n    at frame0',
+    },
+    {
+      name: 'tab',
+      message: 'col1\tcol2',
+      stack: 'Error: col1\tcol2\n    at\tindented frame',
+    },
+    {
+      name: 'combined Notion-style payload (quotes + backslashes + newlines)',
+      message:
+        'Notion API: {"error":"validation_error","details":"bad path \\\\u200b\\nfield: \\"title\\""}',
+      stack: 'Error: Notion API\n    at "callsite" \\with\ttab',
+    },
   ];
 
-  for (const { name, message } of corruptingCases) {
-    it(`emits parseable JSON when message contains ${name}`, () => {
+  for (const { name, message, stack } of corruptingCases) {
+    it(`round-trips message and stack containing ${name}`, () => {
       const err = new Error(message);
-      const out = formatErr(err);
-      expect(() => JSON.parse(out)).not.toThrow();
-      const parsed = JSON.parse(out) as {
+      err.stack = stack;
+      const parsed = JSON.parse(formatErr(err)) as {
         type: string;
         message: string;
-        stack: string | undefined;
+        stack: string;
       };
-      expect(parsed.message).toBe(message);
-      expect(parsed.type).toBe('Error');
+      expect(parsed).toEqual({ type: 'Error', message, stack });
     });
   }
-
-  it('emits parseable JSON when stack contains corrupting characters', () => {
-    const err = new Error('outer');
-    err.stack = 'Error: outer\n    at "file"\\with\ttab\n';
-    const parsed = JSON.parse(formatErr(err)) as {
-      type: string;
-      message: string;
-      stack: string;
-    };
-    expect(parsed.stack).toBe('Error: outer\n    at "file"\\with\ttab\n');
-    expect(parsed.message).toBe('outer');
-  });
-
-  it('emits parseable JSON for the combined Notion-style failure mode', () => {
-    // Realistic regression: a Notion/Anthropic response body interpolated
-    // into an Error message — quotes, backslashes, and newlines together.
-    const message =
-      'Notion API: {"error":"validation_error","details":"bad path \\\\u200b\\nfield: \\"title\\""}';
-    const parsed = JSON.parse(formatErr(new Error(message))) as {
-      message: string;
-    };
-    expect(parsed.message).toBe(message);
-  });
 
   it('uses the Error subclass constructor name as type', () => {
     class HttpError extends Error {
@@ -437,46 +447,11 @@ describe('formatErr JSON escaping (sagri-tokyo/sagri-ai#157)', () => {
     expect(parsed.message).toBe('boom "quoted"');
   });
 
-  it('falls back to JSON.stringify for non-Error values', () => {
-    expect(formatErr('plain string')).toBe(JSON.stringify('plain string'));
-    expect(formatErr({ code: 'ENOENT' })).toBe(
-      JSON.stringify({ code: 'ENOENT' }),
-    );
-    expect(formatErr(null)).toBe('null');
-  });
-
-  it('produces a parseable line inside the diagnostic log surface (logger.error)', () => {
-    // formatErr is reused by the diagnostic path via formatData. Even though
-    // the surrounding text isn't pure JSON, the err payload itself must be
-    // a valid JSON fragment that downstream parsers can extract.
-    const captured: string[] = [];
-    const stderrSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation((chunk) => {
-        captured.push(typeof chunk === 'string' ? chunk : chunk.toString());
-        return true;
-      });
-    try {
-      const err = new Error('quoted "thing"\nnext line\\path');
-      logger.error({ err }, 'boom');
-      expect(captured).toHaveLength(1);
-      // Extract the err JSON fragment from the formatted line. The line
-      // shape is `... err: {<json>}` where the JSON starts at the first `{`
-      // following `err:` and runs to end-of-line (minus the trailing newline).
-      const line = captured[0];
-      const marker = 'err\x1b[39m: ';
-      const start = line.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const fragment = line.slice(start + marker.length).replace(/\n$/, '');
-      const parsed = JSON.parse(fragment) as {
-        type: string;
-        message: string;
-      };
-      expect(parsed.message).toBe('quoted "thing"\nnext line\\path');
-      expect(parsed.type).toBe('Error');
-    } finally {
-      stderrSpy.mockRestore();
-    }
+  it('throws TypeError on non-Error input (fail-fast precondition)', () => {
+    expect(() => formatErr('plain string')).toThrow(TypeError);
+    expect(() => formatErr({ code: 'ENOENT' })).toThrow(TypeError);
+    expect(() => formatErr(null)).toThrow(TypeError);
+    expect(() => formatErr(undefined)).toThrow(TypeError);
   });
 });
 
