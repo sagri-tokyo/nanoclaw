@@ -36,12 +36,9 @@ interface ContainerInput {
   script?: string;
 }
 
-interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
-}
+type ContainerOutput =
+  | { status: 'success'; result: string | null; newSessionId?: string }
+  | { status: 'error'; result: null; error: string; newSessionId?: string };
 
 interface SessionEntry {
   sessionId: string;

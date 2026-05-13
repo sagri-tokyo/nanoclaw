@@ -46,12 +46,9 @@ export interface ContainerInput {
   script?: string;
 }
 
-export interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
-}
+export type ContainerOutput =
+  | { status: 'success'; result: string | null; newSessionId?: string }
+  | { status: 'error'; result: null; error: string; newSessionId?: string };
 
 interface VolumeMount {
   hostPath: string;
