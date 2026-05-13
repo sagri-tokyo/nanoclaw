@@ -876,9 +876,7 @@ describe('reader-rpc fetch_untrusted', () => {
       group: expected.group,
     });
     expect(typeof ts).toBe('string');
-    expect(ts).toMatch(
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
-    );
+    expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
     // UUID v4 as produced by crypto.randomUUID().
     expect(session_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
