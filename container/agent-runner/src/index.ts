@@ -128,18 +128,11 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-// The SDK surfaces fatal API errors (529 Overloaded, 5xx) as result messages
-// with subtype:'success' and is_error:true, carrying the error text in
-// `result`. Run-aborting failures (error_during_execution, error_max_turns,
-// error_max_budget_usd, error_max_structured_output_retries) arrive as
-// SDKResultError with the failure detail in `errors`. Either branch must
-// surface as status:'error' so the host suppresses chat relay.
 function classifyResult(message: SDKResultMessage): ContainerOutput {
-  if (message.subtype === 'success' && !message.is_error) {
-    return { status: 'success', result: message.result };
-  }
   if (message.subtype === 'success') {
-    return { status: 'error', result: null, error: message.result };
+    return message.is_error
+      ? { status: 'error', result: null, error: message.result }
+      : { status: 'success', result: message.result };
   }
   if (message.errors.length === 0) {
     throw new Error(
@@ -551,9 +544,10 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const classified = classifyResult(message);
-      const preview = classified.result ?? classified.error ?? '';
+      const text =
+        classified.status === 'success' ? classified.result : classified.error;
       log(
-        `Result #${resultCount}: status=${classified.status} subtype=${message.subtype}${preview ? ` text=${preview.slice(0, 200)}` : ''}`,
+        `Result #${resultCount}: status=${classified.status} subtype=${message.subtype}${text ? ` text=${text.slice(0, 200)}` : ''}`,
       );
       writeOutput({ ...classified, newSessionId });
     }
