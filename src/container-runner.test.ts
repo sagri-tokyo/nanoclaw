@@ -209,6 +209,7 @@ describe('container-runner timeout behavior', () => {
 
     const result = await resultPromise;
     expect(result.status).toBe('error');
+    if (result.status !== 'error') throw new Error('expected error status');
     expect(result.error).toContain('timed out');
     expect(onOutput).not.toHaveBeenCalled();
   });
@@ -239,6 +240,33 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('non-zero exit carries a required error string with result: null', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    if (result.status !== 'error') throw new Error('expected error status');
+    expect(typeof result.error).toBe('string');
+    expect(result.error.length).toBeGreaterThan(0);
+    expect(result.result).toBeNull();
+  });
+
+  it('spawn error carries a required error string with result: null', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+
+    fakeProc.emit('error', new Error('ENOENT: docker not found'));
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    if (result.status !== 'error') throw new Error('expected error status');
+    expect(result.error).toContain('ENOENT');
+    expect(result.result).toBeNull();
   });
 });
 

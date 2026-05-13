@@ -261,7 +261,7 @@ async function runTask(
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
+          error = streamedOutput.error;
         }
       },
     );
@@ -269,7 +269,7 @@ async function runTask(
     if (closeTimer) clearTimeout(closeTimer);
 
     if (output.status === 'error') {
-      error = output.error || 'Unknown error';
+      error = output.error;
       errorClass = 'ContainerAgentError';
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
