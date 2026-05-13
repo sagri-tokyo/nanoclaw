@@ -21,6 +21,7 @@ import {
   query,
   HookCallback,
   PreCompactHookInput,
+  type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
@@ -125,6 +126,24 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function classifyResult(message: SDKResultMessage): ContainerOutput {
+  if (message.subtype === 'success') {
+    return message.is_error
+      ? { status: 'error', result: null, error: message.result }
+      : { status: 'success', result: message.result };
+  }
+  if (message.errors.length === 0) {
+    throw new Error(
+      `SDK error result (subtype=${message.subtype}) has no errors`,
+    );
+  }
+  return {
+    status: 'error',
+    result: null,
+    error: message.errors.join('; '),
+  };
 }
 
 function getSessionSummary(
@@ -524,16 +543,13 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult =
-        'result' in message ? (message as { result?: string }).result : null;
+      const classified = classifyResult(message);
+      const text =
+        classified.status === 'success' ? classified.result : classified.error;
       log(
-        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
+        `Result #${resultCount}: status=${classified.status} subtype=${message.subtype}${text ? ` text=${text.slice(0, 200)}` : ''}`,
       );
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId,
-      });
+      writeOutput({ ...classified, newSessionId });
     }
   }
 
