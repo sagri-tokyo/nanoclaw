@@ -15,7 +15,10 @@ import {
 } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
-function ipcAction(
+export type ActionSink = (record: ActionRecord) => void;
+
+function emitIpcAction(
+  sink: ActionSink,
   args: Pick<
     ActionRecord,
     | 'level'
@@ -29,7 +32,7 @@ function ipcAction(
     | 'group'
   > & { trigger_source: string },
 ): void {
-  logger.action({
+  sink({
     ts: new Date().toISOString(),
     level: args.level,
     session_id: args.session_id,
@@ -58,6 +61,13 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  /**
+   * Optional override for the action-record sink. Defaults to
+   * `logger.action`. Exists so tests can observe emitted records via an
+   * in-memory collector instead of spying on `process.stdout`/`process.stderr`
+   * (which is the logger's own I/O channel).
+   */
+  actionSink?: ActionSink;
 }
 
 let ipcWatcherRunning = false;
@@ -217,374 +227,171 @@ export async function processTaskIpc(
 
   const ipcStart = Date.now();
   const inputsHash = hashPayload(data);
+  const sink: ActionSink = deps.actionSink ?? logger.action;
+
+  // Reject-record emitter. Every reject path shares the same shape:
+  // outcome='rejected', level='warn', session_id=sourceGroup (the failing
+  // request can't be tied to a created session), group=sourceGroup. Callers
+  // override session_id only when the request carried a taskId we can use to
+  // correlate the rejection back to an existing task.
+  const emitReject = (
+    tool: string,
+    errorClass: string,
+    options: { sessionId?: string } = {},
+  ): void => {
+    emitIpcAction(sink, {
+      level: 'warn',
+      session_id: options.sessionId ?? sourceGroup,
+      trigger_source: sourceGroup,
+      tool,
+      inputs_hash: inputsHash,
+      outputs_hash: hashFailureOutput({ error_class: errorClass }),
+      duration_ms: Date.now() - ipcStart,
+      outcome: 'rejected',
+      error_class: errorClass,
+      group: sourceGroup,
+    });
+  };
 
   switch (data.type) {
-    case 'schedule_task':
+    case 'schedule_task': {
       if (
-        data.prompt &&
-        data.schedule_type &&
-        data.schedule_value &&
-        data.targetJid
+        !data.prompt ||
+        !data.schedule_type ||
+        !data.schedule_value ||
+        !data.targetJid
       ) {
-        // Resolve the target group from JID
-        const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
-
-        if (!targetGroupEntry) {
-          logger.warn(
-            { targetJid },
-            'Cannot schedule task: target group not registered',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: sourceGroup,
-            trigger_source: sourceGroup,
-            tool: 'ipc_schedule_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'TargetGroupNotRegistered',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'TargetGroupNotRegistered',
-            group: sourceGroup,
-          });
-          break;
-        }
-
-        const targetFolder = targetGroupEntry.folder;
-
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
-          logger.warn(
-            { sourceGroup, targetFolder },
-            'Unauthorized schedule_task attempt blocked',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: sourceGroup,
-            trigger_source: sourceGroup,
-            tool: 'ipc_schedule_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'Unauthorized',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'Unauthorized',
-            group: sourceGroup,
-          });
-          break;
-        }
-
-        const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
-
-        let nextRun: string | null = null;
-        if (scheduleType === 'cron') {
-          try {
-            const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: TIMEZONE,
-            });
-            nextRun = interval.next().toISOString();
-          } catch {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid cron expression',
-            );
-            break;
-          }
-        } else if (scheduleType === 'interval') {
-          const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid interval',
-            );
-            break;
-          }
-          nextRun = new Date(Date.now() + ms).toISOString();
-        } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid timestamp',
-            );
-            break;
-          }
-          nextRun = date.toISOString();
-        }
-
-        const taskId =
-          data.taskId ||
-          `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const contextMode =
-          data.context_mode === 'group' || data.context_mode === 'isolated'
-            ? data.context_mode
-            : 'isolated';
-        createTask({
-          id: taskId,
-          group_folder: targetFolder,
-          chat_jid: targetJid,
-          prompt: data.prompt,
-          script: data.script || null,
-          schedule_type: scheduleType,
-          schedule_value: data.schedule_value,
-          context_mode: contextMode,
-          next_run: nextRun,
-          status: 'active',
-          created_at: new Date().toISOString(),
-        });
-        logger.debug(
-          { taskId, sourceGroup, targetFolder, contextMode },
-          'Task created via IPC',
+        logger.warn(
+          { data },
+          'Invalid schedule_task request - missing required fields',
         );
-        ipcAction({
-          level: 'info',
-          session_id: taskId,
-          trigger_source: sourceGroup,
-          tool: 'ipc_schedule_task',
-          inputs_hash: inputsHash,
-          outputs_hash: hashPayload(taskId),
-          duration_ms: Date.now() - ipcStart,
-          outcome: 'ok',
-          error_class: null,
-          group: targetFolder,
-        });
-        deps.onTasksChanged();
+        emitReject('ipc_schedule_task', 'MissingRequiredField');
+        break;
       }
-      break;
+      // Resolve the target group from JID
+      const targetJid = data.targetJid as string;
+      const targetGroupEntry = registeredGroups[targetJid];
 
-    case 'pause_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'paused' });
-          logger.debug(
-            { taskId: data.taskId, sourceGroup },
-            'Task paused via IPC',
-          );
-          ipcAction({
-            level: 'info',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_pause_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashPayload(data.taskId),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'ok',
-            error_class: null,
-            group: task.group_folder,
-          });
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task pause attempt',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_pause_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'Unauthorized',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'Unauthorized',
-            group: sourceGroup,
-          });
-        }
-      }
-      break;
-
-    case 'resume_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
-          logger.debug(
-            { taskId: data.taskId, sourceGroup },
-            'Task resumed via IPC',
-          );
-          ipcAction({
-            level: 'info',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_resume_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashPayload(data.taskId),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'ok',
-            error_class: null,
-            group: task.group_folder,
-          });
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task resume attempt',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_resume_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'Unauthorized',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'Unauthorized',
-            group: sourceGroup,
-          });
-        }
-      }
-      break;
-
-    case 'cancel_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
-          logger.debug(
-            { taskId: data.taskId, sourceGroup },
-            'Task cancelled via IPC',
-          );
-          ipcAction({
-            level: 'info',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_cancel_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashPayload(data.taskId),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'ok',
-            error_class: null,
-            group: task.group_folder,
-          });
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task cancel attempt',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_cancel_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'Unauthorized',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'Unauthorized',
-            group: sourceGroup,
-          });
-        }
-      }
-      break;
-
-    case 'update_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (!task) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Task not found for update',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_update_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'TaskNotFound',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'TaskNotFound',
-            group: sourceGroup,
-          });
-          break;
-        }
-        if (!isMain && task.group_folder !== sourceGroup) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task update attempt',
-          );
-          ipcAction({
-            level: 'warn',
-            session_id: data.taskId,
-            trigger_source: sourceGroup,
-            tool: 'ipc_update_task',
-            inputs_hash: inputsHash,
-            outputs_hash: hashFailureOutput({
-              error_class: 'Unauthorized',
-            }),
-            duration_ms: Date.now() - ipcStart,
-            outcome: 'rejected',
-            error_class: 'Unauthorized',
-            group: sourceGroup,
-          });
-          break;
-        }
-
-        const updates: Parameters<typeof updateTask>[1] = {};
-        if (data.prompt !== undefined) updates.prompt = data.prompt;
-        if (data.script !== undefined) updates.script = data.script || null;
-        if (data.schedule_type !== undefined)
-          updates.schedule_type = data.schedule_type as
-            | 'cron'
-            | 'interval'
-            | 'once';
-        if (data.schedule_value !== undefined)
-          updates.schedule_value = data.schedule_value;
-
-        // Recompute next_run if schedule changed
-        if (data.schedule_type || data.schedule_value) {
-          const updatedTask = {
-            ...task,
-            ...updates,
-          };
-          if (updatedTask.schedule_type === 'cron') {
-            try {
-              const interval = CronExpressionParser.parse(
-                updatedTask.schedule_value,
-                { tz: TIMEZONE },
-              );
-              updates.next_run = interval.next().toISOString();
-            } catch {
-              logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
-                'Invalid cron in task update',
-              );
-              break;
-            }
-          } else if (updatedTask.schedule_type === 'interval') {
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
-            }
-          }
-        }
-
-        updateTask(data.taskId, updates);
-        logger.debug(
-          { taskId: data.taskId, sourceGroup, updates },
-          'Task updated via IPC',
+      if (!targetGroupEntry) {
+        logger.warn(
+          { targetJid },
+          'Cannot schedule task: target group not registered',
         );
-        ipcAction({
+        emitReject('ipc_schedule_task', 'TargetGroupNotRegistered');
+        break;
+      }
+
+      const targetFolder = targetGroupEntry.folder;
+
+      // Authorization: non-main groups can only schedule for themselves
+      if (!isMain && targetFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, targetFolder },
+          'Unauthorized schedule_task attempt blocked',
+        );
+        emitReject('ipc_schedule_task', 'Unauthorized');
+        break;
+      }
+
+      const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
+
+      let nextRun: string | null = null;
+      if (scheduleType === 'cron') {
+        try {
+          const interval = CronExpressionParser.parse(data.schedule_value, {
+            tz: TIMEZONE,
+          });
+          nextRun = interval.next().toISOString();
+        } catch {
+          logger.warn(
+            { scheduleValue: data.schedule_value },
+            'Invalid cron expression',
+          );
+          emitReject('ipc_schedule_task', 'InvalidPayload');
+          break;
+        }
+      } else if (scheduleType === 'interval') {
+        const ms = parseInt(data.schedule_value, 10);
+        if (isNaN(ms) || ms <= 0) {
+          logger.warn(
+            { scheduleValue: data.schedule_value },
+            'Invalid interval',
+          );
+          emitReject('ipc_schedule_task', 'InvalidPayload');
+          break;
+        }
+        nextRun = new Date(Date.now() + ms).toISOString();
+      } else if (scheduleType === 'once') {
+        const date = new Date(data.schedule_value);
+        if (isNaN(date.getTime())) {
+          logger.warn(
+            { scheduleValue: data.schedule_value },
+            'Invalid timestamp',
+          );
+          emitReject('ipc_schedule_task', 'InvalidPayload');
+          break;
+        }
+        nextRun = date.toISOString();
+      }
+
+      const taskId =
+        data.taskId ||
+        `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const contextMode =
+        data.context_mode === 'group' || data.context_mode === 'isolated'
+          ? data.context_mode
+          : 'isolated';
+      createTask({
+        id: taskId,
+        group_folder: targetFolder,
+        chat_jid: targetJid,
+        prompt: data.prompt,
+        script: data.script || null,
+        schedule_type: scheduleType,
+        schedule_value: data.schedule_value,
+        context_mode: contextMode,
+        next_run: nextRun,
+        status: 'active',
+        created_at: new Date().toISOString(),
+      });
+      logger.debug(
+        { taskId, sourceGroup, targetFolder, contextMode },
+        'Task created via IPC',
+      );
+      emitIpcAction(sink, {
+        level: 'info',
+        session_id: taskId,
+        trigger_source: sourceGroup,
+        tool: 'ipc_schedule_task',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(taskId),
+        duration_ms: Date.now() - ipcStart,
+        outcome: 'ok',
+        error_class: null,
+        group: targetFolder,
+      });
+      deps.onTasksChanged();
+      break;
+    }
+
+    case 'pause_task': {
+      if (!data.taskId) {
+        logger.warn({ data }, 'pause_task missing taskId');
+        emitReject('ipc_pause_task', 'MissingRequiredField');
+        break;
+      }
+      const task = getTaskById(data.taskId);
+      if (task && (isMain || task.group_folder === sourceGroup)) {
+        updateTask(data.taskId, { status: 'paused' });
+        logger.debug(
+          { taskId: data.taskId, sourceGroup },
+          'Task paused via IPC',
+        );
+        emitIpcAction(sink, {
           level: 'info',
           session_id: data.taskId,
           trigger_source: sourceGroup,
-          tool: 'ipc_update_task',
+          tool: 'ipc_pause_task',
           inputs_hash: inputsHash,
           outputs_hash: hashPayload(data.taskId),
           duration_ms: Date.now() - ipcStart,
@@ -593,8 +400,193 @@ export async function processTaskIpc(
           group: task.group_folder,
         });
         deps.onTasksChanged();
+      } else {
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Unauthorized task pause attempt',
+        );
+        emitReject('ipc_pause_task', 'Unauthorized', {
+          sessionId: data.taskId,
+        });
       }
       break;
+    }
+
+    case 'resume_task': {
+      if (!data.taskId) {
+        logger.warn({ data }, 'resume_task missing taskId');
+        emitReject('ipc_resume_task', 'MissingRequiredField');
+        break;
+      }
+      const task = getTaskById(data.taskId);
+      if (task && (isMain || task.group_folder === sourceGroup)) {
+        updateTask(data.taskId, { status: 'active' });
+        logger.debug(
+          { taskId: data.taskId, sourceGroup },
+          'Task resumed via IPC',
+        );
+        emitIpcAction(sink, {
+          level: 'info',
+          session_id: data.taskId,
+          trigger_source: sourceGroup,
+          tool: 'ipc_resume_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashPayload(data.taskId),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'ok',
+          error_class: null,
+          group: task.group_folder,
+        });
+        deps.onTasksChanged();
+      } else {
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Unauthorized task resume attempt',
+        );
+        emitReject('ipc_resume_task', 'Unauthorized', {
+          sessionId: data.taskId,
+        });
+      }
+      break;
+    }
+
+    case 'cancel_task': {
+      if (!data.taskId) {
+        logger.warn({ data }, 'cancel_task missing taskId');
+        emitReject('ipc_cancel_task', 'MissingRequiredField');
+        break;
+      }
+      const task = getTaskById(data.taskId);
+      if (task && (isMain || task.group_folder === sourceGroup)) {
+        deleteTask(data.taskId);
+        logger.debug(
+          { taskId: data.taskId, sourceGroup },
+          'Task cancelled via IPC',
+        );
+        emitIpcAction(sink, {
+          level: 'info',
+          session_id: data.taskId,
+          trigger_source: sourceGroup,
+          tool: 'ipc_cancel_task',
+          inputs_hash: inputsHash,
+          outputs_hash: hashPayload(data.taskId),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'ok',
+          error_class: null,
+          group: task.group_folder,
+        });
+        deps.onTasksChanged();
+      } else {
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Unauthorized task cancel attempt',
+        );
+        emitReject('ipc_cancel_task', 'Unauthorized', {
+          sessionId: data.taskId,
+        });
+      }
+      break;
+    }
+
+    case 'update_task': {
+      if (!data.taskId) {
+        logger.warn({ data }, 'update_task missing taskId');
+        emitReject('ipc_update_task', 'MissingRequiredField');
+        break;
+      }
+      const task = getTaskById(data.taskId);
+      if (!task) {
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Task not found for update',
+        );
+        emitReject('ipc_update_task', 'TaskNotFound', {
+          sessionId: data.taskId,
+        });
+        break;
+      }
+      if (!isMain && task.group_folder !== sourceGroup) {
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Unauthorized task update attempt',
+        );
+        emitReject('ipc_update_task', 'Unauthorized', {
+          sessionId: data.taskId,
+        });
+        break;
+      }
+
+      const updates: Parameters<typeof updateTask>[1] = {};
+      if (data.prompt !== undefined) updates.prompt = data.prompt;
+      if (data.script !== undefined) updates.script = data.script || null;
+      if (data.schedule_type !== undefined)
+        updates.schedule_type = data.schedule_type as
+          | 'cron'
+          | 'interval'
+          | 'once';
+      if (data.schedule_value !== undefined)
+        updates.schedule_value = data.schedule_value;
+
+      // Recompute next_run if schedule changed
+      if (data.schedule_type || data.schedule_value) {
+        const updatedTask = {
+          ...task,
+          ...updates,
+        };
+        if (updatedTask.schedule_type === 'cron') {
+          try {
+            const interval = CronExpressionParser.parse(
+              updatedTask.schedule_value,
+              { tz: TIMEZONE },
+            );
+            updates.next_run = interval.next().toISOString();
+          } catch {
+            logger.warn(
+              { taskId: data.taskId, value: updatedTask.schedule_value },
+              'Invalid cron in task update',
+            );
+            emitReject('ipc_update_task', 'InvalidPayload', {
+              sessionId: data.taskId,
+            });
+            break;
+          }
+        } else if (updatedTask.schedule_type === 'interval') {
+          const ms = parseInt(updatedTask.schedule_value, 10);
+          if (!isNaN(ms) && ms > 0) {
+            updates.next_run = new Date(Date.now() + ms).toISOString();
+          } else {
+            logger.warn(
+              { taskId: data.taskId, value: updatedTask.schedule_value },
+              'Invalid interval in task update',
+            );
+            emitReject('ipc_update_task', 'InvalidPayload', {
+              sessionId: data.taskId,
+            });
+            break;
+          }
+        }
+      }
+
+      updateTask(data.taskId, updates);
+      logger.debug(
+        { taskId: data.taskId, sourceGroup, updates },
+        'Task updated via IPC',
+      );
+      emitIpcAction(sink, {
+        level: 'info',
+        session_id: data.taskId,
+        trigger_source: sourceGroup,
+        tool: 'ipc_update_task',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(data.taskId),
+        duration_ms: Date.now() - ipcStart,
+        outcome: 'ok',
+        error_class: null,
+        group: task.group_folder,
+      });
+      deps.onTasksChanged();
+      break;
+    }
 
     case 'refresh_groups':
       // Only main group can request a refresh
@@ -617,6 +609,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Unauthorized refresh_groups attempt blocked',
         );
+        emitReject('ipc_refresh_groups', 'Unauthorized');
       }
       break;
 
@@ -627,6 +620,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
         );
+        emitReject('ipc_register_group', 'Unauthorized');
         break;
       }
       if (data.jid && data.name && data.folder && data.trigger) {
@@ -635,6 +629,7 @@ export async function processTaskIpc(
             { sourceGroup, folder: data.folder },
             'Invalid register_group request - unsafe folder name',
           );
+          emitReject('ipc_register_group', 'InvalidPayload');
           break;
         }
         // Defense in depth: agent cannot set isMain via IPC.
@@ -655,10 +650,12 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+        emitReject('ipc_register_group', 'MissingRequiredField');
       }
       break;
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+      emitReject('ipc_unknown', 'InvalidPayload');
   }
 }

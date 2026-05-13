@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -9,6 +9,7 @@ import {
   setRegisteredGroup,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
+import { validateActionRecord, type ActionRecord } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
@@ -678,6 +679,35 @@ describe('register_group success', () => {
   });
 });
 
+// Capture emitted action records via the deps.actionSink hook on a fresh
+// `deps` clone — no process.stdout/stderr spying (that's the logger's own
+// I/O channel; mocking it tests the logger, not the IPC code).
+//
+// The captured records still go through `validateActionRecord` so any
+// schema drift the IPC handlers introduce fails the test loudly, same as
+// the real `logger.action` would.
+function withCapturedIpcActions(): {
+  deps: IpcDeps;
+  records: ActionRecord[];
+} {
+  const captured: ActionRecord[] = [];
+  const captureDeps: IpcDeps = {
+    ...deps,
+    actionSink: (record: ActionRecord) => {
+      validateActionRecord(record);
+      captured.push(record);
+    },
+  };
+  return { deps: captureDeps, records: captured };
+}
+
+function findIpcAction(
+  records: ActionRecord[],
+  tool: string,
+): ActionRecord | undefined {
+  return records.find((r) => r.tool === tool);
+}
+
 // BLOCKER 1 regression guard: action records emitted on rejected IPC paths
 // must produce distinct outputs_hash values for distinct error_class
 // values. The pre-fix implementation hashed the empty string at every
@@ -685,67 +715,373 @@ describe('register_group success', () => {
 // and broke `WHERE outputs_hash = ?` correlation queries.
 describe('rejected IPC paths emit distinct outputs_hash per error_class', () => {
   it('TargetGroupNotRegistered vs Unauthorized produce different outputs_hash', async () => {
-    const writes: string[] = [];
-    const stdoutSpy = vi
-      .spyOn(process.stdout, 'write')
-      .mockImplementation((chunk) => {
-        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
-        return true;
-      });
-    const stderrSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation((chunk) => {
-        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
-        return true;
-      });
-    try {
-      // schedule_task with unknown targetJid → TargetGroupNotRegistered
-      await processTaskIpc(
-        {
-          type: 'schedule_task',
-          prompt: 'p',
-          schedule_type: 'cron',
-          schedule_value: '0 * * * *',
-          targetJid: 'unknown@g.us',
-        },
-        'whatsapp_main',
-        true,
-        deps,
-      );
+    const capture = withCapturedIpcActions();
 
-      // pause_task with no matching task and non-main source → Unauthorized
-      await processTaskIpc(
-        { type: 'pause_task', taskId: 'task-does-not-exist' },
-        'other-group',
-        false,
-        deps,
-      );
+    // schedule_task with unknown targetJid → TargetGroupNotRegistered
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'p',
+        schedule_type: 'cron',
+        schedule_value: '0 * * * *',
+        targetJid: 'unknown@g.us',
+      },
+      'whatsapp_main',
+      true,
+      capture.deps,
+    );
 
-      const records = writes
-        .map((w) => w.trim())
-        .filter((w) => w.startsWith('{') && w.includes('"trigger":"ipc"'))
-        .map((w) => JSON.parse(w) as Record<string, unknown>);
+    // pause_task with no matching task and non-main source → Unauthorized
+    await processTaskIpc(
+      { type: 'pause_task', taskId: 'task-does-not-exist' },
+      'other-group',
+      false,
+      capture.deps,
+    );
 
-      const targetMissing = records.find(
-        (r) => r.error_class === 'TargetGroupNotRegistered',
-      );
-      const unauthorized = records.find(
-        (r) => r.error_class === 'Unauthorized',
-      );
-      expect(targetMissing).toBeDefined();
-      expect(unauthorized).toBeDefined();
-      expect(targetMissing!.outcome).toBe('rejected');
-      expect(unauthorized!.outcome).toBe('rejected');
-      // The crux: distinct error classes hash distinctly, never to the
-      // empty-string sentinel.
-      const EMPTY_STRING_HASH =
-        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-      expect(targetMissing!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
-      expect(unauthorized!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
-      expect(targetMissing!.outputs_hash).not.toBe(unauthorized!.outputs_hash);
-    } finally {
-      stdoutSpy.mockRestore();
-      stderrSpy.mockRestore();
-    }
+    const targetMissing = capture.records.find(
+      (r) => r.error_class === 'TargetGroupNotRegistered',
+    );
+    const unauthorized = capture.records.find(
+      (r) => r.error_class === 'Unauthorized',
+    );
+    expect(targetMissing).toBeDefined();
+    expect(unauthorized).toBeDefined();
+    expect(targetMissing!.outcome).toBe('rejected');
+    expect(unauthorized!.outcome).toBe('rejected');
+    // The crux: distinct error classes hash distinctly, never to the
+    // empty-string sentinel.
+    const EMPTY_STRING_HASH =
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    expect(targetMissing!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
+    expect(unauthorized!.outputs_hash).not.toBe(EMPTY_STRING_HASH);
+    expect(targetMissing!.outputs_hash).not.toBe(unauthorized!.outputs_hash);
+  });
+});
+
+// sagri-ai#156: previously-silent reject branches in processTaskIpc must
+// emit an ipcAction record so CloudWatch sees every drop with a meaningful
+// error_class.
+
+// One canonical case asserted against the full record shape so any
+// drift in fields, extra keys, or renames trips this test (vs. the
+// table-driven cases below which only check outcome/error_class/tool).
+describe('silent-drop reject record full shape', () => {
+  it('schedule_task missing prompt emits a fully populated rejected ActionRecord', async () => {
+    const capture = withCapturedIpcActions();
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      capture.deps,
+    );
+
+    expect(capture.records).toHaveLength(1);
+    const record = capture.records[0];
+    // Strict structural equality — extra keys, missing keys, or renames
+    // all fail this assertion. `ts`, `inputs_hash`, `outputs_hash`, and
+    // `duration_ms` are derived (timestamps/hashes) so they're matched
+    // by predicate via `expect.stringMatching` / `expect.any(Number)`.
+    expect(record).toEqual({
+      ts: expect.stringMatching(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
+      ),
+      level: 'warn',
+      session_id: 'whatsapp_main',
+      trigger: 'ipc',
+      trigger_source: 'whatsapp_main',
+      tool: 'ipc_schedule_task',
+      inputs_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      outputs_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      duration_ms: expect.any(Number),
+      outcome: 'rejected',
+      error_class: 'MissingRequiredField',
+      group: 'whatsapp_main',
+    });
+  });
+});
+
+// Table-driven reject-branch coverage. Every row exercises one
+// previously-silent drop path and asserts the rejection surfaces as an
+// ActionRecord with the expected tool + error_class. The canonical
+// shape test above pins the rest of the schema; here we only vary the
+// dimensions that differ across cases.
+interface RejectCase {
+  name: string;
+  payload: Parameters<typeof processTaskIpc>[0];
+  sourceGroup: string;
+  isMain: boolean;
+  tool: string;
+  errorClass: string;
+}
+
+const REJECT_CASES: RejectCase[] = [
+  {
+    name: 'schedule_task missing prompt',
+    payload: {
+      type: 'schedule_task',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      targetJid: 'other@g.us',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'schedule_task missing targetJid',
+    payload: {
+      type: 'schedule_task',
+      prompt: 'do it',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'schedule_task invalid cron expression',
+    payload: {
+      type: 'schedule_task',
+      prompt: 'bad cron',
+      schedule_type: 'cron',
+      schedule_value: 'not a cron',
+      targetJid: 'other@g.us',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'InvalidPayload',
+  },
+  {
+    name: 'schedule_task non-numeric interval',
+    payload: {
+      type: 'schedule_task',
+      prompt: 'bad interval',
+      schedule_type: 'interval',
+      schedule_value: 'abc',
+      targetJid: 'other@g.us',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'InvalidPayload',
+  },
+  {
+    name: 'schedule_task zero interval',
+    payload: {
+      type: 'schedule_task',
+      prompt: 'zero interval',
+      schedule_type: 'interval',
+      schedule_value: '0',
+      targetJid: 'other@g.us',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'InvalidPayload',
+  },
+  {
+    name: 'schedule_task invalid once timestamp',
+    payload: {
+      type: 'schedule_task',
+      prompt: 'bad once',
+      schedule_type: 'once',
+      schedule_value: 'not-a-date',
+      targetJid: 'other@g.us',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_schedule_task',
+    errorClass: 'InvalidPayload',
+  },
+  {
+    name: 'pause_task without taskId',
+    payload: { type: 'pause_task' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_pause_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'resume_task without taskId',
+    payload: { type: 'resume_task' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_resume_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'cancel_task without taskId',
+    payload: { type: 'cancel_task' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_cancel_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'update_task without taskId',
+    payload: { type: 'update_task' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_update_task',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'refresh_groups from non-main',
+    payload: { type: 'refresh_groups' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_refresh_groups',
+    errorClass: 'Unauthorized',
+  },
+  {
+    name: 'register_group from non-main',
+    payload: {
+      type: 'register_group',
+      jid: 'new@g.us',
+      name: 'New Group',
+      folder: 'new-group',
+      trigger: '@Andy',
+    },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_register_group',
+    errorClass: 'Unauthorized',
+  },
+  {
+    name: 'register_group with unsafe folder',
+    payload: {
+      type: 'register_group',
+      jid: 'new@g.us',
+      name: 'New Group',
+      folder: '../../outside',
+      trigger: '@Andy',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_register_group',
+    errorClass: 'InvalidPayload',
+  },
+  {
+    name: 'register_group with missing fields',
+    payload: {
+      type: 'register_group',
+      jid: 'partial@g.us',
+      name: 'Partial',
+    },
+    sourceGroup: 'whatsapp_main',
+    isMain: true,
+    tool: 'ipc_register_group',
+    errorClass: 'MissingRequiredField',
+  },
+  {
+    name: 'unknown IPC type',
+    payload: { type: 'totally_unknown_type' },
+    sourceGroup: 'other-group',
+    isMain: false,
+    tool: 'ipc_unknown',
+    errorClass: 'InvalidPayload',
+  },
+];
+
+describe('silent-drop reject branches emit ipcAction', () => {
+  it.each(REJECT_CASES)(
+    '$name emits $errorClass on $tool',
+    async ({ payload, sourceGroup, isMain, tool, errorClass }) => {
+      const capture = withCapturedIpcActions();
+      await processTaskIpc(payload, sourceGroup, isMain, capture.deps);
+
+      const record = findIpcAction(capture.records, tool);
+      expect(record).toBeDefined();
+      expect(record!.outcome).toBe('rejected');
+      expect(record!.error_class).toBe(errorClass);
+      expect(record!.tool).toBe(tool);
+    },
+  );
+});
+
+// update_task schedule-validation branches need a pre-existing task row
+// to reach the validation logic, so they sit outside the table above.
+describe('update_task schedule-validation reject branches', () => {
+  it('invalid cron in update emits InvalidPayload', async () => {
+    createTask({
+      id: 'task-to-update',
+      group_folder: 'whatsapp_main',
+      chat_jid: 'main@g.us',
+      prompt: 'before',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const capture = withCapturedIpcActions();
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-to-update',
+        schedule_type: 'cron',
+        schedule_value: 'not a cron',
+      },
+      'whatsapp_main',
+      true,
+      capture.deps,
+    );
+
+    const record = findIpcAction(capture.records, 'ipc_update_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toBe('rejected');
+    expect(record!.error_class).toBe('InvalidPayload');
+  });
+
+  // Regression: the interval branch used to fall through to updateTask()
+  // when ms was NaN or <= 0 — silently applying an invalid schedule_value
+  // with no reject record. The reject must fire AND the task must remain
+  // untouched.
+  it('invalid interval in update emits InvalidPayload and does not mutate task', async () => {
+    createTask({
+      id: 'task-interval-update',
+      group_folder: 'whatsapp_main',
+      chat_jid: 'main@g.us',
+      prompt: 'before',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const capture = withCapturedIpcActions();
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-interval-update',
+        schedule_type: 'interval',
+        schedule_value: 'abc',
+      },
+      'whatsapp_main',
+      true,
+      capture.deps,
+    );
+
+    const record = findIpcAction(capture.records, 'ipc_update_task');
+    expect(record).toBeDefined();
+    expect(record!.outcome).toBe('rejected');
+    expect(record!.error_class).toBe('InvalidPayload');
+    const task = getTaskById('task-interval-update')!;
+    expect(task.schedule_type).toBe('once');
+    expect(task.schedule_value).toBe('2025-06-01T00:00:00');
   });
 });
