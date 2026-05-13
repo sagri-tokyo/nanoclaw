@@ -28,7 +28,10 @@ import {
   ActionRecord,
   ActionSchemaError,
   logger,
+  __test_internals__,
 } from './logger.js';
+
+const { formatErr } = __test_internals__;
 
 function validRecord(overrides: Partial<ActionRecord> = {}): ActionRecord {
   return {
@@ -379,6 +382,88 @@ describe('validateActionRecord', () => {
       extra_field: 'oops',
     } as unknown as ActionRecord;
     expect(() => validateActionRecord(r)).toThrow(/extra_field/);
+  });
+});
+
+// sagri-tokyo/sagri-ai#157 — formatErr must JSON-escape every field so log
+// lines round-trip through JSON.parse even when message or stack contains
+// quotes, backslashes, newlines, tabs, or other control characters.
+describe('formatErr JSON escaping', () => {
+  // Each case carries character classes the previous string-interpolation
+  // implementation would have left unescaped, producing log lines that
+  // JSON.parse refused. The fix replaces manual interpolation with
+  // JSON.stringify so message and stack both round-trip losslessly.
+  const corruptingCases: ReadonlyArray<{
+    name: string;
+    message: string;
+    stack: string;
+  }> = [
+    {
+      name: 'double quote',
+      message: 'unexpected " in payload',
+      stack: 'Error: unexpected " in payload\n    at frame "0"',
+    },
+    {
+      name: 'newline',
+      message: 'line1\nline2',
+      stack: 'Error: line1\nline2\n    at frame0\n    at frame1',
+    },
+    {
+      name: 'backslash',
+      message: 'path\\to\\file',
+      stack: 'Error: path\\to\\file\n    at C:\\Users\\x\\file.js',
+    },
+    {
+      name: 'control character (U+0007 BEL)',
+      message: 'bell:\u0007here',
+      stack: 'Error: bell:\u0007here\n    at frame0',
+    },
+    {
+      name: 'tab',
+      message: 'col1\tcol2',
+      stack: 'Error: col1\tcol2\n    at\tindented frame',
+    },
+    {
+      name: 'combined Notion-style payload (quotes + backslashes + newlines)',
+      message:
+        'Notion API: {"error":"validation_error","details":"bad path \\\\u200b\\nfield: \\"title\\""}',
+      stack: 'Error: Notion API\n    at "callsite" \\with\ttab',
+    },
+  ];
+
+  for (const { name, message, stack } of corruptingCases) {
+    it(`round-trips message and stack containing ${name}`, () => {
+      const err = new Error(message);
+      err.stack = stack;
+      const parsed = JSON.parse(formatErr(err)) as {
+        type: string;
+        message: string;
+        stack: string;
+      };
+      expect(parsed).toEqual({ type: 'Error', message, stack });
+    });
+  }
+
+  it('uses the Error subclass constructor name as type', () => {
+    class HttpError extends Error {
+      constructor(msg: string) {
+        super(msg);
+        this.name = 'HttpError';
+      }
+    }
+    const parsed = JSON.parse(formatErr(new HttpError('boom "quoted"'))) as {
+      type: string;
+      message: string;
+    };
+    expect(parsed.type).toBe('HttpError');
+    expect(parsed.message).toBe('boom "quoted"');
+  });
+
+  it('throws TypeError on non-Error input (fail-fast precondition)', () => {
+    expect(() => formatErr('plain string')).toThrow(TypeError);
+    expect(() => formatErr({ code: 'ENOENT' })).toThrow(TypeError);
+    expect(() => formatErr(null)).toThrow(TypeError);
+    expect(() => formatErr(undefined)).toThrow(TypeError);
   });
 });
 
