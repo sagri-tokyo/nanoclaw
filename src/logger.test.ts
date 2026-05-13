@@ -129,41 +129,14 @@ describe('hashPayload', () => {
     expect(() => canonicalJson(undefined)).toThrow(/undefined/);
   });
 
-  it('throws ActionSchemaError on top-level BigInt input', () => {
-    let caught: unknown;
-    try {
-      canonicalJson(1n);
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(ActionSchemaError);
-    expect((caught as ActionSchemaError).message).toBe(
-      'canonicalJson: BigInt is not supported',
-    );
-  });
-
-  it('throws ActionSchemaError on BigInt nested in an object', () => {
-    let caught: unknown;
-    try {
-      canonicalJson({ a: 1, b: 2n });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(ActionSchemaError);
-    expect((caught as ActionSchemaError).message).toBe(
-      'canonicalJson: BigInt is not supported',
-    );
-  });
-
-  it('throws ActionSchemaError on BigInt nested in an array', () => {
-    let caught: unknown;
-    try {
-      canonicalJson([1, 2n, 3]);
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(ActionSchemaError);
-    expect((caught as ActionSchemaError).message).toBe(
+  it.each([
+    { name: 'throws on top-level bigint', input: 1n },
+    { name: 'throws on bigint nested in object', input: { a: 1, b: 2n } },
+    { name: 'throws on bigint nested in array', input: [1, 2n, 3] },
+    { name: 'throws on boxed bigint', input: Object(1n) },
+  ])('$name', ({ input }) => {
+    expect(() => canonicalJson(input)).toThrow(ActionSchemaError);
+    expect(() => canonicalJson(input)).toThrow(
       'canonicalJson: BigInt is not supported',
     );
   });
