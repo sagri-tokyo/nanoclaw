@@ -14,6 +14,7 @@
  *
  * sagri-ai#82.
  */
+import { randomUUID } from 'crypto';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 
 import {
@@ -22,7 +23,12 @@ import {
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
 import { fetchUntrustedList } from './fetch-untrusted-list.js';
-import { hashFailureOutput, hashPayload, logger } from './logger.js';
+import {
+  hashFailureOutput,
+  hashPayload,
+  logger,
+  type ActionRecord,
+} from './logger.js';
 import { SOURCES, type Source } from './memory-gate.js';
 import {
   readUntrustedContent,
@@ -289,56 +295,62 @@ const FETCH_ERROR_TO_RPC: Record<
 };
 
 function extractFetchSourceType(params: unknown): string {
-  if (isRecord(params) && typeof params.source_type === 'string') {
-    return params.source_type;
+  if (!isRecord(params) || typeof params.source_type !== 'string') {
+    throw new RpcError(
+      'invalid_params',
+      400,
+      'params.source_type must be a string',
+    );
   }
-  return 'unknown';
+  return params.source_type;
 }
 
 async function runFetchAsRpc<T>(
   method: 'fetch_untrusted' | 'fetch_untrusted_list',
+  sessionId: string,
   params: unknown,
   fn: () => Promise<T>,
 ): Promise<T> {
   const startTime = Date.now();
   const sourceType = extractFetchSourceType(params);
   const inputsHash = hashPayload(params);
-  try {
-    const output = await fn();
+
+  function emitAction(
+    outcome: 'ok' | 'error',
+    extras: Pick<ActionRecord, 'outputs_hash' | 'error_class'>,
+  ): void {
     logger.action({
       ts: new Date().toISOString(),
-      level: 'info',
-      session_id: sourceType,
+      level: outcome === 'ok' ? 'info' : 'error',
+      session_id: sessionId,
       trigger: 'sub_request',
       trigger_source: sourceType,
       tool: method,
       inputs_hash: inputsHash,
-      outputs_hash: hashPayload(output),
+      outputs_hash: extras.outputs_hash,
       duration_ms: Date.now() - startTime,
-      outcome: 'ok',
-      error_class: null,
+      outcome,
+      error_class: extras.error_class,
       group: sourceType,
+    });
+  }
+
+  try {
+    const output = await fn();
+    emitAction('ok', {
+      outputs_hash: hashPayload(output),
+      error_class: null,
     });
     return output;
   } catch (err) {
     const errorClass = err instanceof Error ? err.constructor.name : 'Error';
-    logger.action({
-      ts: new Date().toISOString(),
-      level: 'error',
-      session_id: sourceType,
-      trigger: 'sub_request',
-      trigger_source: sourceType,
-      tool: method,
-      inputs_hash: inputsHash,
-      // Hash a meaningful failure payload so different upstream errors
-      // produce distinct outputs_hash values. Never hash err.message
-      // directly — fetch errors can echo untrusted input. Use the
-      // constructor name only.
+    // Hash a meaningful failure payload so different upstream errors
+    // produce distinct outputs_hash values. Never hash err.message
+    // directly — fetch errors can echo untrusted input. Use the
+    // constructor name only.
+    emitAction('error', {
       outputs_hash: hashFailureOutput({ error_class: errorClass }),
-      duration_ms: Date.now() - startTime,
-      outcome: 'error',
       error_class: errorClass,
-      group: sourceType,
     });
     if (err instanceof FetchUntrustedError) {
       const map = FETCH_ERROR_TO_RPC[err.code];
@@ -393,16 +405,24 @@ async function handleRequest(
   }
 
   if (rpc.method === 'fetch_untrusted') {
-    const output = await runFetchAsRpc('fetch_untrusted', rpc.params, () =>
-      fetchUntrusted(rpc.params, options.fetchUntrustedDeps),
+    const requestId = randomUUID();
+    const output = await runFetchAsRpc(
+      'fetch_untrusted',
+      requestId,
+      rpc.params,
+      () => fetchUntrusted(rpc.params, options.fetchUntrustedDeps),
     );
     sendJson(res, 200, output);
     return;
   }
 
   if (rpc.method === 'fetch_untrusted_list') {
-    const output = await runFetchAsRpc('fetch_untrusted_list', rpc.params, () =>
-      fetchUntrustedList(rpc.params, options.fetchUntrustedDeps),
+    const requestId = randomUUID();
+    const output = await runFetchAsRpc(
+      'fetch_untrusted_list',
+      requestId,
+      rpc.params,
+      () => fetchUntrustedList(rpc.params, options.fetchUntrustedDeps),
     );
     sendJson(res, 200, output);
     return;
