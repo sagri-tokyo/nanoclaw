@@ -21,10 +21,10 @@ export const EXPERIMENT_DATA_CSV_S3_PREFIX =
   's3://sagri-ml-assets/dsm/training-data/';
 const EXPERIMENT_DATA_CSV_S3_BODY_RE = /^[A-Za-z0-9_./-]+$/;
 // Mirrored in `skills/dsm-experiment/SKILL.md` § "Phase 1 spec contract"
-// (sagri-tokyo/sagri-ai PR follow-up to #239, opened in parallel) and in
-// the picker design (sagri-ai#232 § Threat model). Drift between these
-// three caps is a security-relevant validator-drift bug; any change here
-// must land alongside changes in those documents.
+// (sagri-tokyo/sagri-ai#241) and in the picker design (sagri-ai#232 §
+// Threat model). Drift between these three caps is a security-relevant
+// validator-drift bug; any change here must land alongside changes in
+// those documents.
 export const EXPERIMENT_TARGET_MAX_LENGTH = 256;
 
 export const EXPERIMENT_SPEC_REQUIRED_FIELDS = [
