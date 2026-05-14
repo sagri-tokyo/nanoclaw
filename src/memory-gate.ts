@@ -10,6 +10,9 @@ export const SOURCES = [
   'github_comment',
   'web_content',
   'notion_page',
+  // `experiment_spec` must appear here so `reader.ts` source validation
+  // accepts it; it is intentionally absent from `ADMIN_SOURCES` below so any
+  // memory-write attempt tagged with this source is rejected by `decideWrite`.
   'experiment_spec',
 ] as const;
 export type Source = (typeof SOURCES)[number];

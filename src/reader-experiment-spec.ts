@@ -6,17 +6,25 @@
  * `{experiment_id, data_csv_s3, target}`.
  *
  * Field constraints are hardcoded here, never read from the caller. The
- * source string is the only caller-influenced contract — same posture as
- * `notion_page` and `batch_log` in the wider reader pipeline.
+ * source string is the only caller-influenced contract — this is the first
+ * per-source dispatch in `reader.ts`, and is the precedent for any future
+ * sources that need bespoke validation.
  *
  * Consumers: the `dsm-experiment-submitter` ScheduledTask picker (sagri-ai
  * #232 decision 2). Tracked at sagri-ai#235.
  */
 
+import type { ReaderOutput } from './reader.js';
+
 export const EXPERIMENT_ID_RE = /^[a-z0-9_-]{1,128}$/;
 export const EXPERIMENT_DATA_CSV_S3_PREFIX =
   's3://sagri-ml-assets/dsm/training-data/';
 const EXPERIMENT_DATA_CSV_S3_BODY_RE = /^[A-Za-z0-9_./-]+$/;
+// Mirrored in `skills/dsm-experiment/SKILL.md` § "Phase 1 spec contract"
+// (sagri-tokyo/sagri-ai#241) and in the picker design (sagri-ai#232 §
+// Threat model). Drift between these three caps is a security-relevant
+// validator-drift bug; any change here must land alongside changes in
+// those documents.
 export const EXPERIMENT_TARGET_MAX_LENGTH = 256;
 
 export const EXPERIMENT_SPEC_REQUIRED_FIELDS = [
@@ -37,12 +45,7 @@ export type ExperimentSpecValidation =
   | { ok: true; extracted: ExperimentSpec }
   | { ok: false; reason: string };
 
-export interface ReaderShape {
-  intent: string;
-  extracted_data: Record<string, string | number | boolean>;
-  confidence: number;
-  risk_flags: string[];
-}
+export type ReaderShape = Omit<ReaderOutput, 'source_provenance'>;
 
 /**
  * Post-validation gate for the `experiment_spec` reader source.
@@ -142,6 +145,17 @@ export function validateExperimentSpec(
       reason: `data_csv_s3 must start with ${EXPERIMENT_DATA_CSV_S3_PREFIX}`,
     };
   }
+  // Order matters. The body-allowlist regex `[A-Za-z0-9_./-]+` permits `..`
+  // because `.` is in the character class — the path-traversal check must
+  // run first so the more specific failure reason is reported and so the
+  // intent reads top-down: reject traversal, then reject anything else
+  // outside the allowlist.
+  if (dataCsvS3.includes('..')) {
+    return {
+      ok: false,
+      reason: 'data_csv_s3 must not contain ".."',
+    };
+  }
   const dataCsvBody = dataCsvS3.slice(EXPERIMENT_DATA_CSV_S3_PREFIX.length);
   if (
     dataCsvBody.length === 0 ||
@@ -150,12 +164,6 @@ export function validateExperimentSpec(
     return {
       ok: false,
       reason: 'data_csv_s3 contains characters outside [A-Za-z0-9_./-]',
-    };
-  }
-  if (dataCsvS3.includes('..')) {
-    return {
-      ok: false,
-      reason: 'data_csv_s3 must not contain ".."',
     };
   }
 
