@@ -29,7 +29,7 @@ describe('validateExperimentSpec', () => {
     const result = validateExperimentSpec(rest);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe('missing required field: experiment_id');
   });
 
   it('rejects when data_csv_s3 is missing', () => {
@@ -37,7 +37,7 @@ describe('validateExperimentSpec', () => {
     const result = validateExperimentSpec(rest);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/data_csv_s3/);
+    expect(result.reason).toBe('missing required field: data_csv_s3');
   });
 
   it('rejects when target is missing', () => {
@@ -45,14 +45,14 @@ describe('validateExperimentSpec', () => {
     const result = validateExperimentSpec(rest);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/target/);
+    expect(result.reason).toBe('missing required field: target');
   });
 
   it('rejects when an extra field is present', () => {
     const result = validateExperimentSpec({ ...validSpec, region: 'tokyo' });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/unexpected field/);
+    expect(result.reason).toBe('unexpected field: region');
   });
 
   it('rejects experiment_id with uppercase letters', () => {
@@ -62,7 +62,9 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe(
+      `experiment_id does not match ${EXPERIMENT_ID_RE.source}`,
+    );
   });
 
   it('rejects experiment_id with disallowed characters', () => {
@@ -72,7 +74,9 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe(
+      `experiment_id does not match ${EXPERIMENT_ID_RE.source}`,
+    );
   });
 
   it('rejects experiment_id longer than 128 characters', () => {
@@ -82,14 +86,18 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe(
+      `experiment_id does not match ${EXPERIMENT_ID_RE.source}`,
+    );
   });
 
   it('rejects empty experiment_id', () => {
     const result = validateExperimentSpec({ ...validSpec, experiment_id: '' });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe(
+      `experiment_id does not match ${EXPERIMENT_ID_RE.source}`,
+    );
   });
 
   it('rejects data_csv_s3 with the wrong bucket', () => {
@@ -99,7 +107,9 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/data_csv_s3/);
+    expect(result.reason).toBe(
+      `data_csv_s3 must start with ${EXPERIMENT_DATA_CSV_S3_PREFIX}`,
+    );
   });
 
   it('rejects data_csv_s3 outside the training-data prefix', () => {
@@ -109,7 +119,9 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/data_csv_s3/);
+    expect(result.reason).toBe(
+      `data_csv_s3 must start with ${EXPERIMENT_DATA_CSV_S3_PREFIX}`,
+    );
   });
 
   it('rejects data_csv_s3 containing path traversal segments', () => {
@@ -120,14 +132,34 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/data_csv_s3/);
+    expect(result.reason).toBe('data_csv_s3 must not contain ".."');
+  });
+
+  it('rejects data_csv_s3 containing ".." immediately after the prefix', () => {
+    const result = validateExperimentSpec({
+      ...validSpec,
+      data_csv_s3: 's3://sagri-ml-assets/dsm/training-data/..secret/v1.csv',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.reason).toBe('data_csv_s3 must not contain ".."');
+  });
+
+  it('rejects data_csv_s3 containing ".." embedded mid-path', () => {
+    const result = validateExperimentSpec({
+      ...validSpec,
+      data_csv_s3: 's3://sagri-ml-assets/dsm/training-data/ok/../escape.csv',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.reason).toBe('data_csv_s3 must not contain ".."');
   });
 
   it('rejects empty target', () => {
     const result = validateExperimentSpec({ ...validSpec, target: '' });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/target/);
+    expect(result.reason).toBe('target must be non-empty');
   });
 
   it('rejects target longer than the published bound', () => {
@@ -137,7 +169,9 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/target/);
+    expect(result.reason).toBe(
+      `target exceeds ${EXPERIMENT_TARGET_MAX_LENGTH} chars`,
+    );
   });
 
   it('rejects when fields are not strings', () => {
@@ -147,14 +181,14 @@ describe('validateExperimentSpec', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/experiment_id/);
+    expect(result.reason).toBe('experiment_id must be a string');
   });
 
   it('rejects a non-object input', () => {
     const result = validateExperimentSpec('not an object');
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.reason).toMatch(/object/);
+    expect(result.reason).toBe('spec must be a JSON object');
   });
 
   it('exports the documented experiment_id regex', () => {
@@ -409,7 +443,10 @@ describe('readUntrustedContent — source: experiment_spec', () => {
       sourceMetadata: {},
     });
 
-    expect(out.risk_flags).toContain('prompt_injection');
+    expect(out.risk_flags).toEqual([
+      'prompt_injection',
+      'spec_extraction_failed',
+    ]);
     expect(out.extracted_data).toEqual({});
   });
 
