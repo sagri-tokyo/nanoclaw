@@ -10,6 +10,7 @@ export const SOURCES = [
   'github_comment',
   'web_content',
   'notion_page',
+  'experiment_spec',
 ] as const;
 export type Source = (typeof SOURCES)[number];
 
