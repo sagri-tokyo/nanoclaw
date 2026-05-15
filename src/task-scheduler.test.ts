@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
+  classifyContainerError,
   computeNextRun,
   isSilentResult,
   startSchedulerLoop,
@@ -256,6 +257,54 @@ describe('task scheduler', () => {
         stdoutSpy.mockRestore();
         stderrSpy.mockRestore();
       }
+    });
+  });
+
+  describe('classifyContainerError', () => {
+    it('classifies the wall-clock timeout message as ContainerTimeout', () => {
+      expect(
+        classifyContainerError('Container timed out after 1800000ms'),
+      ).toBe('ContainerTimeout');
+    });
+
+    it('classifies an exit-137 message as ContainerKilled', () => {
+      expect(
+        classifyContainerError(
+          'Container exited with code 137: out of memory',
+        ),
+      ).toBe('ContainerKilled');
+    });
+
+    it('classifies a non-137 non-zero exit as ContainerExitedNonZero', () => {
+      expect(
+        classifyContainerError(
+          'Container exited with code 1: agent crashed',
+        ),
+      ).toBe('ContainerExitedNonZero');
+    });
+
+    it('classifies a spawn error as ContainerSpawnError', () => {
+      expect(
+        classifyContainerError('Container spawn error: ENOENT'),
+      ).toBe('ContainerSpawnError');
+    });
+
+    it('classifies a stdout parse failure as ContainerOutputParseError', () => {
+      expect(
+        classifyContainerError(
+          'Failed to parse container output: Unexpected token',
+        ),
+      ).toBe('ContainerOutputParseError');
+    });
+
+    it('falls back to ContainerAgentError for unrecognized messages', () => {
+      expect(classifyContainerError('something else went wrong')).toBe(
+        'ContainerAgentError',
+      );
+    });
+
+    it('never returns an empty string', () => {
+      expect(classifyContainerError('').length).toBeGreaterThan(0);
     });
   });
 });

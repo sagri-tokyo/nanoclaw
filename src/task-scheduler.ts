@@ -84,6 +84,34 @@ export function isSilentResult(result: string): boolean {
     .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
 }
 
+/**
+ * Map a `ContainerOutput.error` string from `runContainerAgent` to a stable
+ * `error_class` value for action records. Every error path in `runTask`
+ * routes through this so `logger.action` never emits an empty
+ * `error_class` when `outcome === 'error'`.
+ *
+ * The input strings are the literal messages produced by `container-runner.ts`;
+ * keep this in sync if those formats change. Refs sagri-tokyo/sagri-ai#244.
+ */
+export function classifyContainerError(message: string): string {
+  if (message.startsWith('Container timed out after')) {
+    return 'ContainerTimeout';
+  }
+  if (message.startsWith('Container exited with code 137')) {
+    return 'ContainerKilled';
+  }
+  if (message.startsWith('Container exited with code ')) {
+    return 'ContainerExitedNonZero';
+  }
+  if (message.startsWith('Container spawn error')) {
+    return 'ContainerSpawnError';
+  }
+  if (message.startsWith('Failed to parse container output')) {
+    return 'ContainerOutputParseError';
+  }
+  return 'ContainerAgentError';
+}
+
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
@@ -262,6 +290,7 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error;
+          errorClass = classifyContainerError(streamedOutput.error);
         }
       },
     );
@@ -270,7 +299,7 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error;
-      errorClass = 'ContainerAgentError';
+      errorClass = classifyContainerError(output.error);
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
       result = output.result;
