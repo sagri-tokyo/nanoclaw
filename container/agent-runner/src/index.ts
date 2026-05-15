@@ -24,6 +24,8 @@ import {
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { RetryBudget, readMax529Retries } from './retry-budget.js';
+import { HTTP_STATUS_529_ERROR_CLASS } from './message-loop.js';
 
 interface ContainerInput {
   prompt: string;
@@ -38,7 +40,13 @@ interface ContainerInput {
 
 type ContainerOutput =
   | { status: 'success'; result: string | null; newSessionId?: string }
-  | { status: 'error'; result: null; error: string; newSessionId?: string };
+  | {
+      status: 'error';
+      result: null;
+      error: string;
+      newSessionId?: string;
+      error_class?: string;
+    };
 
 interface SessionEntry {
   sessionId: string;
@@ -398,6 +406,7 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  budgetExceeded: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
@@ -427,6 +436,9 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  const abortController = new AbortController();
+  const retryBudget = new RetryBudget(readMax529Retries());
+  let budgetExceeded = false;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -455,6 +467,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      abortController,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -515,6 +528,36 @@ async function runQuery(
         : message.type;
     log(`[msg #${messageCount}] type=${msgType}`);
 
+    if (
+      message.type === 'system' &&
+      (message as { subtype?: string }).subtype === 'api_retry'
+    ) {
+      const retry = message as {
+        attempt?: number;
+        max_retries?: number;
+        error_status?: number | null;
+      };
+      const errorStatus = retry.error_status ?? null;
+      const outcome = retryBudget.consume({ errorStatus });
+      log(
+        `api_retry attempt=${retry.attempt ?? '?'}/${retry.max_retries ?? '?'} status=${errorStatus} 529_count=${outcome.count}`,
+      );
+      if (outcome.exceeded) {
+        const text = retryBudget.exceededMessage();
+        log(`Retry budget exceeded: ${text}; aborting query`);
+        writeOutput({
+          status: 'error',
+          result: null,
+          error: text,
+          error_class: HTTP_STATUS_529_ERROR_CLASS,
+          newSessionId,
+        });
+        budgetExceeded = true;
+        abortController.abort();
+        break;
+      }
+    }
+
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
@@ -552,9 +595,9 @@ async function runQuery(
 
   ipcPolling = false;
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, budgetExceeded: ${budgetExceeded}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, budgetExceeded };
 }
 
 interface ScriptResult {
@@ -708,6 +751,11 @@ async function main(): Promise<void> {
       }
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
+      }
+
+      if (queryResult.budgetExceeded) {
+        log('529 retry budget exceeded, exiting container');
+        break;
       }
 
       // If _close was consumed during the query, exit immediately.
