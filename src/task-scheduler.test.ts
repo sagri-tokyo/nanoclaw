@@ -269,24 +269,20 @@ describe('task scheduler', () => {
 
     it('classifies an exit-137 message as ContainerKilled', () => {
       expect(
-        classifyContainerError(
-          'Container exited with code 137: out of memory',
-        ),
+        classifyContainerError('Container exited with code 137: out of memory'),
       ).toBe('ContainerKilled');
     });
 
     it('classifies a non-137 non-zero exit as ContainerExitedNonZero', () => {
       expect(
-        classifyContainerError(
-          'Container exited with code 1: agent crashed',
-        ),
+        classifyContainerError('Container exited with code 1: agent crashed'),
       ).toBe('ContainerExitedNonZero');
     });
 
     it('classifies a spawn error as ContainerSpawnError', () => {
-      expect(
-        classifyContainerError('Container spawn error: ENOENT'),
-      ).toBe('ContainerSpawnError');
+      expect(classifyContainerError('Container spawn error: ENOENT')).toBe(
+        'ContainerSpawnError',
+      );
     });
 
     it('classifies a stdout parse failure as ContainerOutputParseError', () => {
