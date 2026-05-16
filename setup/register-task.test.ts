@@ -274,7 +274,7 @@ describe('register-task runbook_url handling', () => {
   });
 
   it('rejects empty-string runbookUrl at the upsertTask boundary', () => {
-    expect(() =>
+    const call = () =>
       upsertTask({
         id: 'rbt-empty',
         groupFolder: 'slack_main',
@@ -284,8 +284,11 @@ describe('register-task runbook_url handling', () => {
         scheduleValue: '*/15 * * * *',
         contextMode: 'isolated',
         runbookUrl: '',
-      }),
-    ).toThrow(RegisterTaskArgError);
+      });
+    expect(call).toThrow(RegisterTaskArgError);
+    expect(call).toThrow(
+      'upsertTask: runbookUrl must be a non-empty string or undefined',
+    );
   });
 });
 

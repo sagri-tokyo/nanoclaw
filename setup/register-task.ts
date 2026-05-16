@@ -212,11 +212,6 @@ function failBadArgs(error: string): never {
 }
 
 export async function run(args: string[]): Promise<void> {
-  // `parseArgs` throws `RegisterTaskArgError` so the same parser is unit-testable
-  // without `process.exit`. `run` is the CLI entry point (see `setup/index.ts`),
-  // so this is where the typed parse error is converted into the CLI's
-  // structured-failure + exit-code contract — the same shape the other
-  // validation paths below use via `failBadArgs`.
   let parsed: RegisterTaskArgs;
   try {
     parsed = parseArgs(args);
