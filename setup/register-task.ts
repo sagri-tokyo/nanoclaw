@@ -162,6 +162,11 @@ function computeInitialNextRun(
  * existing row was updated.
  */
 export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
+  if (input.runbookUrl === '') {
+    throw new RegisterTaskArgError(
+      'upsertTask: runbookUrl must be a non-empty string or undefined',
+    );
+  }
   const nextRun = computeInitialNextRun(input.scheduleType, input.scheduleValue);
   const existing = getTaskById(input.id);
 
@@ -207,6 +212,11 @@ function failBadArgs(error: string): never {
 }
 
 export async function run(args: string[]): Promise<void> {
+  // `parseArgs` throws `RegisterTaskArgError` so the same parser is unit-testable
+  // without `process.exit`. `run` is the CLI entry point (see `setup/index.ts`),
+  // so this is where the typed parse error is converted into the CLI's
+  // structured-failure + exit-code contract — the same shape the other
+  // validation paths below use via `failBadArgs`.
   let parsed: RegisterTaskArgs;
   try {
     parsed = parseArgs(args);

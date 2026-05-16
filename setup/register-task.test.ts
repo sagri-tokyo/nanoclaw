@@ -272,6 +272,21 @@ describe('register-task runbook_url handling', () => {
     const stored = getTaskById('rbt-overwrite');
     expect(stored!.runbook_url).toBe('https://new-runbook.example.com');
   });
+
+  it('rejects empty-string runbookUrl at the upsertTask boundary', () => {
+    expect(() =>
+      upsertTask({
+        id: 'rbt-empty',
+        groupFolder: 'slack_main',
+        chatJid: 'C123@slack',
+        prompt: 'p',
+        scheduleType: 'cron',
+        scheduleValue: '*/15 * * * *',
+        contextMode: 'isolated',
+        runbookUrl: '',
+      }),
+    ).toThrow(RegisterTaskArgError);
+  });
 });
 
 describe('parseArgs (strict --runbook-url semantics)', () => {
