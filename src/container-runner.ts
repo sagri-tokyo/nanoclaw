@@ -61,6 +61,11 @@ export type ContainerOutput =
 // `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.
 export const HTTP_STATUS_529_ERROR_CLASS = 'HttpStatus529';
 
+// Prefix prepended to the rewritten 529 text. Must match the prefix
+// `formatErrorWrap` in `task-scheduler.ts` keys its wrap decision on, so the
+// per-task footer (run id, timestamp, runbook url) lands on the 529 reply.
+const ERROR_PREFIX = 'ERROR: ';
+
 // Pulls the retry count from the agent-runner's exceeded-budget message
 // (`Anthropic Overloaded (HttpStatus529) after <N> retries`). Returns null when
 // the count is not present so the caller can pick a count-free phrasing.
@@ -88,11 +93,11 @@ export function mapContainerOutputForUser(
     return output;
   }
   const count = extractRetryCount(output.error);
-  const userText =
+  const body =
     count === null
-      ? 'ERROR: anthropic upstream overloaded. will retry on the next scheduled tick.'
-      : `ERROR: anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
-  return { ...output, error: userText };
+      ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
+      : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
+  return { ...output, error: `${ERROR_PREFIX}${body}` };
 }
 
 interface VolumeMount {

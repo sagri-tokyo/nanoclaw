@@ -303,6 +303,12 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        const wrap = (text: string) =>
+          formatErrorWrap(text, {
+            runId: task.id,
+            runbookUrl: task.runbook_url,
+            now: new Date(),
+          });
         if (streamedOutput.result) {
           result = streamedOutput.result;
           if (isSilentResult(streamedOutput.result)) {
@@ -311,14 +317,7 @@ async function runTask(
               'Scheduled task produced silent-result marker; skipping chat post',
             );
           } else {
-            await deps.sendMessage(
-              task.chat_jid,
-              formatErrorWrap(streamedOutput.result, {
-                runId: task.id,
-                runbookUrl: task.runbook_url,
-                now: new Date(),
-              }),
-            );
+            await deps.sendMessage(task.chat_jid, wrap(streamedOutput.result));
           }
           scheduleClose();
         }
@@ -336,14 +335,7 @@ async function runTask(
             classifyContainerError(streamedOutput.error);
           const slackText = slackTextForError(streamedOutput);
           if (slackText !== null) {
-            await deps.sendMessage(
-              task.chat_jid,
-              formatErrorWrap(slackText, {
-                runId: task.id,
-                runbookUrl: task.runbook_url,
-                now: new Date(),
-              }),
-            );
+            await deps.sendMessage(task.chat_jid, wrap(slackText));
           }
         }
       },
