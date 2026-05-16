@@ -290,7 +290,22 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error;
-          errorClass = classifyContainerError(streamedOutput.error);
+          // Prefer the structured error_class from the agent-runner when
+          // present so action records stay accurate after container-runner
+          // rewrites the user-facing error text (sagri-tokyo/sagri-ai#247).
+          errorClass =
+            streamedOutput.error_class ??
+            classifyContainerError(streamedOutput.error);
+          // Post the rewritten 529 message to Slack so operators see a
+          // single readable line instead of nothing. Other error classes
+          // stay silent on Slack per the previous behavior; they still
+          // appear in `task_runs` and journalctl.
+          if (
+            streamedOutput.error_class === 'HttpStatus529' &&
+            streamedOutput.error
+          ) {
+            await deps.sendMessage(task.chat_jid, streamedOutput.error);
+          }
         }
       },
     );
@@ -299,7 +314,7 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error;
-      errorClass = classifyContainerError(output.error);
+      errorClass = output.error_class ?? classifyContainerError(output.error);
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
       result = output.result;
