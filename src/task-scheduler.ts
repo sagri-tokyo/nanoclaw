@@ -5,6 +5,7 @@ import fs from 'fs';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
+  HTTP_STATUS_529_ERROR_CLASS,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -124,6 +125,22 @@ export function classifyContainerError(message: string): string {
     return 'ContainerOutputParseError';
   }
   return 'ContainerAgentError';
+}
+
+/**
+ * Return the Slack reply text for a container-runner error output, or null
+ * when the error class should stay silent on chat. Currently only the
+ * rewritten `HttpStatus529` line (the agent-runner's 529 retry-budget exit,
+ * humanized by `container-runner.ts`) is surfaced.
+ * sagri-tokyo/sagri-ai#247.
+ */
+export function slackTextForError(output: {
+  status: 'error';
+  error: string;
+  error_class?: string;
+}): string | null {
+  if (output.error_class !== HTTP_STATUS_529_ERROR_CLASS) return null;
+  return output.error;
 }
 
 export interface SchedulerDependencies {
@@ -286,6 +303,12 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        const wrap = (text: string) =>
+          formatErrorWrap(text, {
+            runId: task.id,
+            runbookUrl: task.runbook_url,
+            now: new Date(),
+          });
         if (streamedOutput.result) {
           result = streamedOutput.result;
           if (isSilentResult(streamedOutput.result)) {
@@ -294,14 +317,7 @@ async function runTask(
               'Scheduled task produced silent-result marker; skipping chat post',
             );
           } else {
-            await deps.sendMessage(
-              task.chat_jid,
-              formatErrorWrap(streamedOutput.result, {
-                runId: task.id,
-                runbookUrl: task.runbook_url,
-                now: new Date(),
-              }),
-            );
+            await deps.sendMessage(task.chat_jid, wrap(streamedOutput.result));
           }
           scheduleClose();
         }
@@ -311,7 +327,16 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error;
-          errorClass = classifyContainerError(streamedOutput.error);
+          // Prefer the structured error_class from the agent-runner when
+          // present so action records stay accurate after container-runner
+          // rewrites the user-facing error text (sagri-tokyo/sagri-ai#247).
+          errorClass =
+            streamedOutput.error_class ??
+            classifyContainerError(streamedOutput.error);
+          const slackText = slackTextForError(streamedOutput);
+          if (slackText !== null) {
+            await deps.sendMessage(task.chat_jid, wrap(slackText));
+          }
         }
       },
     );
@@ -320,7 +345,7 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error;
-      errorClass = classifyContainerError(output.error);
+      errorClass = output.error_class ?? classifyContainerError(output.error);
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
       result = output.result;

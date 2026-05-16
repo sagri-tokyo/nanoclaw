@@ -48,7 +48,57 @@ export interface ContainerInput {
 
 export type ContainerOutput =
   | { status: 'success'; result: string | null; newSessionId?: string }
-  | { status: 'error'; result: null; error: string; newSessionId?: string };
+  | {
+      status: 'error';
+      result: null;
+      error: string;
+      newSessionId?: string;
+      error_class?: string;
+    };
+
+// Error-class produced by the agent-runner's 529 retry-budget exit (sagri-ai#245).
+// When the host sees this class, the user-facing `error` text is rewritten by
+// `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.
+export const HTTP_STATUS_529_ERROR_CLASS = 'HttpStatus529';
+
+// Prefix prepended to the rewritten 529 text. Must match the prefix
+// `formatErrorWrap` in `task-scheduler.ts` keys its wrap decision on, so the
+// per-task footer (run id, timestamp, runbook url) lands on the 529 reply.
+const ERROR_PREFIX = 'ERROR: ';
+
+// Pulls the retry count from the agent-runner's exceeded-budget message
+// (`Anthropic Overloaded (HttpStatus529) after <N> retries`). Returns null when
+// the count is not present so the caller can pick a count-free phrasing.
+function extractRetryCount(error: string): number | null {
+  const match = error.match(/after (\d+) retries?/);
+  if (!match) return null;
+  return Number.parseInt(match[1]!, 10);
+}
+
+/**
+ * Replace the raw SDK error text on a 529-cascade output with a single
+ * human-readable line for Slack. The structured `error_class` is preserved so
+ * action records and `task_runs` still carry `HttpStatus529` for grep and for
+ * stable error-class aggregation. Other error classes pass through unchanged.
+ *
+ * sagri-tokyo/sagri-ai#247.
+ */
+export function mapContainerOutputForUser(
+  output: ContainerOutput,
+): ContainerOutput {
+  if (
+    output.status !== 'error' ||
+    output.error_class !== HTTP_STATUS_529_ERROR_CLASS
+  ) {
+    return output;
+  }
+  const count = extractRetryCount(output.error);
+  const body =
+    count === null
+      ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
+      : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
+  return { ...output, error: `${ERROR_PREFIX}${body}` };
+}
 
 interface VolumeMount {
   hostPath: string;
@@ -557,7 +607,21 @@ export async function runContainerAgent(
           parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
 
           try {
-            const parsed: ContainerOutput = JSON.parse(jsonStr);
+            const rawParsed: ContainerOutput = JSON.parse(jsonStr);
+            // Log the raw error_class for forensics before rewriting the
+            // user-facing text. Operators searching journalctl for
+            // `HttpStatus529` still hit this line.
+            if (rawParsed.status === 'error' && rawParsed.error_class) {
+              logger.error(
+                {
+                  group: group.name,
+                  error_class: rawParsed.error_class,
+                  error: rawParsed.error,
+                },
+                'Container agent emitted structured error',
+              );
+            }
+            const parsed = mapContainerOutputForUser(rawParsed);
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
@@ -804,7 +868,18 @@ export async function runContainerAgent(
           jsonLine = lines[lines.length - 1];
         }
 
-        const output: ContainerOutput = JSON.parse(jsonLine);
+        const rawOutput: ContainerOutput = JSON.parse(jsonLine);
+        if (rawOutput.status === 'error' && rawOutput.error_class) {
+          logger.error(
+            {
+              group: group.name,
+              error_class: rawOutput.error_class,
+              error: rawOutput.error,
+            },
+            'Container agent emitted structured error',
+          );
+        }
+        const output = mapContainerOutputForUser(rawOutput);
 
         logger.info(
           {

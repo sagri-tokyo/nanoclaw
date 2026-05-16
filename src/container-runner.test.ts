@@ -270,6 +270,150 @@ describe('container-runner timeout behavior', () => {
   });
 });
 
+describe('container-runner HttpStatus529 mapping', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('rewrites the user-facing error text when error_class is HttpStatus529', async () => {
+    const onOutput = vi.fn<(o: ContainerOutput) => Promise<void>>(
+      async () => {},
+    );
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'error',
+      result: null,
+      error: 'Anthropic Overloaded (HttpStatus529) after 6 retries',
+      error_class: 'HttpStatus529',
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    const observed = onOutput.mock.calls[0][0];
+    expect(observed).toEqual({
+      status: 'error',
+      result: null,
+      error:
+        'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+      error_class: 'HttpStatus529',
+    });
+  });
+
+  it('falls back to a count-free message when the retry count is not in the error text', async () => {
+    const onOutput = vi.fn<(o: ContainerOutput) => Promise<void>>(
+      async () => {},
+    );
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'error',
+      result: null,
+      error: 'Anthropic Overloaded',
+      error_class: 'HttpStatus529',
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    const observed = onOutput.mock.calls[0][0];
+    expect(observed).toEqual({
+      status: 'error',
+      result: null,
+      error:
+        'ERROR: anthropic upstream overloaded. will retry on the next scheduled tick.',
+      error_class: 'HttpStatus529',
+    });
+  });
+
+  it('passes other error_class values through unchanged', async () => {
+    const onOutput = vi.fn<(o: ContainerOutput) => Promise<void>>(
+      async () => {},
+    );
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'error',
+      result: null,
+      error: 'API Error: 500 internal server error',
+      error_class: 'HttpStatus500',
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    const observed = onOutput.mock.calls[0][0];
+    expect(observed).toEqual({
+      status: 'error',
+      result: null,
+      error: 'API Error: 500 internal server error',
+      error_class: 'HttpStatus500',
+    });
+  });
+
+  it('leaves successful streamed output unchanged', async () => {
+    const onOutput = vi.fn<(o: ContainerOutput) => Promise<void>>(
+      async () => {},
+    );
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'all good',
+      newSessionId: 's1',
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const finalResult = await resultPromise;
+    expect(finalResult.status).toBe('success');
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    const observed = onOutput.mock.calls[0][0];
+    expect(observed).toEqual({
+      status: 'success',
+      result: 'all good',
+      newSessionId: 's1',
+    });
+  });
+});
+
 describe('container-runner env forwarding', () => {
   beforeEach(() => {
     vi.useFakeTimers();

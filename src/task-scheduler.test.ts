@@ -7,6 +7,7 @@ import {
   computeNextRun,
   formatErrorWrap,
   isSilentResult,
+  slackTextForError,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -258,6 +259,39 @@ describe('task scheduler', () => {
         stdoutSpy.mockRestore();
         stderrSpy.mockRestore();
       }
+    });
+  });
+
+  describe('slackTextForError', () => {
+    it('returns the rewritten error text for HttpStatus529', () => {
+      const text = slackTextForError({
+        status: 'error',
+        error:
+          'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+        error_class: 'HttpStatus529',
+      });
+      expect(text).toBe(
+        'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+      );
+    });
+
+    it('returns null for other error classes', () => {
+      expect(
+        slackTextForError({
+          status: 'error',
+          error: 'API Error: 500',
+          error_class: 'HttpStatus500',
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null when error_class is missing', () => {
+      expect(
+        slackTextForError({
+          status: 'error',
+          error: 'some unstructured error text',
+        }),
+      ).toBeNull();
     });
   });
 
