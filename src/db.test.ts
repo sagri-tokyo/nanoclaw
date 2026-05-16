@@ -650,3 +650,54 @@ describe('registered group isMain', () => {
     expect(group.isMain).toBeUndefined();
   });
 });
+
+describe('scheduled_tasks runbook_url', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeTask(overrides: Partial<Parameters<typeof createTask>[0]> = {}) {
+    createTask({
+      id: 'task-runbook',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-15T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-05-15T00:00:00.000Z',
+      ...overrides,
+    });
+  }
+
+  it('persists runbook_url when provided to createTask', () => {
+    makeTask({ runbook_url: 'https://www.notion.so/Runbook-x' });
+    const stored = getTaskById('task-runbook');
+    expect(stored).toBeDefined();
+    expect(stored!.runbook_url).toBe('https://www.notion.so/Runbook-x');
+  });
+
+  it('persists null runbook_url when not provided', () => {
+    makeTask();
+    const stored = getTaskById('task-runbook');
+    expect(stored).toBeDefined();
+    expect(stored!.runbook_url).toBeNull();
+  });
+
+  it('updates runbook_url via updateTask', () => {
+    makeTask();
+    updateTask('task-runbook', { runbook_url: 'https://example.com/runbook' });
+    const stored = getTaskById('task-runbook');
+    expect(stored!.runbook_url).toBe('https://example.com/runbook');
+  });
+
+  it('clears runbook_url when set to null via updateTask', () => {
+    makeTask({ runbook_url: 'https://example.com/runbook' });
+    updateTask('task-runbook', { runbook_url: null });
+    const stored = getTaskById('task-runbook');
+    expect(stored!.runbook_url).toBeNull();
+  });
+});

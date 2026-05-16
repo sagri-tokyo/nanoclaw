@@ -23,6 +23,7 @@ interface RegisterTaskArgs {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  runbookUrl?: string;
 }
 
 function parseArgs(args: string[]): RegisterTaskArgs {
@@ -63,6 +64,9 @@ function parseArgs(args: string[]): RegisterTaskArgs {
         result.contextMode = raw;
         break;
       }
+      case '--runbook-url':
+        result.runbookUrl = args[++i] || '';
+        break;
     }
   }
 
@@ -196,13 +200,17 @@ export async function run(args: string[]): Promise<void> {
   if (existing) {
     logger.info({ taskId: parsed.id }, 'Task already exists — updating');
 
-    updateTask(parsed.id, {
+    const taskUpdates: Parameters<typeof updateTask>[1] = {
       prompt,
       schedule_type: parsed.scheduleType,
       schedule_value: parsed.scheduleValue,
       next_run: computeInitialNextRun(parsed.scheduleType, parsed.scheduleValue),
       status: 'active',
-    });
+    };
+    if (parsed.runbookUrl !== undefined) {
+      taskUpdates.runbook_url = parsed.runbookUrl || null;
+    }
+    updateTask(parsed.id, taskUpdates);
 
     emitStatus('REGISTER_TASK', {
       ID: parsed.id,
@@ -233,6 +241,7 @@ export async function run(args: string[]): Promise<void> {
     next_run: nextRun,
     status: 'active',
     created_at: now,
+    runbook_url: parsed.runbookUrl || null,
   });
 
   logger.info({ taskId: parsed.id }, 'Registered scheduled task');

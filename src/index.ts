@@ -65,7 +65,7 @@ import {
 } from './remote-control.js';
 import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
-import { startSchedulerLoop } from './task-scheduler.js';
+import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { hashPayload, logger } from './logger.js';
 
@@ -242,6 +242,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   const actionStart = Date.now();
+  const interactiveRunId = `interactive-${group.folder}-${actionStart}`;
   const inputsHash = hashPayload(prompt);
   let aggregatedOutput = '';
 
@@ -275,7 +276,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.debug({ group: group.name }, `Agent output: ${raw.length} chars`);
       aggregatedOutput += raw;
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(
+          chatJid,
+          formatErrorWrap(text, { runId: interactiveRunId, now: new Date() }),
+        );
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)

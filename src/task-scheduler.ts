@@ -84,6 +84,20 @@ export function isSilentResult(result: string): boolean {
     .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
 }
 
+export function formatErrorWrap(
+  result: string,
+  opts: { runId: string; runbookUrl?: string | null; now?: Date },
+): string {
+  const trimmed = result.trim();
+  const lines = trimmed.split('\n');
+  if (lines.length !== 1 || !trimmed.startsWith('ERROR: ')) {
+    return result;
+  }
+  const timestamp = (opts.now ?? new Date()).toISOString();
+  const footer = `↳ run ${opts.runId} · ${timestamp}${opts.runbookUrl ? ` · runbook → ${opts.runbookUrl}` : ''}`;
+  return `${trimmed}\n${footer}`;
+}
+
 /**
  * Map a `ContainerOutput.error` string from `runContainerAgent` to a stable
  * `error_class` value for action records. Every error path in `runTask`
@@ -280,7 +294,14 @@ async function runTask(
               'Scheduled task produced silent-result marker; skipping chat post',
             );
           } else {
-            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+            await deps.sendMessage(
+              task.chat_jid,
+              formatErrorWrap(streamedOutput.result, {
+                runId: task.id,
+                runbookUrl: task.runbook_url,
+                now: new Date(),
+              }),
+            );
           }
           scheduleClose();
         }
