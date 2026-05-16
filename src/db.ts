@@ -48,7 +48,8 @@ function createSchema(database: Database.Database): void {
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      runbook_url TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -156,6 +157,13 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
   } catch {
     /* columns already exist */
+  }
+
+  // Add runbook_url column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN runbook_url TEXT`);
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -409,8 +417,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -424,6 +432,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.runbook_url ?? null,
   );
 }
 
@@ -458,6 +467,7 @@ export function updateTask(
       | 'schedule_value'
       | 'next_run'
       | 'status'
+      | 'runbook_url'
     >
   >,
 ): void {
@@ -487,6 +497,10 @@ export function updateTask(
   if (updates.status !== undefined) {
     fields.push('status = ?');
     values.push(updates.status);
+  }
+  if (updates.runbook_url !== undefined) {
+    fields.push('runbook_url = ?');
+    values.push(updates.runbook_url ?? null);
   }
 
   if (fields.length === 0) return;

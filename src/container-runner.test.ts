@@ -309,7 +309,7 @@ describe('container-runner HttpStatus529 mapping', () => {
       status: 'error',
       result: null,
       error:
-        'anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+        'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
       error_class: 'HttpStatus529',
     });
   });
@@ -343,7 +343,7 @@ describe('container-runner HttpStatus529 mapping', () => {
       status: 'error',
       result: null,
       error:
-        'anthropic upstream overloaded. will retry on the next scheduled tick.',
+        'ERROR: anthropic upstream overloaded. will retry on the next scheduled tick.',
       error_class: 'HttpStatus529',
     });
   });

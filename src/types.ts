@@ -75,6 +75,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  runbook_url?: string | null;
 }
 
 export interface TaskRunLog {

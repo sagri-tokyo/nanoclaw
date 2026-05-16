@@ -90,8 +90,8 @@ export function mapContainerOutputForUser(
   const count = extractRetryCount(output.error);
   const userText =
     count === null
-      ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
-      : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
+      ? 'ERROR: anthropic upstream overloaded. will retry on the next scheduled tick.'
+      : `ERROR: anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
   return { ...output, error: userText };
 }
 

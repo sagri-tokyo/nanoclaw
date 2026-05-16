@@ -84,17 +84,22 @@ function registerTask(task: {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  runbookUrl?: string;
 }): 'created' | 'updated' {
   const existing = getTaskById(task.id);
 
   if (existing) {
-    updateTask(task.id, {
+    const taskUpdates: Parameters<typeof updateTask>[1] = {
       prompt: task.prompt,
       schedule_type: task.scheduleType,
       schedule_value: task.scheduleValue,
       next_run: computeInitialNextRun(task.scheduleType, task.scheduleValue),
       status: 'active',
-    });
+    };
+    if (task.runbookUrl !== undefined) {
+      taskUpdates.runbook_url = task.runbookUrl || null;
+    }
+    updateTask(task.id, taskUpdates);
     return 'updated';
   }
 
@@ -111,6 +116,7 @@ function registerTask(task: {
     next_run: computeInitialNextRun(task.scheduleType, task.scheduleValue),
     status: 'active',
     created_at: now,
+    runbook_url: task.runbookUrl || null,
   });
   return 'created';
 }
@@ -253,6 +259,95 @@ describe('register-task create and update', () => {
     expect(stored).toBeDefined();
     expect(stored!.next_run).not.toBeNull();
     expect(new Date(stored!.next_run!).getTime()).toBeGreaterThan(Date.now());
+  });
+});
+
+describe('register-task runbook_url handling', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('persists runbook_url when provided on create', () => {
+    registerTask({
+      id: 'rbt-create',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      runbookUrl: 'https://www.notion.so/Runbook-x',
+    });
+    const stored = getTaskById('rbt-create');
+    expect(stored!.runbook_url).toBe('https://www.notion.so/Runbook-x');
+  });
+
+  it('stores null runbook_url when not provided on create', () => {
+    registerTask({
+      id: 'rbt-no-url',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    const stored = getTaskById('rbt-no-url');
+    expect(stored!.runbook_url).toBeNull();
+  });
+
+  it('does not clear existing runbook_url when re-registering without --runbook-url', () => {
+    registerTask({
+      id: 'rbt-keep',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      runbookUrl: 'https://www.notion.so/Runbook-x',
+    });
+    registerTask({
+      id: 'rbt-keep',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt.',
+      scheduleType: 'cron',
+      scheduleValue: '0 * * * *',
+      contextMode: 'isolated',
+      // runbookUrl intentionally omitted
+    });
+    const stored = getTaskById('rbt-keep');
+    expect(stored!.runbook_url).toBe('https://www.notion.so/Runbook-x');
+  });
+
+  it('overwrites runbook_url when a new url is provided on re-register', () => {
+    registerTask({
+      id: 'rbt-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      runbookUrl: 'https://old-runbook.example.com',
+    });
+    registerTask({
+      id: 'rbt-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      runbookUrl: 'https://new-runbook.example.com',
+    });
+    const stored = getTaskById('rbt-overwrite');
+    expect(stored!.runbook_url).toBe('https://new-runbook.example.com');
   });
 });
 
