@@ -5,8 +5,8 @@ import {
   _resetSchedulerLoopForTests,
   classifyContainerError,
   computeNextRun,
-  formatErrorForSlack,
   isSilentResult,
+  slackTextForError,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -261,9 +261,9 @@ describe('task scheduler', () => {
     });
   });
 
-  describe('formatErrorForSlack', () => {
+  describe('slackTextForError', () => {
     it('returns the rewritten error text for HttpStatus529', () => {
-      const text = formatErrorForSlack({
+      const text = slackTextForError({
         status: 'error',
         error:
           'anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
@@ -276,7 +276,7 @@ describe('task scheduler', () => {
 
     it('returns null for other error classes', () => {
       expect(
-        formatErrorForSlack({
+        slackTextForError({
           status: 'error',
           error: 'API Error: 500',
           error_class: 'HttpStatus500',
@@ -286,19 +286,9 @@ describe('task scheduler', () => {
 
     it('returns null when error_class is missing', () => {
       expect(
-        formatErrorForSlack({
+        slackTextForError({
           status: 'error',
           error: 'some unstructured error text',
-        }),
-      ).toBeNull();
-    });
-
-    it('returns null when the error text is empty', () => {
-      expect(
-        formatErrorForSlack({
-          status: 'error',
-          error: '',
-          error_class: 'HttpStatus529',
         }),
       ).toBeNull();
     });

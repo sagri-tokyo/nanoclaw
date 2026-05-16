@@ -114,19 +114,18 @@ export function classifyContainerError(message: string): string {
 }
 
 /**
- * Decide whether a container-runner error output should produce a Slack reply
- * and what text to send. Returns null for error classes the user does not
- * need to see at the chat level. Currently only `HttpStatus529` (the
- * agent-runner's 529 retry-budget exit, rewritten by `container-runner.ts`
- * to a human line) is surfaced. sagri-tokyo/sagri-ai#247.
+ * Return the Slack reply text for a container-runner error output, or null
+ * when the error class should stay silent on chat. Currently only the
+ * rewritten `HttpStatus529` line (the agent-runner's 529 retry-budget exit,
+ * humanized by `container-runner.ts`) is surfaced.
+ * sagri-tokyo/sagri-ai#247.
  */
-export function formatErrorForSlack(output: {
+export function slackTextForError(output: {
   status: 'error';
   error: string;
   error_class?: string;
 }): string | null {
   if (output.error_class !== HTTP_STATUS_529_ERROR_CLASS) return null;
-  if (!output.error) return null;
   return output.error;
 }
 
@@ -314,11 +313,7 @@ async function runTask(
           errorClass =
             streamedOutput.error_class ??
             classifyContainerError(streamedOutput.error);
-          // Post the rewritten 529 message to Slack so operators see a
-          // single readable line instead of nothing. Other error classes
-          // stay silent on Slack per the previous behavior; they still
-          // appear in `task_runs` and journalctl.
-          const slackText = formatErrorForSlack(streamedOutput);
+          const slackText = slackTextForError(streamedOutput);
           if (slackText !== null) {
             await deps.sendMessage(task.chat_jid, slackText);
           }
