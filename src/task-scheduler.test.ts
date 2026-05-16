@@ -308,9 +308,7 @@ describe('task scheduler', () => {
         runId: 'r',
         now: fixedNow,
       });
-      expect(result).toEqual(
-        'ERROR: x\n↳ run r · 2026-05-15T00:46:48.000Z',
-      );
+      expect(result).toEqual('ERROR: x\n↳ run r · 2026-05-15T00:46:48.000Z');
     });
 
     it('passes through non-matching input with trailing whitespace unchanged', () => {
