@@ -5,6 +5,7 @@ import {
   _resetSchedulerLoopForTests,
   classifyContainerError,
   computeNextRun,
+  formatErrorWrap,
   isSilentResult,
   startSchedulerLoop,
 } from './task-scheduler.js';
@@ -257,6 +258,73 @@ describe('task scheduler', () => {
         stdoutSpy.mockRestore();
         stderrSpy.mockRestore();
       }
+    });
+  });
+
+  describe('formatErrorWrap', () => {
+    const fixedNow = new Date('2026-05-15T00:46:48.000Z');
+
+    it('wraps a single-line ERROR reply with run id, timestamp, and runbook url', () => {
+      const result = formatErrorWrap('ERROR: Notion database query failed', {
+        runId: 'notion-poller-1778804149816',
+        runbookUrl: 'https://www.notion.so/Runbook-x',
+        now: fixedNow,
+      });
+      expect(result).toEqual(
+        'ERROR: Notion database query failed\n↳ run notion-poller-1778804149816 · 2026-05-15T00:46:48.000Z · runbook → https://www.notion.so/Runbook-x',
+      );
+    });
+
+    it('wraps a single-line ERROR reply with run id and timestamp when no runbook url', () => {
+      const result = formatErrorWrap('ERROR: Notion database query failed', {
+        runId: 'notion-poller-1778804149816',
+        now: fixedNow,
+      });
+      expect(result).toEqual(
+        'ERROR: Notion database query failed\n↳ run notion-poller-1778804149816 · 2026-05-15T00:46:48.000Z',
+      );
+    });
+
+    it('passes through multi-line input starting with ERROR unchanged', () => {
+      const input = 'ERROR: foo\nERROR: bar';
+      expect(formatErrorWrap(input, { runId: 'r', now: fixedNow })).toEqual(
+        input,
+      );
+    });
+
+    it('passes through single-line non-ERROR input unchanged', () => {
+      const input = 'Soil moisture brief — Complete';
+      expect(formatErrorWrap(input, { runId: 'r', now: fixedNow })).toEqual(
+        input,
+      );
+    });
+
+    it('passes through empty string unchanged', () => {
+      expect(formatErrorWrap('', { runId: 'r', now: fixedNow })).toEqual('');
+    });
+
+    it('trims trailing whitespace before classifying and emits trimmed + footer', () => {
+      const result = formatErrorWrap('ERROR: x  \n', {
+        runId: 'r',
+        now: fixedNow,
+      });
+      expect(result).toEqual('ERROR: x\n↳ run r · 2026-05-15T00:46:48.000Z');
+    });
+
+    it('passes through non-matching input with trailing whitespace unchanged', () => {
+      const input = 'All good  \n';
+      expect(formatErrorWrap(input, { runId: 'r', now: fixedNow })).toEqual(
+        input,
+      );
+    });
+
+    it('omits the runbook segment when runbookUrl is null', () => {
+      const result = formatErrorWrap('ERROR: x', {
+        runId: 'r',
+        runbookUrl: null,
+        now: fixedNow,
+      });
+      expect(result).toEqual('ERROR: x\n↳ run r · 2026-05-15T00:46:48.000Z');
     });
   });
 
