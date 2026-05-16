@@ -4,161 +4,84 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { _closeDatabase, _initTestDatabase, getTaskById } from '../src/db.ts';
+
 import {
-  _closeDatabase,
-  _initTestDatabase,
-  createTask,
-  getTaskById,
-  updateTask,
-} from '../src/db.ts';
+  RegisterTaskArgError,
+  _computeInitialNextRun,
+  _parseArgs,
+  _validateScheduleValue,
+  upsertTask,
+} from './register-task.ts';
 
 /**
  * Tests for the register-task setup step.
  *
  * Uses the in-memory test database to avoid touching the filesystem database.
- * Tests verify: new-task creation, existing-task update (idempotency), and
- * invalid schedule value rejection.
+ * Tests import the production helpers (`upsertTask`, `_parseArgs`, etc.)
+ * directly so the same code paths the CLI runs are exercised end-to-end
+ * minus the `process.exit` / filesystem-db side effects.
  */
-
-// Inline the pure logic extracted from register-task.ts so tests do not need
-// to invoke the CLI process (which would call process.exit and initDatabase
-// against the real SQLite file).
-
-import { CronExpressionParser } from 'cron-parser';
-import { ScheduledTask } from '../src/types.ts';
-
-function validateScheduleValue(
-  scheduleType: ScheduledTask['schedule_type'],
-  scheduleValue: string,
-): string | null {
-  if (scheduleType === 'cron') {
-    try {
-      CronExpressionParser.parse(scheduleValue);
-      return null;
-    } catch {
-      return `Invalid cron expression: ${scheduleValue}`;
-    }
-  }
-
-  if (scheduleType === 'interval') {
-    const ms = parseInt(scheduleValue, 10);
-    if (!ms || ms <= 0) {
-      return `Invalid interval value (must be positive integer milliseconds): ${scheduleValue}`;
-    }
-    return null;
-  }
-
-  if (scheduleType === 'once') {
-    return null;
-  }
-
-  return `Unknown schedule_type: ${scheduleType}`;
-}
-
-function computeInitialNextRun(
-  scheduleType: ScheduledTask['schedule_type'],
-  scheduleValue: string,
-): string | null {
-  if (scheduleType === 'once') {
-    return new Date().toISOString();
-  }
-
-  if (scheduleType === 'cron') {
-    const interval = CronExpressionParser.parse(scheduleValue);
-    return interval.next().toISOString();
-  }
-
-  if (scheduleType === 'interval') {
-    const ms = parseInt(scheduleValue, 10);
-    return new Date(Date.now() + ms).toISOString();
-  }
-
-  return null;
-}
-
-function registerTask(task: {
-  id: string;
-  groupFolder: string;
-  chatJid: string;
-  prompt: string;
-  scheduleType: ScheduledTask['schedule_type'];
-  scheduleValue: string;
-  contextMode: ScheduledTask['context_mode'];
-  runbookUrl?: string;
-}): 'created' | 'updated' {
-  const existing = getTaskById(task.id);
-
-  if (existing) {
-    const taskUpdates: Parameters<typeof updateTask>[1] = {
-      prompt: task.prompt,
-      schedule_type: task.scheduleType,
-      schedule_value: task.scheduleValue,
-      next_run: computeInitialNextRun(task.scheduleType, task.scheduleValue),
-      status: 'active',
-    };
-    if (task.runbookUrl !== undefined) {
-      taskUpdates.runbook_url = task.runbookUrl || null;
-    }
-    updateTask(task.id, taskUpdates);
-    return 'updated';
-  }
-
-  const now = new Date().toISOString();
-  createTask({
-    id: task.id,
-    group_folder: task.groupFolder,
-    chat_jid: task.chatJid,
-    prompt: task.prompt,
-    script: null,
-    schedule_type: task.scheduleType,
-    schedule_value: task.scheduleValue,
-    context_mode: task.contextMode,
-    next_run: computeInitialNextRun(task.scheduleType, task.scheduleValue),
-    status: 'active',
-    created_at: now,
-    runbook_url: task.runbookUrl || null,
-  });
-  return 'created';
-}
 
 describe('schedule value validation', () => {
   it('accepts a valid cron expression', () => {
-    const error = validateScheduleValue('cron', '*/15 * * * *');
+    const error = _validateScheduleValue('cron', '*/15 * * * *');
     expect(error).toBeNull();
   });
 
   it('rejects an invalid cron expression', () => {
-    const error = validateScheduleValue('cron', 'not-a-cron');
+    const error = _validateScheduleValue('cron', 'not-a-cron');
     expect(error).not.toBeNull();
     expect(error).toContain('Invalid cron expression');
   });
 
   it('accepts a positive interval value', () => {
-    const error = validateScheduleValue('interval', '300000');
+    const error = _validateScheduleValue('interval', '300000');
     expect(error).toBeNull();
   });
 
   it('rejects a zero interval value', () => {
-    const error = validateScheduleValue('interval', '0');
+    const error = _validateScheduleValue('interval', '0');
     expect(error).not.toBeNull();
     expect(error).toContain('Invalid interval value');
   });
 
   it('rejects a negative interval value', () => {
-    const error = validateScheduleValue('interval', '-1000');
+    const error = _validateScheduleValue('interval', '-1000');
     expect(error).not.toBeNull();
     expect(error).toContain('Invalid interval value');
   });
 
   it('rejects a non-numeric interval value', () => {
-    const error = validateScheduleValue('interval', 'abc');
+    const error = _validateScheduleValue('interval', 'abc');
     expect(error).not.toBeNull();
     expect(error).toContain('Invalid interval value');
   });
 
   it('accepts once with any schedule value', () => {
-    const error = validateScheduleValue('once', '');
+    const error = _validateScheduleValue('once', '');
     expect(error).toBeNull();
+  });
+});
+
+describe('initial next_run computation', () => {
+  it('returns now for once', () => {
+    const beforeCall = Date.now();
+    const next = _computeInitialNextRun('once', '');
+    expect(next).not.toBeNull();
+    expect(new Date(next!).getTime()).toBeGreaterThanOrEqual(beforeCall);
+  });
+
+  it('returns a future timestamp for cron', () => {
+    const next = _computeInitialNextRun('cron', '0 9 * * *');
+    expect(next).not.toBeNull();
+    expect(new Date(next!).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('returns a future timestamp for interval', () => {
+    const next = _computeInitialNextRun('interval', '60000');
+    expect(next).not.toBeNull();
+    expect(new Date(next!).getTime()).toBeGreaterThan(Date.now());
   });
 });
 
@@ -172,7 +95,7 @@ describe('register-task create and update', () => {
   });
 
   it('creates a new task when none exists', () => {
-    const action = registerTask({
+    const action = upsertTask({
       id: 'notion-poller',
       groupFolder: 'slack_main',
       chatJid: 'C123456@slack',
@@ -198,7 +121,7 @@ describe('register-task create and update', () => {
   });
 
   it('updates an existing task instead of throwing', () => {
-    registerTask({
+    upsertTask({
       id: 'notion-poller',
       groupFolder: 'slack_main',
       chatJid: 'C123456@slack',
@@ -208,7 +131,7 @@ describe('register-task create and update', () => {
       contextMode: 'isolated',
     });
 
-    const action = registerTask({
+    const action = upsertTask({
       id: 'notion-poller',
       groupFolder: 'slack_main',
       chatJid: 'C123456@slack',
@@ -228,7 +151,7 @@ describe('register-task create and update', () => {
   });
 
   it('stores the task with a future next_run for cron type', () => {
-    registerTask({
+    upsertTask({
       id: 'cron-task',
       groupFolder: 'slack_main',
       chatJid: 'C123456@slack',
@@ -245,7 +168,7 @@ describe('register-task create and update', () => {
   });
 
   it('stores the task with a future next_run for interval type', () => {
-    registerTask({
+    upsertTask({
       id: 'interval-task',
       groupFolder: 'slack_main',
       chatJid: 'C123456@slack',
@@ -272,7 +195,7 @@ describe('register-task runbook_url handling', () => {
   });
 
   it('persists runbook_url when provided on create', () => {
-    registerTask({
+    upsertTask({
       id: 'rbt-create',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -287,7 +210,7 @@ describe('register-task runbook_url handling', () => {
   });
 
   it('stores null runbook_url when not provided on create', () => {
-    registerTask({
+    upsertTask({
       id: 'rbt-no-url',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -301,7 +224,7 @@ describe('register-task runbook_url handling', () => {
   });
 
   it('does not clear existing runbook_url when re-registering without --runbook-url', () => {
-    registerTask({
+    upsertTask({
       id: 'rbt-keep',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -311,7 +234,7 @@ describe('register-task runbook_url handling', () => {
       contextMode: 'isolated',
       runbookUrl: 'https://www.notion.so/Runbook-x',
     });
-    registerTask({
+    upsertTask({
       id: 'rbt-keep',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -326,7 +249,7 @@ describe('register-task runbook_url handling', () => {
   });
 
   it('overwrites runbook_url when a new url is provided on re-register', () => {
-    registerTask({
+    upsertTask({
       id: 'rbt-overwrite',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -336,7 +259,7 @@ describe('register-task runbook_url handling', () => {
       contextMode: 'isolated',
       runbookUrl: 'https://old-runbook.example.com',
     });
-    registerTask({
+    upsertTask({
       id: 'rbt-overwrite',
       groupFolder: 'slack_main',
       chatJid: 'C123@slack',
@@ -348,6 +271,64 @@ describe('register-task runbook_url handling', () => {
     });
     const stored = getTaskById('rbt-overwrite');
     expect(stored!.runbook_url).toBe('https://new-runbook.example.com');
+  });
+
+  it('rejects empty-string runbookUrl at the upsertTask boundary', () => {
+    const call = () =>
+      upsertTask({
+        id: 'rbt-empty',
+        groupFolder: 'slack_main',
+        chatJid: 'C123@slack',
+        prompt: 'p',
+        scheduleType: 'cron',
+        scheduleValue: '*/15 * * * *',
+        contextMode: 'isolated',
+        runbookUrl: '',
+      });
+    expect(call).toThrow(RegisterTaskArgError);
+    expect(call).toThrow(
+      'upsertTask: runbookUrl must be a non-empty string or undefined',
+    );
+  });
+});
+
+describe('parseArgs (strict --runbook-url semantics)', () => {
+  const baseArgs = [
+    '--id', 't1',
+    '--group-folder', 'slack_main',
+    '--chat-jid', 'C123@slack',
+    '--prompt-file', '/tmp/prompt.md',
+    '--schedule-type', 'cron',
+    '--schedule-value', '*/15 * * * *',
+    '--context-mode', 'isolated',
+  ];
+
+  it('leaves runbookUrl undefined when the flag is omitted', () => {
+    const parsed = _parseArgs(baseArgs);
+    expect(parsed.runbookUrl).toBeUndefined();
+  });
+
+  it('captures a non-empty runbook url', () => {
+    const parsed = _parseArgs([
+      ...baseArgs,
+      '--runbook-url', 'https://www.notion.so/Runbook-x',
+    ]);
+    expect(parsed.runbookUrl).toBe('https://www.notion.so/Runbook-x');
+  });
+
+  it('rejects an empty --runbook-url with RegisterTaskArgError', () => {
+    expect(() =>
+      _parseArgs([...baseArgs, '--runbook-url', '']),
+    ).toThrow(RegisterTaskArgError);
+    expect(() =>
+      _parseArgs([...baseArgs, '--runbook-url', '']),
+    ).toThrow('--runbook-url requires a non-empty value');
+  });
+
+  it('rejects a trailing --runbook-url with no value', () => {
+    expect(() => _parseArgs([...baseArgs, '--runbook-url'])).toThrow(
+      RegisterTaskArgError,
+    );
   });
 });
 
