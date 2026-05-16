@@ -26,6 +26,29 @@ interface RegisterTaskArgs {
   runbookUrl?: string;
 }
 
+export interface UpsertTaskInput {
+  id: string;
+  groupFolder: string;
+  chatJid: string;
+  prompt: string;
+  scheduleType: ScheduledTask['schedule_type'];
+  scheduleValue: string;
+  contextMode: ScheduledTask['context_mode'];
+  /**
+   * When `undefined`, the runbook_url column is not touched on update and is
+   * stored as `null` on create. A non-empty string is persisted as-is. An
+   * empty string is rejected by `parseArgs` and never reaches this function.
+   */
+  runbookUrl?: string;
+}
+
+export class RegisterTaskArgError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RegisterTaskArgError';
+  }
+}
+
 function parseArgs(args: string[]): RegisterTaskArgs {
   const result: RegisterTaskArgs = {
     id: '',
@@ -64,9 +87,16 @@ function parseArgs(args: string[]): RegisterTaskArgs {
         result.contextMode = raw;
         break;
       }
-      case '--runbook-url':
-        result.runbookUrl = args[++i] || '';
+      case '--runbook-url': {
+        const raw = args[++i];
+        if (raw === undefined || raw === '') {
+          throw new RegisterTaskArgError(
+            '--runbook-url requires a non-empty value',
+          );
+        }
+        result.runbookUrl = raw;
         break;
+      }
     }
   }
 
@@ -122,8 +152,63 @@ function computeInitialNextRun(
   return null;
 }
 
+/**
+ * Create-or-update the scheduled task row. Pure with respect to argv parsing
+ * and process control: callers (CLI `run`, tests) parse and validate first,
+ * then hand a fully-typed input here. Returns whether a row was created or
+ * an existing row was updated.
+ */
+export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
+  const existing = getTaskById(input.id);
+
+  if (existing) {
+    const taskUpdates: Parameters<typeof updateTask>[1] = {
+      prompt: input.prompt,
+      schedule_type: input.scheduleType,
+      schedule_value: input.scheduleValue,
+      next_run: computeInitialNextRun(input.scheduleType, input.scheduleValue),
+      status: 'active',
+    };
+    if (input.runbookUrl !== undefined) {
+      taskUpdates.runbook_url = input.runbookUrl;
+    }
+    updateTask(input.id, taskUpdates);
+    return 'updated';
+  }
+
+  const now = new Date().toISOString();
+  createTask({
+    id: input.id,
+    group_folder: input.groupFolder,
+    chat_jid: input.chatJid,
+    prompt: input.prompt,
+    script: null,
+    schedule_type: input.scheduleType,
+    schedule_value: input.scheduleValue,
+    context_mode: input.contextMode,
+    next_run: computeInitialNextRun(input.scheduleType, input.scheduleValue),
+    status: 'active',
+    created_at: now,
+    runbook_url: input.runbookUrl ?? null,
+  });
+  return 'created';
+}
+
 export async function run(args: string[]): Promise<void> {
-  const parsed = parseArgs(args);
+  let parsed: RegisterTaskArgs;
+  try {
+    parsed = parseArgs(args);
+  } catch (error) {
+    if (error instanceof RegisterTaskArgError) {
+      emitStatus('REGISTER_TASK', {
+        STATUS: 'failed',
+        ERROR: error.message,
+        LOG: 'logs/setup.log',
+      });
+      process.exit(4);
+    }
+    throw error;
+  }
 
   if (
     !parsed.id ||
@@ -195,56 +280,22 @@ export async function run(args: string[]): Promise<void> {
   fs.mkdirSync(STORE_DIR, { recursive: true });
   initDatabase();
 
-  const existing = getTaskById(parsed.id);
-
-  if (existing) {
-    logger.info({ taskId: parsed.id }, 'Task already exists — updating');
-
-    const taskUpdates: Parameters<typeof updateTask>[1] = {
-      prompt,
-      schedule_type: parsed.scheduleType,
-      schedule_value: parsed.scheduleValue,
-      next_run: computeInitialNextRun(parsed.scheduleType, parsed.scheduleValue),
-      status: 'active',
-    };
-    if (parsed.runbookUrl !== undefined) {
-      taskUpdates.runbook_url = parsed.runbookUrl || null;
-    }
-    updateTask(parsed.id, taskUpdates);
-
-    emitStatus('REGISTER_TASK', {
-      ID: parsed.id,
-      GROUP_FOLDER: parsed.groupFolder,
-      CHAT_JID: parsed.chatJid,
-      SCHEDULE_TYPE: parsed.scheduleType,
-      SCHEDULE_VALUE: parsed.scheduleValue,
-      CONTEXT_MODE: parsed.contextMode,
-      ACTION: 'updated',
-      STATUS: 'success',
-      LOG: 'logs/setup.log',
-    });
-    return;
-  }
-
-  const now = new Date().toISOString();
-  const nextRun = computeInitialNextRun(parsed.scheduleType, parsed.scheduleValue);
-
-  createTask({
+  const action = upsertTask({
     id: parsed.id,
-    group_folder: parsed.groupFolder,
-    chat_jid: parsed.chatJid,
+    groupFolder: parsed.groupFolder,
+    chatJid: parsed.chatJid,
     prompt,
-    script: null,
-    schedule_type: parsed.scheduleType,
-    schedule_value: parsed.scheduleValue,
-    context_mode: parsed.contextMode,
-    next_run: nextRun,
-    status: 'active',
-    created_at: now,
-    runbook_url: parsed.runbookUrl || null,
+    scheduleType: parsed.scheduleType,
+    scheduleValue: parsed.scheduleValue,
+    contextMode: parsed.contextMode,
+    runbookUrl: parsed.runbookUrl,
   });
 
-  logger.info({ taskId: parsed.id }, 'Registered scheduled task');
+  if (action === 'updated') {
+    logger.info({ taskId: parsed.id }, 'Task already exists — updating');
+  } else {
+    logger.info({ taskId: parsed.id }, 'Registered scheduled task');
+  }
 
   emitStatus('REGISTER_TASK', {
     ID: parsed.id,
@@ -253,8 +304,16 @@ export async function run(args: string[]): Promise<void> {
     SCHEDULE_TYPE: parsed.scheduleType,
     SCHEDULE_VALUE: parsed.scheduleValue,
     CONTEXT_MODE: parsed.contextMode,
-    ACTION: 'created',
+    ACTION: action,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
 }
+
+// Test-only exports. Underscore prefix matches the convention in `src/db.ts`
+// (`_initTestDatabase`, `_closeDatabase`) — these are not part of the
+// CLI-facing API but exist so unit tests exercise the same parser and
+// scheduling code the CLI runs.
+export const _parseArgs = parseArgs;
+export const _validateScheduleValue = validateScheduleValue;
+export const _computeInitialNextRun = computeInitialNextRun;
