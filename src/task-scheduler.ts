@@ -5,6 +5,7 @@ import fs from 'fs';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
+  HTTP_STATUS_529_ERROR_CLASS,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -110,6 +111,23 @@ export function classifyContainerError(message: string): string {
     return 'ContainerOutputParseError';
   }
   return 'ContainerAgentError';
+}
+
+/**
+ * Decide whether a container-runner error output should produce a Slack reply
+ * and what text to send. Returns null for error classes the user does not
+ * need to see at the chat level. Currently only `HttpStatus529` (the
+ * agent-runner's 529 retry-budget exit, rewritten by `container-runner.ts`
+ * to a human line) is surfaced. sagri-tokyo/sagri-ai#247.
+ */
+export function formatErrorForSlack(output: {
+  status: 'error';
+  error: string;
+  error_class?: string;
+}): string | null {
+  if (output.error_class !== HTTP_STATUS_529_ERROR_CLASS) return null;
+  if (!output.error) return null;
+  return output.error;
 }
 
 export interface SchedulerDependencies {
@@ -300,11 +318,9 @@ async function runTask(
           // single readable line instead of nothing. Other error classes
           // stay silent on Slack per the previous behavior; they still
           // appear in `task_runs` and journalctl.
-          if (
-            streamedOutput.error_class === 'HttpStatus529' &&
-            streamedOutput.error
-          ) {
-            await deps.sendMessage(task.chat_jid, streamedOutput.error);
+          const slackText = formatErrorForSlack(streamedOutput);
+          if (slackText !== null) {
+            await deps.sendMessage(task.chat_jid, slackText);
           }
         }
       },

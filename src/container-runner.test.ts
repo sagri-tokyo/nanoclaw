@@ -404,9 +404,13 @@ describe('container-runner HttpStatus529 mapping', () => {
 
     const finalResult = await resultPromise;
     expect(finalResult.status).toBe('success');
-    expect(onOutput).toHaveBeenCalledWith(
-      expect.objectContaining({ status: 'success', result: 'all good' }),
-    );
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    const observed = onOutput.mock.calls[0][0];
+    expect(observed).toEqual({
+      status: 'success',
+      result: 'all good',
+      newSessionId: 's1',
+    });
   });
 });
 
