@@ -15,6 +15,8 @@ import { logger } from '../src/logger.ts';
 import { ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
+const EXIT_BAD_ARGS = 4;
+
 interface RegisterTaskArgs {
   id: string;
   groupFolder: string;
@@ -35,9 +37,10 @@ export interface UpsertTaskInput {
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
   /**
-   * When `undefined`, the runbook_url column is not touched on update and is
-   * stored as `null` on create. A non-empty string is persisted as-is. An
-   * empty string is rejected by `parseArgs` and never reaches this function.
+   * `undefined` leaves the existing row's `runbook_url` untouched on update
+   * and stores `null` on create. A non-empty string is persisted as-is.
+   * The empty string is not a permitted value — callers must validate
+   * before invoking.
    */
   runbookUrl?: string;
 }
@@ -154,11 +157,12 @@ function computeInitialNextRun(
 
 /**
  * Create-or-update the scheduled task row. Pure with respect to argv parsing
- * and process control: callers (CLI `run`, tests) parse and validate first,
- * then hand a fully-typed input here. Returns whether a row was created or
- * an existing row was updated.
+ * and process control: callers parse and validate first, then hand a
+ * fully-typed input here. Returns whether a row was created or an
+ * existing row was updated.
  */
 export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
+  const nextRun = computeInitialNextRun(input.scheduleType, input.scheduleValue);
   const existing = getTaskById(input.id);
 
   if (existing) {
@@ -166,7 +170,7 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
       prompt: input.prompt,
       schedule_type: input.scheduleType,
       schedule_value: input.scheduleValue,
-      next_run: computeInitialNextRun(input.scheduleType, input.scheduleValue),
+      next_run: nextRun,
       status: 'active',
     };
     if (input.runbookUrl !== undefined) {
@@ -176,7 +180,6 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     return 'updated';
   }
 
-  const now = new Date().toISOString();
   createTask({
     id: input.id,
     group_folder: input.groupFolder,
@@ -186,12 +189,21 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     schedule_type: input.scheduleType,
     schedule_value: input.scheduleValue,
     context_mode: input.contextMode,
-    next_run: computeInitialNextRun(input.scheduleType, input.scheduleValue),
+    next_run: nextRun,
     status: 'active',
-    created_at: now,
+    created_at: new Date().toISOString(),
     runbook_url: input.runbookUrl ?? null,
   });
   return 'created';
+}
+
+function failBadArgs(error: string): never {
+  emitStatus('REGISTER_TASK', {
+    STATUS: 'failed',
+    ERROR: error,
+    LOG: 'logs/setup.log',
+  });
+  process.exit(EXIT_BAD_ARGS);
 }
 
 export async function run(args: string[]): Promise<void> {
@@ -200,12 +212,7 @@ export async function run(args: string[]): Promise<void> {
     parsed = parseArgs(args);
   } catch (error) {
     if (error instanceof RegisterTaskArgError) {
-      emitStatus('REGISTER_TASK', {
-        STATUS: 'failed',
-        ERROR: error.message,
-        LOG: 'logs/setup.log',
-      });
-      process.exit(4);
+      failBadArgs(error.message);
     }
     throw error;
   }
@@ -218,30 +225,15 @@ export async function run(args: string[]): Promise<void> {
     !parsed.scheduleType ||
     !parsed.scheduleValue
   ) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: 'missing_required_args',
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs('missing_required_args');
   }
 
   if (!['cron', 'interval', 'once'].includes(parsed.scheduleType)) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: `invalid_schedule_type: ${parsed.scheduleType}`,
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs(`invalid_schedule_type: ${parsed.scheduleType}`);
   }
 
   if (!['group', 'isolated'].includes(parsed.contextMode)) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: `invalid_context_mode: ${parsed.contextMode}`,
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs(`invalid_context_mode: ${parsed.contextMode}`);
   }
 
   const scheduleError = validateScheduleValue(
@@ -249,32 +241,17 @@ export async function run(args: string[]): Promise<void> {
     parsed.scheduleValue,
   );
   if (scheduleError) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: scheduleError,
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs(scheduleError);
   }
 
   const promptFilePath = path.resolve(parsed.promptFile);
   if (!fs.existsSync(promptFilePath)) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: `prompt_file_not_found: ${promptFilePath}`,
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs(`prompt_file_not_found: ${promptFilePath}`);
   }
 
   const prompt = fs.readFileSync(promptFilePath, 'utf-8').trim();
   if (!prompt) {
-    emitStatus('REGISTER_TASK', {
-      STATUS: 'failed',
-      ERROR: 'prompt_file_is_empty',
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failBadArgs('prompt_file_is_empty');
   }
 
   fs.mkdirSync(STORE_DIR, { recursive: true });
@@ -291,11 +268,12 @@ export async function run(args: string[]): Promise<void> {
     runbookUrl: parsed.runbookUrl,
   });
 
-  if (action === 'updated') {
-    logger.info({ taskId: parsed.id }, 'Task already exists — updating');
-  } else {
-    logger.info({ taskId: parsed.id }, 'Registered scheduled task');
-  }
+  logger.info(
+    { taskId: parsed.id, action },
+    action === 'updated'
+      ? 'Updated existing scheduled task'
+      : 'Registered scheduled task',
+  );
 
   emitStatus('REGISTER_TASK', {
     ID: parsed.id,
@@ -310,10 +288,12 @@ export async function run(args: string[]): Promise<void> {
   });
 }
 
-// Test-only exports. Underscore prefix matches the convention in `src/db.ts`
-// (`_initTestDatabase`, `_closeDatabase`) — these are not part of the
-// CLI-facing API but exist so unit tests exercise the same parser and
-// scheduling code the CLI runs.
-export const _parseArgs = parseArgs;
-export const _validateScheduleValue = validateScheduleValue;
-export const _computeInitialNextRun = computeInitialNextRun;
+// Test-only re-exports. Underscore prefix matches the convention in
+// `src/db.ts` (`_initTestDatabase`, `_closeDatabase`) — these are not part
+// of the CLI-facing API but exist so unit tests exercise the same parser
+// and scheduling code the CLI runs.
+export {
+  parseArgs as _parseArgs,
+  validateScheduleValue as _validateScheduleValue,
+  computeInitialNextRun as _computeInitialNextRun,
+};
