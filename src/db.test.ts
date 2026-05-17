@@ -704,7 +704,6 @@ describe('scheduled_tasks runbook_url', () => {
   });
 });
 
-
 describe('scheduled_tasks failure_post_threshold', () => {
   beforeEach(() => {
     _initTestDatabase();

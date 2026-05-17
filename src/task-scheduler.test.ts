@@ -6,9 +6,7 @@ import {
   getTaskById,
   logTaskRun,
 } from './db.js';
-import {
-  HTTP_STATUS_529_ERROR_CLASS,
-} from './container-runner.js';
+import { HTTP_STATUS_529_ERROR_CLASS } from './container-runner.js';
 import type { ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup, ScheduledTask } from './types.js';
 import {
@@ -419,7 +417,6 @@ describe('task scheduler', () => {
   });
 });
 
-
 describe('shouldPostFailure', () => {
   it('returns true on every failure when threshold is 1 (opt-out)', () => {
     expect(shouldPostFailure([], 1)).toBe(true);
@@ -507,7 +504,8 @@ describe('runTask consecutive-failure suppression', () => {
   const errorOutput: ContainerOutput = {
     status: 'error',
     result: null,
-    error: 'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+    error:
+      'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
     error_class: HTTP_STATUS_529_ERROR_CLASS,
   };
 
