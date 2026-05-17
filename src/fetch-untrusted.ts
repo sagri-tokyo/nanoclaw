@@ -55,6 +55,73 @@ export class FetchUntrustedError extends Error {
   }
 }
 
+// Subclasses surface a specific failure mode so operators can tell apart
+// (a) a 30s wall-clock timeout from (b) a Notion 4xx auth failure from
+// (c) a host SSRF reject. The host emits `err.constructor.name` as
+// `error_class` in action records (see `reader-rpc.ts`), so each class
+// surfaces a distinct string for grep and aggregation.
+// sagri-tokyo/sagri-ai#255.
+export class FetchUntrustedTimeout extends FetchUntrustedError {
+  constructor(message: string) {
+    super('fetch_failure', message);
+  }
+}
+
+export class FetchUntrustedHttp4xx extends FetchUntrustedError {
+  constructor(message: string, httpStatus: number) {
+    super('fetch_failure', message, httpStatus);
+  }
+}
+
+export class FetchUntrustedHttp5xx extends FetchUntrustedError {
+  constructor(message: string, httpStatus: number) {
+    super('fetch_failure', message, httpStatus);
+  }
+}
+
+export class FetchUntrustedSsrfReject extends FetchUntrustedError {
+  constructor(message: string) {
+    super('bad_url', message);
+  }
+}
+
+export class FetchUntrustedMalformed extends FetchUntrustedError {
+  constructor(message: string) {
+    super('fetch_failure', message);
+  }
+}
+
+// Single source of truth for the error_class -> Slack copy mapping. The
+// container-runner consults this table when rewriting user-facing errors.
+// Keys must match the subclass names above (the host emits
+// `err.constructor.name` as `error_class`). The legacy `FetchUntrustedError`
+// entry is back-compat for callers still throwing the unspecialized base
+// class — new code should pick a subclass above.
+export const FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES: Readonly<
+  Record<string, string>
+> = {
+  FetchUntrustedTimeout: 'notion api timed out, will retry on the next tick',
+  FetchUntrustedHttp4xx: 'notion api returned 4xx, check integration access',
+  FetchUntrustedHttp5xx: 'notion api returned 5xx, will retry on the next tick',
+  FetchUntrustedSsrfReject:
+    'ssrf reject on notion fetch, operator action required',
+  FetchUntrustedMalformed: 'notion response malformed, see host log',
+  FetchUntrustedError: 'notion fetch failed, see host log',
+};
+
+// Shared 4xx/5xx dispatcher used by every non-2xx site. Splitting here keeps
+// the contract in one place so a future tweak (e.g. splitting 401 vs 429)
+// only needs to be made once.
+export function throwForNon2xxStatus(status: number, message: string): never {
+  if (status >= 400 && status < 500) {
+    throw new FetchUntrustedHttp4xx(message, status);
+  }
+  if (status >= 500 && status < 600) {
+    throw new FetchUntrustedHttp5xx(message, status);
+  }
+  throw new FetchUntrustedError('fetch_failure', message, status);
+}
+
 export interface FetchUntrustedInput {
   url_or_id: string;
   source_type: FetchUntrustedSourceType;
@@ -175,14 +242,14 @@ export async function validatePublicHttpsUrl(
 
   if (isLiteralIpv4(parsed.hostname)) {
     if (isPrivateIpv4(parsed.hostname)) {
-      throw new FetchUntrustedError('bad_url', 'hostname is a private address');
+      throw new FetchUntrustedSsrfReject('hostname is a private address');
     }
     return { parsed, resolvedAddress: parsed.hostname };
   }
   const literalV6 = isLiteralIpv6(parsed.hostname);
   if (literalV6 !== null) {
     if (isPrivateIpv6(literalV6)) {
-      throw new FetchUntrustedError('bad_url', 'hostname is a private address');
+      throw new FetchUntrustedSsrfReject('hostname is a private address');
     }
     return { parsed, resolvedAddress: literalV6 };
   }
@@ -194,8 +261,7 @@ export async function validatePublicHttpsUrl(
     throw new FetchUntrustedError('bad_url', 'hostname could not be resolved');
   }
   if (isPrivateAddress(resolved.address, resolved.family)) {
-    throw new FetchUntrustedError(
-      'bad_url',
+    throw new FetchUntrustedSsrfReject(
       'hostname resolves to a private address',
     );
   }
@@ -235,7 +301,11 @@ function performHttpsGet(args: {
       servername: parsed.hostname,
     });
     const timer = setTimeout(() => {
-      req.destroy(new Error(`fetch timed out after ${FETCH_TIMEOUT_MS}ms`));
+      req.destroy(
+        new FetchUntrustedTimeout(
+          `fetch timed out after ${FETCH_TIMEOUT_MS}ms`,
+        ),
+      );
     }, FETCH_TIMEOUT_MS);
     req.on('response', (res) => {
       const responseHeaders = res.headers as Record<
@@ -314,10 +384,9 @@ export async function fetchWithRedirects(
       continue;
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new FetchUntrustedError(
-        'fetch_failure',
-        `target returned non-2xx status ${response.status}`,
+      throwForNon2xxStatus(
         response.status,
+        `target returned non-2xx status ${response.status}`,
       );
     }
     return response;

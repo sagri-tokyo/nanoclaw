@@ -28,10 +28,13 @@ import { ClientRequest } from 'http';
 import {
   FetchUntrustedDeps,
   FetchUntrustedError,
+  FetchUntrustedMalformed,
+  FetchUntrustedTimeout,
   fetchJsonObject,
   fetchWithRedirects,
   requireEnv,
   resolveDeps,
+  throwForNon2xxStatus,
   validatePublicHttpsUrl,
 } from './fetch-untrusted.js';
 import { logger } from './logger.js';
@@ -726,7 +729,11 @@ function performNotionPost(args: {
       };
       const req: ClientRequest = args.deps.httpsRequestFactory(options);
       const timer = setTimeout(() => {
-        req.destroy(new Error(`fetch timed out after ${POST_TIMEOUT_MS}ms`));
+        req.destroy(
+          new FetchUntrustedTimeout(
+            `fetch timed out after ${POST_TIMEOUT_MS}ms`,
+          ),
+        );
       }, POST_TIMEOUT_MS);
       req.on('response', (res) => {
         const chunks: Buffer[] = [];
@@ -806,33 +813,23 @@ async function notionDatabaseQuery(
     throw new FetchUntrustedError('fetch_failure', message);
   }
   if (response.status < 200 || response.status >= 300) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      `notion returned non-2xx status ${response.status}`,
+    throwForNon2xxStatus(
       response.status,
+      `notion returned non-2xx status ${response.status}`,
     );
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(response.body);
   } catch {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'notion response was not json',
-    );
+    throw new FetchUntrustedMalformed('notion response was not json');
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'notion response was not an object',
-    );
+    throw new FetchUntrustedMalformed('notion response was not an object');
   }
   const resultsRaw = (parsed as Record<string, unknown>).results;
   if (!Array.isArray(resultsRaw)) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'notion response missing results array',
-    );
+    throw new FetchUntrustedMalformed('notion response missing results array');
   }
   const out: NotionDatabaseItem[] = [];
   for (const pageRaw of resultsRaw.slice(0, limit)) {

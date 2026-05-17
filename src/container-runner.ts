@@ -17,8 +17,10 @@ import {
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
+import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
@@ -61,9 +63,10 @@ export type ContainerOutput =
 // `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.
 export const HTTP_STATUS_529_ERROR_CLASS = 'HttpStatus529';
 
-// Prefix prepended to the rewritten 529 text. Must match the prefix
+// Prefix prepended to rewritten error text. Must match the prefix
 // `formatErrorWrap` in `task-scheduler.ts` keys its wrap decision on, so the
-// per-task footer (run id, timestamp, runbook url) lands on the 529 reply.
+// per-task footer (run id, timestamp, runbook url) lands on the rewritten
+// reply.
 const ERROR_PREFIX = 'ERROR: ';
 
 // Pulls the retry count from the agent-runner's exceeded-budget message
@@ -76,28 +79,34 @@ function extractRetryCount(error: string): number | null {
 }
 
 /**
- * Replace the raw SDK error text on a 529-cascade output with a single
- * human-readable line for Slack. The structured `error_class` is preserved so
- * action records and `task_runs` still carry `HttpStatus529` for grep and for
- * stable error-class aggregation. Other error classes pass through unchanged.
+ * Rewrite the user-facing `error` for any output whose `error_class` has a
+ * known Slack mapping (HTTP 529 cascade or fetch-untrusted subclasses). The
+ * structured `error_class` is preserved so action records and `task_runs`
+ * still carry the raw class for grep and aggregation. Unknown error classes
+ * pass through unchanged.
  *
- * sagri-tokyo/sagri-ai#247.
+ * sagri-tokyo/sagri-ai#247 (529 case), sagri-tokyo/sagri-ai#255 (fetch-untrusted
+ * subclasses).
  */
 export function mapContainerOutputForUser(
   output: ContainerOutput,
 ): ContainerOutput {
-  if (
-    output.status !== 'error' ||
-    output.error_class !== HTTP_STATUS_529_ERROR_CLASS
-  ) {
+  if (output.status !== 'error' || output.error_class === undefined) {
     return output;
   }
-  const count = extractRetryCount(output.error);
-  const body =
-    count === null
-      ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
-      : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
-  return { ...output, error: `${ERROR_PREFIX}${body}` };
+  if (output.error_class === HTTP_STATUS_529_ERROR_CLASS) {
+    const count = extractRetryCount(output.error);
+    const body =
+      count === null
+        ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
+        : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
+    return { ...output, error: `${ERROR_PREFIX}${body}` };
+  }
+  const fetchCopy = FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES[output.error_class];
+  if (fetchCopy !== undefined) {
+    return { ...output, error: `${ERROR_PREFIX}${fetchCopy}` };
+  }
+  return output;
 }
 
 interface VolumeMount {

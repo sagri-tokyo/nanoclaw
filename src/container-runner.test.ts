@@ -118,7 +118,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerOutput,
+  mapContainerOutputForUser,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 
@@ -410,6 +414,88 @@ describe('container-runner HttpStatus529 mapping', () => {
       status: 'success',
       result: 'all good',
       newSessionId: 's1',
+    });
+  });
+});
+
+describe('container-runner fetch-untrusted subclass mapping', () => {
+  it.each([
+    [
+      'FetchUntrustedTimeout',
+      'fetch timed out after 30000ms',
+      'ERROR: notion api timed out, will retry on the next tick',
+    ],
+    [
+      'FetchUntrustedHttp4xx',
+      'notion returned non-2xx status 404',
+      'ERROR: notion api returned 4xx, check integration access',
+    ],
+    [
+      'FetchUntrustedHttp5xx',
+      'notion returned non-2xx status 500',
+      'ERROR: notion api returned 5xx, will retry on the next tick',
+    ],
+    [
+      'FetchUntrustedSsrfReject',
+      'hostname is a private address',
+      'ERROR: ssrf reject on notion fetch, operator action required',
+    ],
+    [
+      'FetchUntrustedMalformed',
+      'notion response was not json',
+      'ERROR: notion response malformed, see host log',
+    ],
+    [
+      'FetchUntrustedError',
+      'fetch failure',
+      'ERROR: notion fetch failed, see host log',
+    ],
+  ])(
+    'rewrites %s output to its Slack copy',
+    (errorClass, rawError, expectedError) => {
+      const mapped = mapContainerOutputForUser({
+        status: 'error',
+        result: null,
+        error: rawError,
+        error_class: errorClass,
+      });
+      expect(mapped).toEqual({
+        status: 'error',
+        result: null,
+        error: expectedError,
+        error_class: errorClass,
+      });
+    },
+  );
+
+  it('leaves the existing HttpStatus529 copy unchanged (regression guard)', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'Anthropic Overloaded (HttpStatus529) after 6 retries',
+      error_class: 'HttpStatus529',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error:
+        'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+      error_class: 'HttpStatus529',
+    });
+  });
+
+  it('passes unknown error classes through unchanged', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'API Error: 418 teapot',
+      error_class: 'HttpStatus418',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'API Error: 418 teapot',
+      error_class: 'HttpStatus418',
     });
   });
 });
