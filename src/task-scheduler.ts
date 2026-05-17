@@ -12,6 +12,7 @@ import {
 import {
   getAllTasks,
   getDueTasks,
+  getRecentTaskRunStatuses,
   getTaskById,
   logTaskRun,
   updateTask,
@@ -143,6 +144,32 @@ export function slackTextForError(output: {
   return output.error;
 }
 
+/**
+ * Decide whether a failing scheduled-task tick should produce a Slack post.
+ *
+ * Single isolated transients (e.g. one-off 30s Notion timeout) generate noise
+ * with no operator value when the next tick recovers. We post only once the
+ * current tick PLUS enough prior consecutive failures clear the per-task
+ * `failure_post_threshold`. See sagri-tokyo/sagri-ai#254.
+ *
+ * @param priorStatuses last (threshold - 1) `task_run_logs` rows for this
+ *   task, NEWEST FIRST, NOT including the current run.
+ * @param threshold per-task threshold from `scheduled_tasks.failure_post_threshold`.
+ *   Must be >= 1; enforced by `register-task --post-after-fails`.
+ * @returns true iff (1 current failure + leading prior errors) >= threshold.
+ */
+export function shouldPostFailure(
+  priorStatuses: Array<'success' | 'error'>,
+  threshold: number,
+): boolean {
+  let consecutive = 1; // the current failing tick
+  for (const status of priorStatuses) {
+    if (status !== 'error') break;
+    consecutive += 1;
+  }
+  return consecutive >= threshold;
+}
+
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
@@ -156,9 +183,12 @@ export interface SchedulerDependencies {
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
+type RunContainerAgentFn = typeof runContainerAgent;
+
 async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
+  runner: RunContainerAgentFn = runContainerAgent,
 ): Promise<void> {
   const startTime = Date.now();
   const inputsHash = hashPayload(task.prompt);
@@ -288,7 +318,7 @@ async function runTask(
   };
 
   try {
-    const output = await runContainerAgent(
+    const output = await runner(
       group,
       {
         prompt: task.prompt,
@@ -335,7 +365,26 @@ async function runTask(
             classifyContainerError(streamedOutput.error);
           const slackText = slackTextForError(streamedOutput);
           if (slackText !== null) {
-            await deps.sendMessage(task.chat_jid, wrap(slackText));
+            // Suppress single-transient failures from Slack until a per-task
+            // consecutive-failure threshold is met. The `task_run_logs` row
+            // and action record are still written below. sagri-tokyo/sagri-ai#254.
+            const threshold = task.failure_post_threshold ?? 2;
+            const priorStatuses = getRecentTaskRunStatuses(
+              task.id,
+              Math.max(0, threshold - 1),
+            );
+            if (shouldPostFailure(priorStatuses, threshold)) {
+              await deps.sendMessage(task.chat_jid, wrap(slackText));
+            } else {
+              logger.debug(
+                {
+                  taskId: task.id,
+                  threshold,
+                  priorStatuses,
+                },
+                'Scheduled task failed but consecutive-failure threshold not met; suppressing Slack post',
+              );
+            }
           }
         }
       },
@@ -438,4 +487,13 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 /** @internal - for tests only. */
 export function _resetSchedulerLoopForTests(): void {
   schedulerRunning = false;
+}
+
+/** @internal - for tests only. Allows injecting a fake `runContainerAgent`. */
+export function _runTaskForTests(
+  task: ScheduledTask,
+  deps: SchedulerDependencies,
+  runner: RunContainerAgentFn,
+): Promise<void> {
+  return runTask(task, deps, runner);
 }

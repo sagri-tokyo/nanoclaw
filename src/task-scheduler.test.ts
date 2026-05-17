@@ -1,12 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { _initTestDatabase, createTask, getTaskById } from './db.js';
+import {
+  _initTestDatabase,
+  createTask,
+  getTaskById,
+  logTaskRun,
+} from './db.js';
+import { HTTP_STATUS_529_ERROR_CLASS } from './container-runner.js';
+import type { ContainerOutput } from './container-runner.js';
+import type { RegisteredGroup, ScheduledTask } from './types.js';
 import {
   _resetSchedulerLoopForTests,
+  _runTaskForTests,
   classifyContainerError,
   computeNextRun,
   formatErrorWrap,
   isSilentResult,
+  shouldPostFailure,
   slackTextForError,
   startSchedulerLoop,
 } from './task-scheduler.js';
@@ -404,5 +414,306 @@ describe('task scheduler', () => {
     it('never returns an empty string', () => {
       expect(classifyContainerError('').length).toBeGreaterThan(0);
     });
+  });
+});
+
+describe('shouldPostFailure', () => {
+  it('returns true on every failure when threshold is 1 (opt-out)', () => {
+    expect(shouldPostFailure([], 1)).toBe(true);
+    expect(shouldPostFailure(['success'], 1)).toBe(true);
+    expect(shouldPostFailure(['error'], 1)).toBe(true);
+  });
+
+  it('suppresses a first-ever failure with the default threshold of 2', () => {
+    expect(shouldPostFailure([], 2)).toBe(false);
+  });
+
+  it('suppresses an isolated failure after a prior success (threshold 2)', () => {
+    expect(shouldPostFailure(['success'], 2)).toBe(false);
+  });
+
+  it('posts on two consecutive failures with threshold 2', () => {
+    expect(shouldPostFailure(['error'], 2)).toBe(true);
+  });
+
+  it('still suppresses two consecutive failures with threshold 3', () => {
+    expect(shouldPostFailure(['error'], 3)).toBe(false);
+  });
+
+  it('posts on three consecutive failures with threshold 3', () => {
+    expect(shouldPostFailure(['error', 'error'], 3)).toBe(true);
+  });
+
+  it('treats a recovery in the prior history as a streak break (threshold 3, [error, success, error])', () => {
+    // Current failure + 1 leading error = 2; the success then breaks the streak.
+    expect(shouldPostFailure(['error', 'success', 'error'], 3)).toBe(false);
+  });
+
+  it('treats a recent recovery as a streak break (threshold 3, [success, error, error])', () => {
+    // Current failure + 0 leading errors (the head of prior history is success) = 1.
+    expect(shouldPostFailure(['success', 'error', 'error'], 3)).toBe(false);
+  });
+});
+
+describe('runTask consecutive-failure suppression', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+    const base = {
+      id: 'task-suppress',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-05-15T00:00:00.000Z',
+      ...overrides,
+    };
+    createTask(base);
+    return getTaskById(base.id) as ScheduledTask;
+  }
+
+  function makeGroup(folder: string): RegisteredGroup {
+    return {
+      name: folder,
+      folder,
+      trigger: '@bot',
+      added_at: '2026-05-15T00:00:00.000Z',
+    };
+  }
+
+  function fakeRunner(errorOutput: ContainerOutput) {
+    return async (
+      _group: RegisteredGroup,
+      _input: unknown,
+      _onProcess: unknown,
+      onOutput?: (output: ContainerOutput) => Promise<void>,
+    ): Promise<ContainerOutput> => {
+      if (onOutput) await onOutput(errorOutput);
+      return errorOutput;
+    };
+  }
+
+  const errorOutput: ContainerOutput = {
+    status: 'error',
+    result: null,
+    error:
+      'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+    error_class: HTTP_STATUS_529_ERROR_CLASS,
+  };
+
+  it('suppresses the Slack post on a first-ever failure (default threshold 2)', async () => {
+    const task = makeTask({ id: 'first-ever', failure_post_threshold: 2 });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it('posts on the second consecutive failure with threshold 2', async () => {
+    const task = makeTask({ id: 'two-in-a-row', failure_post_threshold: 2 });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:00:00.000Z',
+      duration_ms: 100,
+      status: 'error',
+      result: null,
+      error: 'prior boom',
+    });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent.length).toBe(1);
+    expect(sent[0].startsWith('ERROR: anthropic upstream overloaded')).toBe(
+      true,
+    );
+    // Confirm the formatErrorWrap footer landed.
+    expect(sent[0]).toContain('↳ run two-in-a-row');
+  });
+
+  it('suppresses when the only prior run is a success (threshold 2)', async () => {
+    const task = makeTask({ id: 'isolated', failure_post_threshold: 2 });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:00:00.000Z',
+      duration_ms: 100,
+      status: 'success',
+      result: 'ok',
+      error: null,
+    });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it('suppresses two consecutive failures when threshold is 3', async () => {
+    const task = makeTask({ id: 'thr3-two', failure_post_threshold: 3 });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:00:00.000Z',
+      duration_ms: 100,
+      status: 'error',
+      result: null,
+      error: 'prior boom',
+    });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it('posts on three consecutive failures with threshold 3', async () => {
+    const task = makeTask({ id: 'thr3-three', failure_post_threshold: 3 });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:00:00.000Z',
+      duration_ms: 100,
+      status: 'error',
+      result: null,
+      error: 'prior boom 1',
+    });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:05:00.000Z',
+      duration_ms: 100,
+      status: 'error',
+      result: null,
+      error: 'prior boom 2',
+    });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent.length).toBe(1);
+  });
+
+  it('posts on every failure when threshold is 1 (opt-out)', async () => {
+    const task = makeTask({ id: 'thr1', failure_post_threshold: 1 });
+    const sent: string[] = [];
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      fakeRunner(errorOutput),
+    );
+    expect(sent.length).toBe(1);
+  });
+
+  it('still writes the task_run_logs row when suppressing', async () => {
+    const { getRecentTaskRunStatuses } = await import('./db.js');
+    const task = makeTask({
+      id: 'suppressed-still-logged',
+      failure_post_threshold: 2,
+    });
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      },
+      fakeRunner(errorOutput),
+    );
+    const statuses = getRecentTaskRunStatuses(task.id, 5);
+    expect(statuses).toEqual(['error']);
   });
 });

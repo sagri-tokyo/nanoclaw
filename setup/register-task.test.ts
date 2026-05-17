@@ -332,6 +332,155 @@ describe('parseArgs (strict --runbook-url semantics)', () => {
   });
 });
 
+describe('parseArgs (strict --post-after-fails semantics)', () => {
+  const baseArgs = [
+    '--id', 't1',
+    '--group-folder', 'slack_main',
+    '--chat-jid', 'C123@slack',
+    '--prompt-file', '/tmp/prompt.md',
+    '--schedule-type', 'cron',
+    '--schedule-value', '*/15 * * * *',
+    '--context-mode', 'isolated',
+  ];
+
+  it('leaves postAfterFails undefined when the flag is omitted', () => {
+    const parsed = _parseArgs(baseArgs);
+    expect(parsed.postAfterFails).toBeUndefined();
+  });
+
+  it('captures --post-after-fails 1 as the integer 1', () => {
+    const parsed = _parseArgs([...baseArgs, '--post-after-fails', '1']);
+    expect(parsed.postAfterFails).toBe(1);
+  });
+
+  it('captures --post-after-fails 3 as the integer 3', () => {
+    const parsed = _parseArgs([...baseArgs, '--post-after-fails', '3']);
+    expect(parsed.postAfterFails).toBe(3);
+  });
+
+  it('rejects --post-after-fails 0 with RegisterTaskArgError', () => {
+    expect(() => _parseArgs([...baseArgs, '--post-after-fails', '0'])).toThrow(
+      RegisterTaskArgError,
+    );
+    expect(() => _parseArgs([...baseArgs, '--post-after-fails', '0'])).toThrow(
+      'positive integer',
+    );
+  });
+
+  it('rejects a negative --post-after-fails value', () => {
+    expect(() =>
+      _parseArgs([...baseArgs, '--post-after-fails', '-3']),
+    ).toThrow(RegisterTaskArgError);
+  });
+
+  it('rejects a non-numeric --post-after-fails value', () => {
+    expect(() =>
+      _parseArgs([...baseArgs, '--post-after-fails', 'abc']),
+    ).toThrow(RegisterTaskArgError);
+  });
+
+  it('rejects an empty --post-after-fails value', () => {
+    expect(() => _parseArgs([...baseArgs, '--post-after-fails', ''])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+
+  it('rejects a trailing --post-after-fails with no value', () => {
+    expect(() => _parseArgs([...baseArgs, '--post-after-fails'])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+});
+
+describe('register-task failure_post_threshold handling', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('stores the column DEFAULT (2) when postAfterFails is omitted on create', () => {
+    upsertTask({
+      id: 'thr-default',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    const stored = getTaskById('thr-default');
+    expect(stored!.failure_post_threshold).toBe(2);
+  });
+
+  it('persists postAfterFails on create', () => {
+    upsertTask({
+      id: 'thr-create',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      postAfterFails: 1,
+    });
+    const stored = getTaskById('thr-create');
+    expect(stored!.failure_post_threshold).toBe(1);
+  });
+
+  it('preserves the existing threshold when postAfterFails is omitted on update', () => {
+    upsertTask({
+      id: 'thr-keep',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      postAfterFails: 5,
+    });
+    upsertTask({
+      id: 'thr-keep',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt.',
+      scheduleType: 'cron',
+      scheduleValue: '0 * * * *',
+      contextMode: 'isolated',
+      // postAfterFails intentionally omitted
+    });
+    const stored = getTaskById('thr-keep');
+    expect(stored!.failure_post_threshold).toBe(5);
+  });
+
+  it('overwrites the threshold when a new value is provided on update', () => {
+    upsertTask({
+      id: 'thr-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      postAfterFails: 5,
+    });
+    upsertTask({
+      id: 'thr-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      postAfterFails: 3,
+    });
+    const stored = getTaskById('thr-overwrite');
+    expect(stored!.failure_post_threshold).toBe(3);
+  });
+});
+
 describe('prompt file handling', () => {
   let tmpDir: string;
 
