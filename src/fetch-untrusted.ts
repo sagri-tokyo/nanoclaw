@@ -58,37 +58,81 @@ export class FetchUntrustedError extends Error {
 // Subclasses surface a specific failure mode so operators can tell apart
 // (a) a 30s wall-clock timeout from (b) a Notion 4xx auth failure from
 // (c) a host SSRF reject. The host emits `err.constructor.name` as
-// `error_class` in action records and the Slack mapping in
-// `container-runner.ts` rewrites the user-facing copy per subclass.
+// `error_class` in action records (see `reader-rpc.ts`), so each class
+// surfaces a distinct string for grep and aggregation.
+//
+// Each subclass also carries a `userMessage` static so the Slack-facing
+// copy lives alongside the class identity. `container-runner.ts` consults
+// these statics rather than maintaining a parallel name->copy map.
 // sagri-tokyo/sagri-ai#255.
 export class FetchUntrustedTimeout extends FetchUntrustedError {
+  static readonly userMessage =
+    'notion api timed out, will retry on the next tick';
   constructor(message: string) {
     super('fetch_failure', message);
   }
 }
 
 export class FetchUntrustedHttp4xx extends FetchUntrustedError {
+  static readonly userMessage =
+    'notion api returned 4xx, check integration access';
   constructor(message: string, httpStatus: number) {
     super('fetch_failure', message, httpStatus);
   }
 }
 
 export class FetchUntrustedHttp5xx extends FetchUntrustedError {
+  static readonly userMessage =
+    'notion api returned 5xx, will retry on the next tick';
   constructor(message: string, httpStatus: number) {
     super('fetch_failure', message, httpStatus);
   }
 }
 
 export class FetchUntrustedSsrfReject extends FetchUntrustedError {
+  static readonly userMessage =
+    'ssrf reject on notion fetch, operator action required';
   constructor(message: string) {
     super('bad_url', message);
   }
 }
 
 export class FetchUntrustedMalformed extends FetchUntrustedError {
+  static readonly userMessage = 'notion response malformed, see host log';
   constructor(message: string) {
     super('fetch_failure', message);
   }
+}
+
+// Single source of truth for the error_class -> Slack copy mapping. The
+// container-runner consults this table when rewriting user-facing errors.
+// Adding a new subclass means adding the class definition (with its static
+// userMessage) and one entry here, in the same file — no cross-file drift.
+export const FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES: Readonly<
+  Record<string, string>
+> = {
+  FetchUntrustedTimeout: FetchUntrustedTimeout.userMessage,
+  FetchUntrustedHttp4xx: FetchUntrustedHttp4xx.userMessage,
+  FetchUntrustedHttp5xx: FetchUntrustedHttp5xx.userMessage,
+  FetchUntrustedSsrfReject: FetchUntrustedSsrfReject.userMessage,
+  FetchUntrustedMalformed: FetchUntrustedMalformed.userMessage,
+  // Legacy unspecialized base class (back-compat). Any caller still
+  // throwing the base lands here so the agent never leaks a raw error
+  // blob to Slack. New code should pick a subclass above.
+  FetchUntrustedError: 'notion fetch failed, see host log',
+};
+
+// Shared 4xx/5xx dispatcher used by every non-2xx site. Splitting here keeps
+// the contract in one place so a future tweak (e.g. splitting 401 vs 429)
+// only needs to be made once.
+export function throwForNon2xxStatus(status: number, message: string): never {
+  if (status >= 400 && status < 500) {
+    throw new FetchUntrustedHttp4xx(message, status);
+  }
+  if (status >= 500 && status < 600) {
+    throw new FetchUntrustedHttp5xx(message, status);
+  }
+  throw new FetchUntrustedError('fetch_failure', message, status);
 }
 
 export interface FetchUntrustedInput {
@@ -353,14 +397,10 @@ export async function fetchWithRedirects(
       continue;
     }
     if (response.status < 200 || response.status >= 300) {
-      const message = `target returned non-2xx status ${response.status}`;
-      if (response.status >= 400 && response.status < 500) {
-        throw new FetchUntrustedHttp4xx(message, response.status);
-      }
-      if (response.status >= 500 && response.status < 600) {
-        throw new FetchUntrustedHttp5xx(message, response.status);
-      }
-      throw new FetchUntrustedError('fetch_failure', message, response.status);
+      throwForNon2xxStatus(
+        response.status,
+        `target returned non-2xx status ${response.status}`,
+      );
     }
     return response;
   }

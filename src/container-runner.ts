@@ -19,6 +19,8 @@ import {
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
+
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
@@ -61,27 +63,10 @@ export type ContainerOutput =
 // `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.
 export const HTTP_STATUS_529_ERROR_CLASS = 'HttpStatus529';
 
-// Fetch-untrusted subclass names that the host emits as `error_class` in
-// action records. The host throws these in `fetch-untrusted.ts` /
-// `fetch-untrusted-list.ts`; `err.constructor.name` becomes the action-record
-// `error_class` via `reader-rpc.ts`. Keep the names in sync with the class
-// declarations. sagri-tokyo/sagri-ai#255.
-const FETCH_UNTRUSTED_SLACK_MAP: Record<string, string> = {
-  FetchUntrustedTimeout: 'notion api timed out, will retry on the next tick',
-  FetchUntrustedHttp4xx: 'notion api returned 4xx, check integration access',
-  FetchUntrustedHttp5xx: 'notion api returned 5xx, will retry on the next tick',
-  FetchUntrustedSsrfReject:
-    'ssrf reject on notion fetch, operator action required',
-  FetchUntrustedMalformed: 'notion response malformed, see host log',
-  // Legacy unspecialized class (back-compat). Any caller still throwing the
-  // base class lands here so the agent does not leak a raw error blob to
-  // Slack. New code should pick a subclass above.
-  FetchUntrustedError: 'notion fetch failed, see host log',
-};
-
-// Prefix prepended to the rewritten 529 text. Must match the prefix
+// Prefix prepended to rewritten error text. Must match the prefix
 // `formatErrorWrap` in `task-scheduler.ts` keys its wrap decision on, so the
-// per-task footer (run id, timestamp, runbook url) lands on the 529 reply.
+// per-task footer (run id, timestamp, runbook url) lands on the rewritten
+// reply.
 const ERROR_PREFIX = 'ERROR: ';
 
 // Pulls the retry count from the agent-runner's exceeded-budget message
@@ -94,10 +79,11 @@ function extractRetryCount(error: string): number | null {
 }
 
 /**
- * Replace the raw SDK error text on a known error-class output with a single
- * human-readable line for Slack. The structured `error_class` is preserved so
- * action records and `task_runs` still carry the raw class for grep and for
- * stable error-class aggregation. Unknown error classes pass through unchanged.
+ * Rewrite the user-facing `error` for any output whose `error_class` has a
+ * known Slack mapping (HTTP 529 cascade or fetch-untrusted subclasses). The
+ * structured `error_class` is preserved so action records and `task_runs`
+ * still carry the raw class for grep and aggregation. Unknown error classes
+ * pass through unchanged.
  *
  * sagri-tokyo/sagri-ai#247 (529 case), sagri-tokyo/sagri-ai#255 (fetch-untrusted
  * subclasses).
@@ -116,7 +102,7 @@ export function mapContainerOutputForUser(
         : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
     return { ...output, error: `${ERROR_PREFIX}${body}` };
   }
-  const fetchCopy = FETCH_UNTRUSTED_SLACK_MAP[output.error_class];
+  const fetchCopy = FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES[output.error_class];
   if (fetchCopy !== undefined) {
     return { ...output, error: `${ERROR_PREFIX}${fetchCopy}` };
   }

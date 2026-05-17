@@ -28,14 +28,13 @@ import { ClientRequest } from 'http';
 import {
   FetchUntrustedDeps,
   FetchUntrustedError,
-  FetchUntrustedHttp4xx,
-  FetchUntrustedHttp5xx,
   FetchUntrustedMalformed,
   FetchUntrustedTimeout,
   fetchJsonObject,
   fetchWithRedirects,
   requireEnv,
   resolveDeps,
+  throwForNon2xxStatus,
   validatePublicHttpsUrl,
 } from './fetch-untrusted.js';
 import { logger } from './logger.js';
@@ -814,14 +813,10 @@ async function notionDatabaseQuery(
     throw new FetchUntrustedError('fetch_failure', message);
   }
   if (response.status < 200 || response.status >= 300) {
-    const message = `notion returned non-2xx status ${response.status}`;
-    if (response.status >= 400 && response.status < 500) {
-      throw new FetchUntrustedHttp4xx(message, response.status);
-    }
-    if (response.status >= 500 && response.status < 600) {
-      throw new FetchUntrustedHttp5xx(message, response.status);
-    }
-    throw new FetchUntrustedError('fetch_failure', message, response.status);
+    throwForNon2xxStatus(
+      response.status,
+      `notion returned non-2xx status ${response.status}`,
+    );
   }
   let parsed: unknown;
   try {
