@@ -76,6 +76,7 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed';
   created_at: string;
   runbook_url?: string | null;
+  failure_post_threshold?: number;
 }
 
 export interface TaskRunLog {

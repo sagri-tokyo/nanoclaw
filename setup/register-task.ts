@@ -26,6 +26,7 @@ interface RegisterTaskArgs {
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
   runbookUrl?: string;
+  postAfterFails?: number;
 }
 
 export interface UpsertTaskInput {
@@ -43,6 +44,14 @@ export interface UpsertTaskInput {
    * before invoking.
    */
   runbookUrl?: string;
+  /**
+   * Per-task consecutive-failure threshold before a tick failure produces a
+   * Slack post. `undefined` leaves the existing row's value untouched on
+   * update and falls back to the column DEFAULT (2) on create. Must be a
+   * positive integer; callers validate before invoking. See
+   * sagri-tokyo/sagri-ai#254.
+   */
+  postAfterFails?: number;
 }
 
 export class RegisterTaskArgError extends Error {
@@ -98,6 +107,22 @@ function parseArgs(args: string[]): RegisterTaskArgs {
           );
         }
         result.runbookUrl = raw;
+        break;
+      }
+      case '--post-after-fails': {
+        const raw = args[++i];
+        if (raw === undefined || raw === '') {
+          throw new RegisterTaskArgError(
+            '--post-after-fails requires a value',
+          );
+        }
+        const parsed = Number(raw);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          throw new RegisterTaskArgError(
+            `--post-after-fails must be a positive integer (got ${raw})`,
+          );
+        }
+        result.postAfterFails = parsed;
         break;
       }
     }
@@ -181,6 +206,9 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     if (input.runbookUrl !== undefined) {
       taskUpdates.runbook_url = input.runbookUrl;
     }
+    if (input.postAfterFails !== undefined) {
+      taskUpdates.failure_post_threshold = input.postAfterFails;
+    }
     updateTask(input.id, taskUpdates);
     return 'updated';
   }
@@ -198,6 +226,7 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     status: 'active',
     created_at: new Date().toISOString(),
     runbook_url: input.runbookUrl ?? null,
+    failure_post_threshold: input.postAfterFails,
   });
   return 'created';
 }
@@ -271,6 +300,7 @@ export async function run(args: string[]): Promise<void> {
     scheduleValue: parsed.scheduleValue,
     contextMode: parsed.contextMode,
     runbookUrl: parsed.runbookUrl,
+    postAfterFails: parsed.postAfterFails,
   });
 
   logger.info(

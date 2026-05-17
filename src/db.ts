@@ -49,7 +49,8 @@ function createSchema(database: Database.Database): void {
       last_result TEXT,
       status TEXT DEFAULT 'active',
       created_at TEXT NOT NULL,
-      runbook_url TEXT
+      runbook_url TEXT,
+      failure_post_threshold INTEGER NOT NULL DEFAULT 2
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -162,6 +163,17 @@ function createSchema(database: Database.Database): void {
   // Add runbook_url column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN runbook_url TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  // Add failure_post_threshold column if it doesn't exist (migration for
+  // existing DBs). New rows default to 2 via the column DEFAULT; existing
+  // rows get 2 from the ALTER. See sagri-tokyo/sagri-ai#254.
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN failure_post_threshold INTEGER NOT NULL DEFAULT 2`,
+    );
   } catch {
     /* column already exists */
   }
@@ -417,8 +429,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url, failure_post_threshold)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -433,6 +445,7 @@ export function createTask(
     task.status,
     task.created_at,
     task.runbook_url ?? null,
+    task.failure_post_threshold ?? 2,
   );
 }
 
@@ -468,6 +481,7 @@ export function updateTask(
       | 'next_run'
       | 'status'
       | 'runbook_url'
+      | 'failure_post_threshold'
     >
   >,
 ): void {
@@ -501,6 +515,10 @@ export function updateTask(
   if (updates.runbook_url !== undefined) {
     fields.push('runbook_url = ?');
     values.push(updates.runbook_url ?? null);
+  }
+  if (updates.failure_post_threshold !== undefined) {
+    fields.push('failure_post_threshold = ?');
+    values.push(updates.failure_post_threshold);
   }
 
   if (fields.length === 0) return;
@@ -559,6 +577,23 @@ export function logTaskRun(log: TaskRunLog): void {
     log.result,
     log.error,
   );
+}
+
+/**
+ * Return the `status` values of the most recent `limit` `task_run_logs` rows
+ * for `taskId`, newest-first. Used by the scheduler's consecutive-failure
+ * suppression gate (sagri-tokyo/sagri-ai#254).
+ */
+export function getRecentTaskRunStatuses(
+  taskId: string,
+  limit: number,
+): Array<'success' | 'error'> {
+  const rows = db
+    .prepare(
+      `SELECT status FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC, id DESC LIMIT ?`,
+    )
+    .all(taskId, limit) as Array<{ status: 'success' | 'error' }>;
+  return rows.map((row) => row.status);
 }
 
 // --- Router state accessors ---

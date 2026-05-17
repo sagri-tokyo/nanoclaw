@@ -9,7 +9,9 @@ import {
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getRecentTaskRunStatuses,
   getTaskById,
+  logTaskRun,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -699,5 +701,120 @@ describe('scheduled_tasks runbook_url', () => {
     updateTask('task-runbook', { runbook_url: null });
     const stored = getTaskById('task-runbook');
     expect(stored!.runbook_url).toBeNull();
+  });
+});
+
+
+describe('scheduled_tasks failure_post_threshold', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeTask(overrides: Partial<Parameters<typeof createTask>[0]> = {}) {
+    createTask({
+      id: 'task-threshold',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-15T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-05-15T00:00:00.000Z',
+      ...overrides,
+    });
+  }
+
+  it('defaults failure_post_threshold to 2 when omitted at createTask', () => {
+    makeTask();
+    const stored = getTaskById('task-threshold');
+    expect(stored!.failure_post_threshold).toBe(2);
+  });
+
+  it('persists an explicit failure_post_threshold at createTask', () => {
+    makeTask({ failure_post_threshold: 4 });
+    const stored = getTaskById('task-threshold');
+    expect(stored!.failure_post_threshold).toBe(4);
+  });
+
+  it('updates failure_post_threshold via updateTask', () => {
+    makeTask();
+    updateTask('task-threshold', { failure_post_threshold: 1 });
+    const stored = getTaskById('task-threshold');
+    expect(stored!.failure_post_threshold).toBe(1);
+  });
+});
+
+describe('getRecentTaskRunStatuses', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function seedTask(id: string): void {
+    createTask({
+      id,
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'p',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-15T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-05-15T00:00:00.000Z',
+    });
+  }
+
+  function logRun(
+    taskId: string,
+    status: 'success' | 'error',
+    runAt: string,
+  ): void {
+    logTaskRun({
+      task_id: taskId,
+      run_at: runAt,
+      duration_ms: 100,
+      status,
+      result: status === 'success' ? 'ok' : null,
+      error: status === 'error' ? 'boom' : null,
+    });
+  }
+
+  it('returns rows newest-first', () => {
+    seedTask('t');
+    logRun('t', 'success', '2026-05-15T00:00:00.000Z');
+    logRun('t', 'error', '2026-05-15T00:05:00.000Z');
+    logRun('t', 'error', '2026-05-15T00:10:00.000Z');
+    const statuses = getRecentTaskRunStatuses('t', 5);
+    expect(statuses).toEqual(['error', 'error', 'success']);
+  });
+
+  it('respects the limit', () => {
+    seedTask('t');
+    logRun('t', 'success', '2026-05-15T00:00:00.000Z');
+    logRun('t', 'error', '2026-05-15T00:05:00.000Z');
+    logRun('t', 'error', '2026-05-15T00:10:00.000Z');
+    expect(getRecentTaskRunStatuses('t', 2)).toEqual(['error', 'error']);
+  });
+
+  it('returns an empty array when the task has no run rows', () => {
+    expect(getRecentTaskRunStatuses('no-such-task', 5)).toEqual([]);
+  });
+
+  it('returns an empty array when limit is zero', () => {
+    seedTask('t');
+    logRun('t', 'error', '2026-05-15T00:00:00.000Z');
+    expect(getRecentTaskRunStatuses('t', 0)).toEqual([]);
+  });
+
+  it('filters by task_id', () => {
+    seedTask('t');
+    seedTask('other');
+    logRun('t', 'error', '2026-05-15T00:00:00.000Z');
+    logRun('other', 'success', '2026-05-15T00:05:00.000Z');
+    expect(getRecentTaskRunStatuses('t', 5)).toEqual(['error']);
   });
 });
