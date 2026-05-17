@@ -60,45 +60,32 @@ export class FetchUntrustedError extends Error {
 // (c) a host SSRF reject. The host emits `err.constructor.name` as
 // `error_class` in action records (see `reader-rpc.ts`), so each class
 // surfaces a distinct string for grep and aggregation.
-//
-// Each subclass also carries a `userMessage` static so the Slack-facing
-// copy lives alongside the class identity. `container-runner.ts` consults
-// these statics rather than maintaining a parallel name->copy map.
 // sagri-tokyo/sagri-ai#255.
 export class FetchUntrustedTimeout extends FetchUntrustedError {
-  static readonly userMessage =
-    'notion api timed out, will retry on the next tick';
   constructor(message: string) {
     super('fetch_failure', message);
   }
 }
 
 export class FetchUntrustedHttp4xx extends FetchUntrustedError {
-  static readonly userMessage =
-    'notion api returned 4xx, check integration access';
   constructor(message: string, httpStatus: number) {
     super('fetch_failure', message, httpStatus);
   }
 }
 
 export class FetchUntrustedHttp5xx extends FetchUntrustedError {
-  static readonly userMessage =
-    'notion api returned 5xx, will retry on the next tick';
   constructor(message: string, httpStatus: number) {
     super('fetch_failure', message, httpStatus);
   }
 }
 
 export class FetchUntrustedSsrfReject extends FetchUntrustedError {
-  static readonly userMessage =
-    'ssrf reject on notion fetch, operator action required';
   constructor(message: string) {
     super('bad_url', message);
   }
 }
 
 export class FetchUntrustedMalformed extends FetchUntrustedError {
-  static readonly userMessage = 'notion response malformed, see host log';
   constructor(message: string) {
     super('fetch_failure', message);
   }
@@ -106,19 +93,19 @@ export class FetchUntrustedMalformed extends FetchUntrustedError {
 
 // Single source of truth for the error_class -> Slack copy mapping. The
 // container-runner consults this table when rewriting user-facing errors.
-// Adding a new subclass means adding the class definition (with its static
-// userMessage) and one entry here, in the same file — no cross-file drift.
+// Keys must match the subclass names above (the host emits
+// `err.constructor.name` as `error_class`). The legacy `FetchUntrustedError`
+// entry is back-compat for callers still throwing the unspecialized base
+// class — new code should pick a subclass above.
 export const FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES: Readonly<
   Record<string, string>
 > = {
-  FetchUntrustedTimeout: FetchUntrustedTimeout.userMessage,
-  FetchUntrustedHttp4xx: FetchUntrustedHttp4xx.userMessage,
-  FetchUntrustedHttp5xx: FetchUntrustedHttp5xx.userMessage,
-  FetchUntrustedSsrfReject: FetchUntrustedSsrfReject.userMessage,
-  FetchUntrustedMalformed: FetchUntrustedMalformed.userMessage,
-  // Legacy unspecialized base class (back-compat). Any caller still
-  // throwing the base lands here so the agent never leaks a raw error
-  // blob to Slack. New code should pick a subclass above.
+  FetchUntrustedTimeout: 'notion api timed out, will retry on the next tick',
+  FetchUntrustedHttp4xx: 'notion api returned 4xx, check integration access',
+  FetchUntrustedHttp5xx: 'notion api returned 5xx, will retry on the next tick',
+  FetchUntrustedSsrfReject:
+    'ssrf reject on notion fetch, operator action required',
+  FetchUntrustedMalformed: 'notion response malformed, see host log',
   FetchUntrustedError: 'notion fetch failed, see host log',
 };
 

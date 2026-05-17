@@ -17,9 +17,9 @@ import {
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
+import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
 
 import {
   CONTAINER_HOST_GATEWAY,
