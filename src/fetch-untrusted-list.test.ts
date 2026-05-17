@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
+import { EventEmitter } from 'events';
 
 const mockEnv: Record<string, string> = {};
 vi.mock('./env.js', () => ({
@@ -21,7 +22,15 @@ import {
   fetchUntrustedList,
   FetchUntrustedListResult,
 } from './fetch-untrusted-list.js';
-import { FetchUntrustedDeps, FetchUntrustedError } from './fetch-untrusted.js';
+import {
+  FetchUntrustedDeps,
+  FetchUntrustedError,
+  FetchUntrustedHttp4xx,
+  FetchUntrustedHttp5xx,
+  FetchUntrustedMalformed,
+  FetchUntrustedSsrfReject,
+  FetchUntrustedTimeout,
+} from './fetch-untrusted.js';
 
 interface CapturedRequest {
   method: string;
@@ -640,6 +649,212 @@ describe('fetch-untrusted-list', () => {
         deps,
       ),
     ).rejects.toMatchObject({ code: 'bad_url' });
+  });
+
+  // ---------- error subclasses (sagri-tokyo/sagri-ai#255) ----------
+
+  it('notion_database_query throws FetchUntrustedHttp4xx on a 404 status', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'not found' }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedHttp4xx);
+      expect(caught).toBeInstanceOf(FetchUntrustedError);
+      expect((caught as Error).constructor.name).toBe('FetchUntrustedHttp4xx');
+      expect(caught).toMatchObject({ code: 'fetch_failure', httpStatus: 404 });
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_database_query throws FetchUntrustedHttp5xx on a 500 status', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'internal' }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedHttp5xx);
+      expect(caught).toBeInstanceOf(FetchUntrustedError);
+      expect((caught as Error).constructor.name).toBe('FetchUntrustedHttp5xx');
+      expect(caught).toMatchObject({ code: 'fetch_failure', httpStatus: 500 });
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_database_query throws FetchUntrustedSsrfReject on an RFC1918 hostname', async () => {
+    const deps: FetchUntrustedDeps = {
+      lookup: async (_hostname: string) => ({ address: '10.0.0.1', family: 4 }),
+      httpsRequestFactory: () => {
+        throw new Error('should not be called');
+      },
+    };
+    let caught: unknown;
+    try {
+      await fetchUntrustedList(
+        {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+        deps,
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(FetchUntrustedSsrfReject);
+    expect(caught).toBeInstanceOf(FetchUntrustedError);
+    expect((caught as Error).constructor.name).toBe('FetchUntrustedSsrfReject');
+    expect(caught).toMatchObject({ code: 'bad_url' });
+  });
+
+  it('notion_database_query throws FetchUntrustedMalformed when the 2xx body is not json', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('not-json-at-all');
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect(caught).toBeInstanceOf(FetchUntrustedError);
+      expect((caught as Error).constructor.name).toBe(
+        'FetchUntrustedMalformed',
+      );
+      expect(caught).toMatchObject({ code: 'fetch_failure' });
+      expect((caught as FetchUntrustedError).httpStatus).toBeUndefined();
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_database_query throws FetchUntrustedMalformed when results is not an array', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ results: 'not-an-array' }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: 'abc', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect((caught as Error).constructor.name).toBe(
+        'FetchUntrustedMalformed',
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_database_query throws FetchUntrustedTimeout when the upstream never responds', async () => {
+    // Stub httpsRequestFactory returns a ClientRequest-like EventEmitter
+    // that never emits 'response'. The POST_TIMEOUT_MS timer fires, which
+    // calls req.destroy(err), which triggers the 'error' listener with the
+    // FetchUntrustedTimeout instance.
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter() as EventEmitter & {
+        write?: (chunk: string) => void;
+        end?: () => void;
+        destroy?: (err: Error) => void;
+      };
+      emitter.write = () => {};
+      emitter.end = () => {};
+      emitter.destroy = (err: Error) => {
+        // Match real ClientRequest semantics: emit 'error' on destroy(err).
+        process.nextTick(() => emitter.emit('error', err));
+      };
+      const stubRequest = emitter as unknown as http.ClientRequest;
+
+      const deps: FetchUntrustedDeps = {
+        lookup: async (_hostname: string) => ({
+          address: '8.8.8.8',
+          family: 4,
+        }),
+        httpsRequestFactory: () => stubRequest,
+      };
+
+      const pending = fetchUntrustedList(
+        {
+          source_type: 'notion_database_query',
+          params: { database_id: 'abc', limit: 5 },
+        },
+        deps,
+      );
+      const caughtPromise = pending.catch((e: unknown) => e);
+      // Advance past the 30s POST_TIMEOUT_MS plus a tick for nextTick.
+      await vi.advanceTimersByTimeAsync(31_000);
+      const caught = await caughtPromise;
+      expect(caught).toBeInstanceOf(FetchUntrustedTimeout);
+      expect(caught).toBeInstanceOf(FetchUntrustedError);
+      expect((caught as Error).constructor.name).toBe('FetchUntrustedTimeout');
+      expect(caught).toMatchObject({ code: 'fetch_failure' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ---------- include_reader default-omit (sagri-ai#119) ----------

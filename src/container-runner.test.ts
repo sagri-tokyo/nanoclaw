@@ -118,7 +118,11 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerOutput,
+  mapContainerOutputForUser,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 
@@ -410,6 +414,129 @@ describe('container-runner HttpStatus529 mapping', () => {
       status: 'success',
       result: 'all good',
       newSessionId: 's1',
+    });
+  });
+});
+
+describe('container-runner fetch-untrusted subclass mapping', () => {
+  it('rewrites timeout output to the Slack timeout copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'fetch timed out after 30000ms',
+      error_class: 'FetchUntrustedTimeout',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: notion api timed out, will retry on the next tick',
+      error_class: 'FetchUntrustedTimeout',
+    });
+  });
+
+  it('rewrites 4xx output to the Slack 4xx copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'notion returned non-2xx status 404',
+      error_class: 'FetchUntrustedHttp4xx',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: notion api returned 4xx, check integration access',
+      error_class: 'FetchUntrustedHttp4xx',
+    });
+  });
+
+  it('rewrites 5xx output to the Slack 5xx copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'notion returned non-2xx status 500',
+      error_class: 'FetchUntrustedHttp5xx',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: notion api returned 5xx, will retry on the next tick',
+      error_class: 'FetchUntrustedHttp5xx',
+    });
+  });
+
+  it('rewrites SSRF-reject output to the Slack SSRF copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'hostname is a private address',
+      error_class: 'FetchUntrustedSsrfReject',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: ssrf reject on notion fetch, operator action required',
+      error_class: 'FetchUntrustedSsrfReject',
+    });
+  });
+
+  it('rewrites malformed output to the Slack malformed copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'notion response was not json',
+      error_class: 'FetchUntrustedMalformed',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: notion response malformed, see host log',
+      error_class: 'FetchUntrustedMalformed',
+    });
+  });
+
+  it('rewrites the legacy unspecialized class to a generic Slack copy', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'fetch failure',
+      error_class: 'FetchUntrustedError',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'ERROR: notion fetch failed, see host log',
+      error_class: 'FetchUntrustedError',
+    });
+  });
+
+  it('leaves the existing HttpStatus529 copy unchanged (regression guard)', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'Anthropic Overloaded (HttpStatus529) after 6 retries',
+      error_class: 'HttpStatus529',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error:
+        'ERROR: anthropic upstream overloaded after 6 retries. will retry on the next scheduled tick.',
+      error_class: 'HttpStatus529',
+    });
+  });
+
+  it('passes unknown error classes through unchanged', () => {
+    const mapped = mapContainerOutputForUser({
+      status: 'error',
+      result: null,
+      error: 'API Error: 418 teapot',
+      error_class: 'HttpStatus418',
+    });
+    expect(mapped).toEqual({
+      status: 'error',
+      result: null,
+      error: 'API Error: 418 teapot',
+      error_class: 'HttpStatus418',
     });
   });
 });

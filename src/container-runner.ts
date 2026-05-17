@@ -61,6 +61,24 @@ export type ContainerOutput =
 // `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.
 export const HTTP_STATUS_529_ERROR_CLASS = 'HttpStatus529';
 
+// Fetch-untrusted subclass names that the host emits as `error_class` in
+// action records. The host throws these in `fetch-untrusted.ts` /
+// `fetch-untrusted-list.ts`; `err.constructor.name` becomes the action-record
+// `error_class` via `reader-rpc.ts`. Keep the names in sync with the class
+// declarations. sagri-tokyo/sagri-ai#255.
+const FETCH_UNTRUSTED_SLACK_MAP: Record<string, string> = {
+  FetchUntrustedTimeout: 'notion api timed out, will retry on the next tick',
+  FetchUntrustedHttp4xx: 'notion api returned 4xx, check integration access',
+  FetchUntrustedHttp5xx: 'notion api returned 5xx, will retry on the next tick',
+  FetchUntrustedSsrfReject:
+    'ssrf reject on notion fetch, operator action required',
+  FetchUntrustedMalformed: 'notion response malformed, see host log',
+  // Legacy unspecialized class (back-compat). Any caller still throwing the
+  // base class lands here so the agent does not leak a raw error blob to
+  // Slack. New code should pick a subclass above.
+  FetchUntrustedError: 'notion fetch failed, see host log',
+};
+
 // Prefix prepended to the rewritten 529 text. Must match the prefix
 // `formatErrorWrap` in `task-scheduler.ts` keys its wrap decision on, so the
 // per-task footer (run id, timestamp, runbook url) lands on the 529 reply.
@@ -76,28 +94,33 @@ function extractRetryCount(error: string): number | null {
 }
 
 /**
- * Replace the raw SDK error text on a 529-cascade output with a single
+ * Replace the raw SDK error text on a known error-class output with a single
  * human-readable line for Slack. The structured `error_class` is preserved so
- * action records and `task_runs` still carry `HttpStatus529` for grep and for
- * stable error-class aggregation. Other error classes pass through unchanged.
+ * action records and `task_runs` still carry the raw class for grep and for
+ * stable error-class aggregation. Unknown error classes pass through unchanged.
  *
- * sagri-tokyo/sagri-ai#247.
+ * sagri-tokyo/sagri-ai#247 (529 case), sagri-tokyo/sagri-ai#255 (fetch-untrusted
+ * subclasses).
  */
 export function mapContainerOutputForUser(
   output: ContainerOutput,
 ): ContainerOutput {
-  if (
-    output.status !== 'error' ||
-    output.error_class !== HTTP_STATUS_529_ERROR_CLASS
-  ) {
+  if (output.status !== 'error' || output.error_class === undefined) {
     return output;
   }
-  const count = extractRetryCount(output.error);
-  const body =
-    count === null
-      ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
-      : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
-  return { ...output, error: `${ERROR_PREFIX}${body}` };
+  if (output.error_class === HTTP_STATUS_529_ERROR_CLASS) {
+    const count = extractRetryCount(output.error);
+    const body =
+      count === null
+        ? 'anthropic upstream overloaded. will retry on the next scheduled tick.'
+        : `anthropic upstream overloaded after ${count} retries. will retry on the next scheduled tick.`;
+    return { ...output, error: `${ERROR_PREFIX}${body}` };
+  }
+  const fetchCopy = FETCH_UNTRUSTED_SLACK_MAP[output.error_class];
+  if (fetchCopy !== undefined) {
+    return { ...output, error: `${ERROR_PREFIX}${fetchCopy}` };
+  }
+  return output;
 }
 
 interface VolumeMount {

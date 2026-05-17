@@ -55,6 +55,42 @@ export class FetchUntrustedError extends Error {
   }
 }
 
+// Subclasses surface a specific failure mode so operators can tell apart
+// (a) a 30s wall-clock timeout from (b) a Notion 4xx auth failure from
+// (c) a host SSRF reject. The host emits `err.constructor.name` as
+// `error_class` in action records and the Slack mapping in
+// `container-runner.ts` rewrites the user-facing copy per subclass.
+// sagri-tokyo/sagri-ai#255.
+export class FetchUntrustedTimeout extends FetchUntrustedError {
+  constructor(message: string) {
+    super('fetch_failure', message);
+  }
+}
+
+export class FetchUntrustedHttp4xx extends FetchUntrustedError {
+  constructor(message: string, httpStatus: number) {
+    super('fetch_failure', message, httpStatus);
+  }
+}
+
+export class FetchUntrustedHttp5xx extends FetchUntrustedError {
+  constructor(message: string, httpStatus: number) {
+    super('fetch_failure', message, httpStatus);
+  }
+}
+
+export class FetchUntrustedSsrfReject extends FetchUntrustedError {
+  constructor(message: string) {
+    super('bad_url', message);
+  }
+}
+
+export class FetchUntrustedMalformed extends FetchUntrustedError {
+  constructor(message: string) {
+    super('fetch_failure', message);
+  }
+}
+
 export interface FetchUntrustedInput {
   url_or_id: string;
   source_type: FetchUntrustedSourceType;
@@ -175,14 +211,14 @@ export async function validatePublicHttpsUrl(
 
   if (isLiteralIpv4(parsed.hostname)) {
     if (isPrivateIpv4(parsed.hostname)) {
-      throw new FetchUntrustedError('bad_url', 'hostname is a private address');
+      throw new FetchUntrustedSsrfReject('hostname is a private address');
     }
     return { parsed, resolvedAddress: parsed.hostname };
   }
   const literalV6 = isLiteralIpv6(parsed.hostname);
   if (literalV6 !== null) {
     if (isPrivateIpv6(literalV6)) {
-      throw new FetchUntrustedError('bad_url', 'hostname is a private address');
+      throw new FetchUntrustedSsrfReject('hostname is a private address');
     }
     return { parsed, resolvedAddress: literalV6 };
   }
@@ -194,8 +230,7 @@ export async function validatePublicHttpsUrl(
     throw new FetchUntrustedError('bad_url', 'hostname could not be resolved');
   }
   if (isPrivateAddress(resolved.address, resolved.family)) {
-    throw new FetchUntrustedError(
-      'bad_url',
+    throw new FetchUntrustedSsrfReject(
       'hostname resolves to a private address',
     );
   }
@@ -235,7 +270,11 @@ function performHttpsGet(args: {
       servername: parsed.hostname,
     });
     const timer = setTimeout(() => {
-      req.destroy(new Error(`fetch timed out after ${FETCH_TIMEOUT_MS}ms`));
+      req.destroy(
+        new FetchUntrustedTimeout(
+          `fetch timed out after ${FETCH_TIMEOUT_MS}ms`,
+        ),
+      );
     }, FETCH_TIMEOUT_MS);
     req.on('response', (res) => {
       const responseHeaders = res.headers as Record<
@@ -314,11 +353,14 @@ export async function fetchWithRedirects(
       continue;
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new FetchUntrustedError(
-        'fetch_failure',
-        `target returned non-2xx status ${response.status}`,
-        response.status,
-      );
+      const message = `target returned non-2xx status ${response.status}`;
+      if (response.status >= 400 && response.status < 500) {
+        throw new FetchUntrustedHttp4xx(message, response.status);
+      }
+      if (response.status >= 500 && response.status < 600) {
+        throw new FetchUntrustedHttp5xx(message, response.status);
+      }
+      throw new FetchUntrustedError('fetch_failure', message, response.status);
     }
     return response;
   }
