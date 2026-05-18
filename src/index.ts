@@ -49,11 +49,7 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import {
-  GroupQueue,
-  abortActionRecord,
-  abortMessage,
-} from './group-queue.js';
+import { GroupQueue, abortActionRecord, abortMessage } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { handleInboundMessage } from './inbound.js';
 import { startIpcWatcher } from './ipc.js';

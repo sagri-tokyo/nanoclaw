@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import {
-  GroupQueue,
-  abortActionRecord,
-  abortMessage,
-} from './group-queue.js';
+import { GroupQueue, abortActionRecord, abortMessage } from './group-queue.js';
 import { validateActionRecord } from './logger.js';
 
 // Mock config to control concurrency limit
