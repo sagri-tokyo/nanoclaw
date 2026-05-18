@@ -4,7 +4,12 @@ import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { stopContainer } from './container-runtime.js';
-import { logger } from './logger.js';
+import {
+  ActionRecord,
+  hashFailureOutput,
+  hashPayload,
+  logger,
+} from './logger.js';
 
 export type AbortResult =
   | { stopped: true; containerName: string }
@@ -19,6 +24,62 @@ export function abortMessage(result: AbortResult): string {
     return 'no active task to abort';
   }
   return 'abort attempted but stop failed — see logs';
+}
+
+/**
+ * Build the activity-log record for a kill-switch abort attempt
+ * (sagri-tokyo/sagri-ai#259). The closed `ActionRecord` schema has no
+ * abort-specific outcome enum, so the three abort results map onto the
+ * existing `outcome` values and the `kill_switch` tool name, matching the
+ * `container_run` precedent where a no-op early exit is `rejected`:
+ *
+ * - `stopped`            -> outcome `ok`,       level `info`
+ * - `no_active_container`-> outcome `rejected`, level `warn`
+ * - `stop_failed`        -> outcome `error`,    level `error`
+ *
+ * `durationMs` is wall-clock measured by the caller (trigger receipt to
+ * confirmation sent), so the 30s PRD 1.4 SLO is observable in CloudWatch.
+ */
+export function abortActionRecord(
+  chatJid: string,
+  result: AbortResult,
+  durationMs: number,
+): ActionRecord {
+  const base = {
+    ts: new Date().toISOString(),
+    session_id: chatJid,
+    trigger: 'slack_abort',
+    trigger_source: chatJid,
+    tool: 'kill_switch',
+    inputs_hash: hashPayload({ jid: chatJid }),
+    duration_ms: durationMs,
+    group: chatJid,
+  };
+  if (result.stopped) {
+    return {
+      ...base,
+      level: 'info',
+      outputs_hash: hashPayload(result),
+      outcome: 'ok',
+      error_class: null,
+    };
+  }
+  if (result.reason === 'no_active_container') {
+    return {
+      ...base,
+      level: 'warn',
+      outputs_hash: hashFailureOutput({ error_class: 'NoActiveContainer' }),
+      outcome: 'rejected',
+      error_class: 'NoActiveContainer',
+    };
+  }
+  return {
+    ...base,
+    level: 'error',
+    outputs_hash: hashFailureOutput({ error_class: 'AbortStopFailed' }),
+    outcome: 'error',
+    error_class: 'AbortStopFailed',
+  };
 }
 
 interface QueuedTask {

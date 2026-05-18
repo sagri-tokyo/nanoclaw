@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
-import { GroupQueue, abortMessage } from './group-queue.js';
+import {
+  GroupQueue,
+  abortActionRecord,
+  abortMessage,
+} from './group-queue.js';
+import { validateActionRecord } from './logger.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -648,5 +653,82 @@ describe('abortMessage', () => {
     expect(abortMessage({ stopped: false, reason: 'stop_failed' })).toBe(
       'abort attempted but stop failed — see logs',
     );
+  });
+});
+
+describe('abortActionRecord', () => {
+  const jid = 'slack:C0123456789';
+
+  it('maps a stopped abort to a valid ok record', () => {
+    const record = abortActionRecord(
+      jid,
+      { stopped: true, containerName: 'nanoclaw-grp-abc' },
+      1234,
+    );
+    expect(() => validateActionRecord(record)).not.toThrow();
+    expect(record).toMatchObject({
+      level: 'info',
+      session_id: jid,
+      trigger: 'slack_abort',
+      trigger_source: jid,
+      tool: 'kill_switch',
+      duration_ms: 1234,
+      outcome: 'ok',
+      error_class: null,
+      group: jid,
+    });
+  });
+
+  it('maps no_active_container to a valid rejected record', () => {
+    const record = abortActionRecord(
+      jid,
+      { stopped: false, reason: 'no_active_container' },
+      42,
+    );
+    expect(() => validateActionRecord(record)).not.toThrow();
+    expect(record).toMatchObject({
+      level: 'warn',
+      trigger: 'slack_abort',
+      tool: 'kill_switch',
+      duration_ms: 42,
+      outcome: 'rejected',
+      error_class: 'NoActiveContainer',
+    });
+  });
+
+  it('maps stop_failed to a valid error record with error_class', () => {
+    const record = abortActionRecord(
+      jid,
+      { stopped: false, reason: 'stop_failed' },
+      7,
+    );
+    expect(() => validateActionRecord(record)).not.toThrow();
+    expect(record).toMatchObject({
+      level: 'error',
+      trigger: 'slack_abort',
+      tool: 'kill_switch',
+      duration_ms: 7,
+      outcome: 'error',
+      error_class: 'AbortStopFailed',
+    });
+  });
+
+  it('distinguishes outputs_hash per outcome arm', () => {
+    const stopped = abortActionRecord(
+      jid,
+      { stopped: true, containerName: 'nanoclaw-grp-abc' },
+      1,
+    ).outputs_hash;
+    const noActive = abortActionRecord(
+      jid,
+      { stopped: false, reason: 'no_active_container' },
+      1,
+    ).outputs_hash;
+    const stopFailed = abortActionRecord(
+      jid,
+      { stopped: false, reason: 'stop_failed' },
+      1,
+    ).outputs_hash;
+    expect(new Set([stopped, noActive, stopFailed]).size).toBe(3);
   });
 });

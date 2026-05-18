@@ -13,7 +13,7 @@ Twelve required fields, no unknown keys. See `ActionRecord` and `validateActionR
 | `ts` | string | ISO 8601 UTC timestamp; matches `new Date().toISOString()`. Millisecond precision optional. |
 | `level` | string | One of `info`, `warn`, `error`. Routes the line to stdout (`info`) or stderr (`warn`/`error`). |
 | `session_id` | string | Stable identifier for the unit of work. Per-surface convention — see the catalogue below. Non-empty. |
-| `trigger` | string | Top-level surface that started the work. Current values: `slack`, `scheduled`, `sub_request`, `ipc`. Non-empty. |
+| `trigger` | string | Top-level surface that started the work. Current values: `slack`, `slack_abort`, `scheduled`, `sub_request`, `ipc`. Non-empty. |
 | `trigger_source` | string | Where on the surface it came from: a Slack channel id, a task name, a redacted upstream path, an IPC client id. Non-empty. |
 | `tool` | string | The action being performed. See the catalogue below. Non-empty. |
 | `inputs_hash` | string | sha256 of the canonicalised input. 64-char lowercase hex. |
@@ -68,6 +68,7 @@ Snapshot of action emissions on `sagri-tokyo/nanoclaw` as of this document. The 
 | --- | --- | --- | --- |
 | `slack` / `message_handle` | `src/index.ts` | Claude session id, falling back to the group folder | One per inbound Slack message after the agent run completes. `outputs_hash` aggregates streamed agent results. |
 | `slack` / `message_send` | `src/channels/slack.ts` | Slack channel JID | One per outbound Slack post attempt: the initial-send success path (`outcome=ok`) and the failed-send-then-queued path (`outcome=error`) both emit. The later background queue-flush retry does not emit a separate record. |
+| `slack_abort` / `kill_switch` | `src/index.ts` (`handleAbort`), record built by `abortActionRecord` in `src/group-queue.ts` | Slack channel JID | One per kill-switch abort that reaches `queue.abort` (sagri-tokyo/sagri-ai#129). `stopped` -> `outcome=ok`; `no_active_container` -> `outcome=rejected`, `error_class=NoActiveContainer`; `stop_failed` -> `outcome=error`, `error_class=AbortStopFailed`. `duration_ms` is wall-clock from trigger receipt to confirmation sent, the PRD 1.4 30s SLO signal. The no-channel early return does not emit (no `AbortResult`). |
 | `scheduled` / `container_run` | `src/task-scheduler.ts` | Scheduled task id | One per `runTask` invocation. Covers early exits (invalid folder, group not found — `outcome=rejected`) and the post-agent path (`outcome=ok`/`error`). |
 | `sub_request` / `anthropic_api` | `src/credential-proxy.ts` | Per-request UUID | One per proxied upstream call. Success, upstream HTTP error (`error_class=HttpStatus<n>`), and response stream error all emit. `trigger_source` is the redacted request path. |
 | `sub_request` / `reader_rpc` | `src/reader-rpc.ts` | Chat JID, falling back to the reader source name | One per `read_untrusted` call. |

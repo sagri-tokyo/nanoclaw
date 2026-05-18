@@ -49,7 +49,11 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue, abortMessage } from './group-queue.js';
+import {
+  GroupQueue,
+  abortActionRecord,
+  abortMessage,
+} from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { handleInboundMessage } from './inbound.js';
 import { startIpcWatcher } from './ipc.js';
@@ -656,12 +660,15 @@ async function main(): Promise<void> {
   // docker-stop the active container for the channel and posts a single
   // confirmation back through the channel that delivered the trigger.
   async function handleAbort(chatJid: string, _msg: NewMessage): Promise<void> {
+    const startedAt = Date.now();
     const channel = findChannel(channels, chatJid);
     if (!channel) {
       logger.warn({ chatJid }, 'Abort intent: no channel owns JID');
       return;
     }
-    await channel.sendMessage(chatJid, abortMessage(queue.abort(chatJid)));
+    const result = queue.abort(chatJid);
+    await channel.sendMessage(chatJid, abortMessage(result));
+    logger.action(abortActionRecord(chatJid, result, Date.now() - startedAt));
   }
 
   // Channel callbacks (shared by all channels)
