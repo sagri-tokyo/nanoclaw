@@ -64,6 +64,35 @@ export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /**
+   * Open-channels mode (opt-in, see SLACK_OPEN_CHANNELS). When supplied, an
+   * unregistered channel is auto-registered on the first @mention so the
+   * normal pipeline governs it; returns true if registered after the call.
+   * Omitted ⇒ unregistered channels are dropped (allowlist-by-registration).
+   */
+  autoRegisterGroup?: (jid: string) => boolean;
+}
+
+/**
+ * Decide whether a Slack message for `jid` should enter the pipeline.
+ *
+ * Registered channels always proceed. In open-channels mode an *unregistered*
+ * channel is admitted only when the bot is @mentioned AND auto-registration
+ * succeeds — after which it is a normal registered group, so every downstream
+ * gate (notably the sender-allowlist in inbound.ts) applies to it exactly as
+ * to any other channel. With no `autoRegisterGroup` callback (the default),
+ * unregistered channels are dropped, preserving allowlist-by-registration.
+ */
+export function shouldDeliver(
+  isRegistered: boolean,
+  mentioned: boolean,
+  jid: string,
+  autoRegisterGroup?: (jid: string) => boolean,
+): boolean {
+  if (isRegistered) return true;
+  if (!mentioned) return false;
+  if (!autoRegisterGroup) return false;
+  return autoRegisterGroup(jid);
 }
 
 export class SlackChannel implements Channel {
@@ -139,9 +168,23 @@ export class SlackChannel implements Channel {
       // Always report metadata for group discovery
       this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
 
-      // Only deliver full messages for registered groups
+      // Deliver to the pipeline only for registered groups. In open-channels
+      // mode (autoRegisterGroup supplied) an unregistered channel is
+      // auto-registered on the first @mention, after which the normal pipeline
+      // — including the sender-allowlist gate in inbound.ts — governs it.
       const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+      const mentioned =
+        !!this.botUserId && msg.text.includes(`<@${this.botUserId}>`);
+      if (
+        !shouldDeliver(
+          Boolean(groups[jid]),
+          mentioned,
+          jid,
+          this.opts.autoRegisterGroup,
+        )
+      ) {
+        return;
+      }
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 

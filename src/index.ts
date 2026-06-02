@@ -6,6 +6,7 @@ import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   DEFAULT_TRIGGER,
+  SLACK_OPEN_CHANNELS,
   getTriggerPattern,
   GROUPS_DIR,
   IDLE_TIMEOUT,
@@ -683,6 +684,24 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    // Slack open-channels mode (opt-in via SLACK_OPEN_CHANNELS): auto-register
+    // an unregistered channel on the first @mention with a per-channel folder
+    // and mention-required trigger, so it becomes a normal group the
+    // sender-allowlist governs. Only the Slack adapter consumes this opt.
+    autoRegisterGroup: SLACK_OPEN_CHANNELS
+      ? (jid: string): boolean => {
+          if (registeredGroups[jid]) return true;
+          const channelId = jid.replace(/^slack:/, '');
+          registerGroup(jid, {
+            name: channelId,
+            folder: `slack_auto_${channelId.toLowerCase()}`,
+            trigger: DEFAULT_TRIGGER,
+            added_at: new Date().toISOString(),
+            requiresTrigger: true,
+          });
+          return Boolean(registeredGroups[jid]);
+        }
+      : undefined,
   };
 
   // Create and connect all registered channels.
