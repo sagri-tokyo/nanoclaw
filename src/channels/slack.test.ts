@@ -9,6 +9,13 @@ vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Jonesy',
   TRIGGER_PATTERN: /^@Jonesy\b/i,
+  // File ingestion off here so existing tests assert unchanged behaviour;
+  // the dedicated slack-files.test.ts exercises the flag-on path.
+  SLACK_FILE_INGESTION: false,
+  SLACK_FILE_MAX_BYTES: 262144,
+  SLACK_FILE_MAX_COUNT: 10,
+  SLACK_FILE_MAX_ROWS: 1000,
+  SLACK_FILE_MAX_PROMPT_CHARS: 120000,
 }));
 
 // Mock logger — pass through real hashPayload + a real action emitter so any

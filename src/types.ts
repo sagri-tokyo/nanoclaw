@@ -42,6 +42,26 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
+// Reference to a Slack file attachment. Metadata only — never bytes. A ref may
+// start incomplete (e.g. just `{ id }` for Slack Connect `file_access:
+// "check_file_info"`); the Slack adapter resolves the rest via files.info at
+// download time. Persisted as JSON in `messages.files` (sagri-tokyo/sagri-ai#264).
+export interface FileRef {
+  id: string;
+  name?: string;
+  mimetype?: string;
+  size?: number;
+  url_private_download?: string;
+  file_access?: string;
+}
+
+// The set of file refs attached to one message, plus a count of refs dropped at
+// capture time when an event exceeded the per-message cap.
+export interface MessageFileBundle {
+  refs: FileRef[];
+  omitted_count?: number;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -51,6 +71,7 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  files?: MessageFileBundle;
   // True when the source is a 1:1 DM (Slack `channel_type === 'im'`,
   // WhatsApp/Telegram personal chats). Channels populate this so the
   // host-side abort-trigger parser can branch on bare-verb acceptance.
@@ -115,6 +136,12 @@ export interface Channel {
     threadId: string,
     limit: number,
   ): Promise<NewMessage[]>;
+  // Optional: download one attached file's bytes (resolving incomplete refs via
+  // the platform API as needed). Returns raw bytes plus the resolved ref/mime;
+  // the host sanitizes before anything reaches the actor. Slack-only for now.
+  fetchFileContent?(
+    file: FileRef,
+  ): Promise<{ bytes: Buffer; file: FileRef; mimetype: string }>;
 }
 
 // Callback type that channels use to deliver inbound messages

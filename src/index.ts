@@ -19,6 +19,7 @@ import {
 import { startCredentialProxy } from './credential-proxy.js';
 import { startReaderRpc } from './reader-rpc.js';
 import { judgeShouldReply } from './reader.js';
+import { buildPromptWithOptionalFiles } from './file-prompt.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -429,14 +430,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Build the prompt: full laundered thread when available (original question
-  // + the bot's own prior replies), else the missed-message batch.
-  const prompt =
+  // + the bot's own prior replies), else the missed-message batch. Append any
+  // laundered file attachments (opt-in; no-op when the flag is off).
+  const promptMessages =
     threadMessages && threadMessages.length > 0
-      ? await formatMessagesViaReader(
-          mergeThreadContext(threadMessages, missedMessages),
-          TIMEZONE,
-        )
-      : await formatMessagesViaReader(missedMessages, TIMEZONE);
+      ? mergeThreadContext(threadMessages, missedMessages)
+      : missedMessages;
+  const basePrompt = await formatMessagesViaReader(promptMessages, TIMEZONE);
+  const prompt = await buildPromptWithOptionalFiles(
+    promptMessages,
+    channel,
+    basePrompt,
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -758,8 +763,13 @@ async function startMessageLoop(): Promise<void> {
             messagesToSend,
             TIMEZONE,
           );
+          const piped = await buildPromptWithOptionalFiles(
+            messagesToSend,
+            channel,
+            formatted,
+          );
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, piped)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',

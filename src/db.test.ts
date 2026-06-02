@@ -10,6 +10,7 @@ import {
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  parseFilesColumn,
   getRecentTaskRunStatuses,
   getTaskById,
   logTaskRun,
@@ -105,6 +106,85 @@ describe('thread_id + botRepliedInThread', () => {
       thread_id: 'T9',
     });
     expect(botRepliedInThread('slack:C2', 'T9', 'sagri-ai')).toBe(false);
+  });
+});
+
+// --- files (MessageFileBundle) persistence + parseFilesColumn ---
+
+describe('files bundle persistence', () => {
+  const bundle = {
+    refs: [
+      { id: 'F1', name: 'a.csv', mimetype: 'text/csv', size: 10 },
+      { id: 'F2' },
+    ],
+    omitted_count: 1,
+  };
+
+  it('round-trips a files bundle through getMessagesSince', () => {
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'mf1',
+      chat_jid: 'slack:C1',
+      sender: 'U1',
+      sender_name: 'Alice',
+      content: '@bot here are files',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      files: bundle,
+    });
+    const msgs = getMessagesSince('slack:C1', '', 'sagri-ai', 10);
+    expect(msgs[0].files).toEqual(bundle);
+  });
+
+  it('round-trips a files bundle through getNewMessages', () => {
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'mf2',
+      chat_jid: 'slack:C1',
+      sender: 'U1',
+      sender_name: 'Alice',
+      content: '@bot file',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      files: {
+        refs: [{ id: 'F3', name: 'b.json', mimetype: 'application/json' }],
+      },
+    });
+    const { messages } = getNewMessages(['slack:C1'], '', 'sagri-ai', 10);
+    expect(messages[0].files?.refs[0]).toMatchObject({ id: 'F3' });
+  });
+
+  it('leaves files undefined when none were attached', () => {
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'mf3',
+      chat_jid: 'slack:C1',
+      sender: 'U1',
+      sender_name: 'Alice',
+      content: 'no files',
+      timestamp: '2024-01-01T00:00:03.000Z',
+    });
+    const msgs = getMessagesSince('slack:C1', '', 'sagri-ai', 10);
+    expect(msgs[0].files).toBeUndefined();
+  });
+});
+
+describe('parseFilesColumn', () => {
+  it('returns undefined for null/empty/malformed/non-array', () => {
+    expect(parseFilesColumn(null)).toBeUndefined();
+    expect(parseFilesColumn('')).toBeUndefined();
+    expect(parseFilesColumn('{not json')).toBeUndefined();
+    expect(parseFilesColumn('[1,2,3]')).toBeUndefined();
+    expect(parseFilesColumn(JSON.stringify({ nope: 1 }))).toBeUndefined();
+  });
+
+  it('drops refs without a string id and keeps valid ones', () => {
+    const raw = JSON.stringify({
+      refs: [{ id: 'F1', name: 'ok.csv' }, { name: 'noid' }, { id: 42 }],
+      omitted_count: 2,
+    });
+    const parsed = parseFilesColumn(raw);
+    expect(parsed?.refs).toHaveLength(1);
+    expect(parsed?.refs[0]).toMatchObject({ id: 'F1', name: 'ok.csv' });
+    expect(parsed?.omitted_count).toBe(2);
   });
 });
 

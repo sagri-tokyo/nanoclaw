@@ -270,7 +270,11 @@ export async function validatePublicHttpsUrl(
 
 interface FetchedResponse {
   status: number;
+  // UTF-8 decode of the body, kept for existing callers (web/GitHub/Notion).
   body: string;
+  // Raw bytes, for callers that must decode themselves (e.g. Slack files that
+  // may be Shift-JIS). Additive — existing callers ignore it.
+  bodyBytes: Buffer;
   headers: Record<string, string | string[] | undefined>;
   finalUrl: URL;
 }
@@ -279,8 +283,10 @@ function performHttpsGet(args: {
   validated: ValidatedUrl;
   headers: Record<string, string>;
   deps: Required<Pick<FetchUntrustedDeps, 'httpsRequestFactory'>>;
+  maxBytes?: number;
 }): Promise<FetchedResponse> {
   const { validated, headers, deps } = args;
+  const maxBytes = args.maxBytes ?? MAX_BODY_BYTES;
   const { parsed, resolvedAddress } = validated;
   return new Promise((resolve, reject) => {
     // Bracket IPv6 literals when handing them to Node's http(s) layer.
@@ -318,7 +324,7 @@ function performHttpsGet(args: {
       res.on('data', (chunk: Buffer) => {
         if (aborted) return;
         total += chunk.length;
-        if (total > MAX_BODY_BYTES) {
+        if (total > maxBytes) {
           aborted = true;
           req.destroy(new Error('response body exceeded cap'));
           clearTimeout(timer);
@@ -330,9 +336,11 @@ function performHttpsGet(args: {
       res.on('end', () => {
         if (aborted) return;
         clearTimeout(timer);
+        const buf = Buffer.concat(chunks);
         resolve({
           status: res.statusCode ?? 0,
-          body: Buffer.concat(chunks).toString('utf-8'),
+          body: buf.toString('utf-8'),
+          bodyBytes: buf,
           headers: responseHeaders,
           finalUrl: parsed,
         });
@@ -354,18 +362,53 @@ interface FollowRedirectArgs {
   url: string;
   headers: Record<string, string>;
   deps: Required<FetchUntrustedDeps>;
+  // Override the 256 KiB default body cap (e.g. a smaller Slack file cap).
+  maxBytes?: number;
+}
+
+// Headers that carry credentials and must not follow a cross-origin redirect.
+const SENSITIVE_REDIRECT_HEADERS: ReadonlySet<string> = new Set([
+  'authorization',
+  'cookie',
+  'x-api-key',
+]);
+
+function originOfUrl(u: string): string | null {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return null;
+  }
+}
+
+function stripSensitiveHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (SENSITIVE_REDIRECT_HEADERS.has(k.toLowerCase())) continue;
+    out[k] = v;
+  }
+  return out;
 }
 
 export async function fetchWithRedirects(
   args: FollowRedirectArgs,
 ): Promise<FetchedResponse> {
-  const { headers, deps } = args;
+  const { deps, maxBytes } = args;
   let currentUrl = args.url;
+  let currentHeaders = { ...args.headers };
+  const initialOrigin = originOfUrl(args.url);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const validated = await validatePublicHttpsUrl(currentUrl, deps);
     let response: FetchedResponse;
     try {
-      response = await performHttpsGet({ validated, headers, deps });
+      response = await performHttpsGet({
+        validated,
+        headers: currentHeaders,
+        deps,
+        maxBytes,
+      });
     } catch (err) {
       if (err instanceof FetchUntrustedError) throw err;
       const message =
@@ -381,6 +424,10 @@ export async function fetchWithRedirects(
         );
       }
       currentUrl = new URL(location, currentUrl).toString();
+      // Drop credentials once we leave the origin they were issued for.
+      if (originOfUrl(currentUrl) !== initialOrigin) {
+        currentHeaders = stripSensitiveHeaders(currentHeaders);
+      }
       continue;
     }
     if (response.status < 200 || response.status >= 300) {
