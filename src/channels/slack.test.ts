@@ -95,7 +95,12 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { SlackChannel, SlackChannelOpts, splitForSlack } from './slack.js';
+import {
+  SlackChannel,
+  SlackChannelOpts,
+  splitForSlack,
+  shouldDeliver,
+} from './slack.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import type { NewMessage } from '../types.js';
@@ -154,6 +159,36 @@ async function triggerMessageEvent(
 }
 
 // --- Tests ---
+
+describe('shouldDeliver (open-channels gate)', () => {
+  it('always delivers to a registered group, mention or not', () => {
+    expect(shouldDeliver(true, false, 'slack:C1')).toBe(true);
+    expect(shouldDeliver(true, false, 'slack:C1', () => true)).toBe(true);
+  });
+
+  it('drops an unregistered channel when no auto-register callback is set', () => {
+    expect(shouldDeliver(false, true, 'slack:C2')).toBe(false);
+    expect(shouldDeliver(false, false, 'slack:C2')).toBe(false);
+  });
+
+  it('does not auto-register an unregistered channel without an @mention', () => {
+    const auto = vi.fn(() => true);
+    expect(shouldDeliver(false, false, 'slack:C3', auto)).toBe(false);
+    expect(auto).not.toHaveBeenCalled();
+  });
+
+  it('auto-registers on @mention and delivers when registration succeeds', () => {
+    const auto = vi.fn(() => true);
+    expect(shouldDeliver(false, true, 'slack:C4', auto)).toBe(true);
+    expect(auto).toHaveBeenCalledWith('slack:C4');
+  });
+
+  it('drops when auto-registration fails', () => {
+    const auto = vi.fn(() => false);
+    expect(shouldDeliver(false, true, 'slack:C5', auto)).toBe(false);
+    expect(auto).toHaveBeenCalledWith('slack:C5');
+  });
+});
 
 describe('SlackChannel', () => {
   beforeEach(() => {

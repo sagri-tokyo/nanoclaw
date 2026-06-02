@@ -10,6 +10,7 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'SLACK_OPEN_CHANNELS',
   'TZ',
 ]);
 
@@ -18,6 +19,12 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+// Opt-in: when true, a Slack channel the bot is a member of is auto-registered
+// as a conversation group on the first @mention (see SlackChannel), instead of
+// requiring an explicit `register` step. Default false preserves the prior
+// allowlist-by-registration behaviour.
+export const SLACK_OPEN_CHANNELS =
+  (process.env.SLACK_OPEN_CHANNELS || envConfig.SLACK_OPEN_CHANNELS) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
