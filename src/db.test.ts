@@ -92,19 +92,19 @@ describe('thread_id + botRepliedInThread', () => {
     expect(botRepliedInThread('slack:C1', 'T2', 'sagri-ai')).toBe(false);
   });
 
-  it('matches the "<assistant>:" content prefix as a pre-migration backstop', () => {
+  it('does not treat user-authored assistant prefixes as bot replies', () => {
     storeChatMetadata('slack:C2', '2024-01-01T00:00:00.000Z');
     storeMessage({
-      id: 'b2',
+      id: 'u2',
       chat_jid: 'slack:C2',
-      sender: 'BOT',
-      sender_name: 'someone',
+      sender: 'U2',
+      sender_name: 'Mallory',
       content: 'sagri-ai: hi there',
       timestamp: '2024-01-01T00:00:01.000Z',
       is_bot_message: false,
       thread_id: 'T9',
     });
-    expect(botRepliedInThread('slack:C2', 'T9', 'sagri-ai')).toBe(true);
+    expect(botRepliedInThread('slack:C2', 'T9', 'sagri-ai')).toBe(false);
   });
 });
 

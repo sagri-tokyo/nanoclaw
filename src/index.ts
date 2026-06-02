@@ -81,6 +81,8 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const activeThreadByChatJid = new Map<string, string | undefined>();
+const queuedThreadFollowupCandidates = new Map<string, string>();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -194,6 +196,56 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+interface ThreadFollowupCandidate {
+  threadId: string;
+}
+
+interface ExplicitTriggerMessage {
+  threadId?: string;
+}
+
+function isAllowedTriggerMessage(
+  chatJid: string,
+  msg: NewMessage,
+  allowlistCfg: ReturnType<typeof loadSenderAllowlist>,
+): boolean {
+  return (
+    msg.is_from_me === true ||
+    isTriggerAllowed(chatJid, msg.sender, allowlistCfg)
+  );
+}
+
+function isEligibleHumanMessage(
+  chatJid: string,
+  msg: NewMessage,
+  allowlistCfg: ReturnType<typeof loadSenderAllowlist>,
+): boolean {
+  return (
+    msg.is_from_me !== true &&
+    msg.is_bot_message !== true &&
+    isTriggerAllowed(chatJid, msg.sender, allowlistCfg)
+  );
+}
+
+function findExplicitTriggerMessage(
+  chatJid: string,
+  msgs: NewMessage[],
+  group: RegisteredGroup,
+): ExplicitTriggerMessage | null {
+  const triggerPattern = getTriggerPattern(group.trigger);
+  const allowlistCfg = loadSenderAllowlist();
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const message = msgs[i];
+    if (
+      triggerPattern.test(message.content.trim()) &&
+      isAllowedTriggerMessage(chatJid, message, allowlistCfg)
+    ) {
+      return { threadId: message.thread_id };
+    }
+  }
+  return null;
+}
+
 /**
  * Is the newest allow-listed human message in `msgs` a reply in a thread the
  * bot has already posted in? Such a no-mention follow-up is a candidate for
@@ -203,13 +255,12 @@ export function _setRegisteredGroups(
 function threadFollowupCandidate(
   chatJid: string,
   msgs: NewMessage[],
-): { threadId: string } | null {
+): ThreadFollowupCandidate | null {
   if (!SLACK_THREAD_FOLLOWUPS) return null;
   const allowlistCfg = loadSenderAllowlist();
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m.is_from_me || m.is_bot_message) continue;
-    if (!isTriggerAllowed(chatJid, m.sender, allowlistCfg)) continue;
+    if (!isEligibleHumanMessage(chatJid, m, allowlistCfg)) continue;
     if (
       m.thread_id &&
       botRepliedInThread(chatJid, m.thread_id, ASSISTANT_NAME)
@@ -217,6 +268,24 @@ function threadFollowupCandidate(
       return { threadId: m.thread_id };
     }
     return null; // newest eligible message isn't a bot-thread follow-up
+  }
+  return null;
+}
+
+function consumeQueuedThreadFollowupCandidate(
+  chatJid: string,
+  msgs: NewMessage[],
+): ThreadFollowupCandidate | null {
+  const threadId = queuedThreadFollowupCandidates.get(chatJid);
+  if (!threadId) return null;
+
+  queuedThreadFollowupCandidates.delete(chatJid);
+
+  const allowlistCfg = loadSenderAllowlist();
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!isEligibleHumanMessage(chatJid, m, allowlistCfg)) continue;
+    return m.thread_id === threadId ? { threadId } : null;
   }
   return null;
 }
@@ -245,7 +314,8 @@ async function runShouldReplyJudge(
         chatJid,
         threadId,
         should_reply: verdict.should_reply,
-        reason: verdict.reason,
+        reason_hash: hashPayload(verdict.reason),
+        reason_length: verdict.reason.length,
       },
       'Thread follow-up judge verdict',
     );
@@ -300,37 +370,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (missedMessages.length === 0) return true;
 
   // Explicit @mention trigger (today's behaviour). Main / no-trigger groups
-  // always proceed.
-  let triggered = isMainGroup || group.requiresTrigger === false;
-  if (!triggered) {
-    const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
-    triggered = missedMessages.some(
-      (m) =>
-        triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-  }
+  // always proceed, but thread targeting only follows the actual trigger.
+  const explicitTrigger = findExplicitTriggerMessage(
+    chatJid,
+    missedMessages,
+    group,
+  );
+  const triggered =
+    isMainGroup || group.requiresTrigger === false || explicitTrigger !== null;
 
-  // Determine the thread to act in: an explicit trigger uses the newest missed
-  // message's thread; a no-mention follow-up uses the candidate's thread.
+  // Determine the thread to act in: an explicit trigger uses its own thread; a
+  // no-mention follow-up uses the candidate's thread. Thread context is
+  // opt-in so default-off explicit mentions keep the existing prompt shape.
   let targetThreadId: string | undefined;
-  if (triggered) {
-    for (let i = missedMessages.length - 1; i >= 0; i--) {
-      if (missedMessages[i].thread_id) {
-        targetThreadId = missedMessages[i].thread_id;
-        break;
-      }
-    }
-  } else {
-    const candidate = threadFollowupCandidate(chatJid, missedMessages);
+  let useThreadContext = false;
+  if (SLACK_THREAD_FOLLOWUPS && explicitTrigger?.threadId) {
+    targetThreadId = explicitTrigger.threadId;
+    useThreadContext = true;
+  } else if (!triggered) {
+    const candidate =
+      consumeQueuedThreadFollowupCandidate(chatJid, missedMessages) ??
+      threadFollowupCandidate(chatJid, missedMessages);
     if (!candidate) return true; // not a trigger and not a follow-up — keep as context
     targetThreadId = candidate.threadId;
+    useThreadContext = true;
   }
 
   // Fetch thread context once (used by the judge and/or the prompt).
   let threadMessages: NewMessage[] | null = null;
-  if (targetThreadId && channel.fetchThread) {
+  if (useThreadContext && targetThreadId && channel.fetchThread) {
     try {
       const t = await channel.fetchThread(
         chatJid,
@@ -405,79 +473,89 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.debug({ group: group.name }, `Agent output: ${raw.length} chars`);
-      aggregatedOutput += raw;
-      if (text) {
-        await channel.sendMessage(
-          chatJid,
-          formatErrorWrap(text, { runId: interactiveRunId, now: new Date() }),
-          targetThreadId ? { threadId: targetThreadId } : undefined,
+  activeThreadByChatJid.set(chatJid, targetThreadId);
+  try {
+    const output = await runAgent(group, prompt, chatJid, async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.debug(
+          { group: group.name },
+          `Agent output: ${raw.length} chars`,
         );
-        outputSentToUser = true;
+        aggregatedOutput += raw;
+        if (text) {
+          await channel.sendMessage(
+            chatJid,
+            formatErrorWrap(text, {
+              runId: interactiveRunId,
+              now: new Date(),
+            }),
+            targetThreadId ? { threadId: targetThreadId } : undefined,
+          );
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    });
 
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+    const sessionId = sessions[group.folder] || group.folder;
+    const failed = output === 'error' || hadError;
+    logger.action({
+      ts: new Date().toISOString(),
+      level: failed ? 'error' : 'info',
+      session_id: sessionId,
+      trigger: 'slack',
+      trigger_source: chatJid,
+      tool: 'message_handle',
+      inputs_hash: inputsHash,
+      outputs_hash: hashPayload(aggregatedOutput),
+      duration_ms: Date.now() - actionStart,
+      outcome: failed ? 'error' : 'ok',
+      error_class: failed ? 'AgentError' : null,
+      group: group.folder,
+    });
 
-  const sessionId = sessions[group.folder] || group.folder;
-  const failed = output === 'error' || hadError;
-  logger.action({
-    ts: new Date().toISOString(),
-    level: failed ? 'error' : 'info',
-    session_id: sessionId,
-    trigger: 'slack',
-    trigger_source: chatJid,
-    tool: 'message_handle',
-    inputs_hash: inputsHash,
-    outputs_hash: hashPayload(aggregatedOutput),
-    duration_ms: Date.now() - actionStart,
-    outcome: failed ? 'error' : 'ok',
-    error_class: failed ? 'AgentError' : null,
-    group: group.folder,
-  });
-
-  if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
+    if (output === 'error' || hadError) {
+      // If we already sent output to the user, don't roll back the cursor —
+      // the user got their response and re-processing would send duplicates.
+      if (outputSentToUser) {
+        logger.warn(
+          { group: group.name },
+          'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        );
+        return true;
+      }
+      // Roll back cursor so retries can re-process these messages
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
       logger.warn(
         { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+        'Agent error, rolled back message cursor for retry',
       );
-      return true;
+      return false;
     }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
-    saveState();
-    logger.warn(
-      { group: group.name },
-      'Agent error, rolled back message cursor for retry',
-    );
-    return false;
-  }
 
-  return true;
+    return true;
+  } finally {
+    activeThreadByChatJid.delete(chatJid);
+    await channel.setTyping?.(chatJid, false);
+    if (idleTimer) clearTimeout(idleTimer);
+  }
 }
 
 async function runAgent(
@@ -630,28 +708,38 @@ async function startMessageLoop(): Promise<void> {
 
           const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const explicitTrigger = findExplicitTriggerMessage(
+            chatJid,
+            groupMessages,
+            group,
+          );
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) {
+            if (!explicitTrigger) {
               // No explicit @mention. In thread-followups mode, a reply in a
               // thread the bot is part of is a candidate — hand it to
               // processGroupMessages (which runs the should-reply judge and
               // assembles thread context). Never pipe a non-explicit batch to
               // an active container.
-              if (threadFollowupCandidate(chatJid, groupMessages)) {
+              const candidate = threadFollowupCandidate(chatJid, groupMessages);
+              if (candidate) {
+                queuedThreadFollowupCandidates.set(chatJid, candidate.threadId);
                 queue.enqueueMessageCheck(chatJid);
               }
+              continue;
+            }
+          }
+
+          if (SLACK_THREAD_FOLLOWUPS && activeThreadByChatJid.has(chatJid)) {
+            const activeThreadId = activeThreadByChatJid.get(chatJid);
+            const hasDifferentThread = groupMessages.some(
+              (m) => m.thread_id !== activeThreadId,
+            );
+            if (hasDifferentThread) {
+              queue.enqueueMessageCheck(chatJid);
               continue;
             }
           }

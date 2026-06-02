@@ -145,16 +145,18 @@ export class SlackChannel implements Channel {
       const groups = this.opts.registeredGroups();
       if (!groups[jid]) return;
 
-      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
+      const userId = msg.user;
+      const botId = msg.bot_id;
+      const isSlackBotMessage = !!botId;
+      const isOwnBotMessage = !!this.botUserId && userId === this.botUserId;
 
       let senderName: string;
-      if (isBotMessage) {
+      if (isOwnBotMessage) {
         senderName = ASSISTANT_NAME;
+      } else if (userId) {
+        senderName = (await this.resolveUserName(userId)) || userId;
       } else {
-        senderName =
-          (msg.user ? await this.resolveUserName(msg.user) : undefined) ||
-          msg.user ||
-          'unknown';
+        senderName = botId || 'unknown';
       }
 
       // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
@@ -165,7 +167,7 @@ export class SlackChannel implements Channel {
       // `^@<NAME>\s+<rest>` shape the kill-switch parser requires
       // (sagri-tokyo/sagri-ai#128).
       let content = msg.text;
-      if (this.botUserId && !isBotMessage) {
+      if (this.botUserId && !isOwnBotMessage && !isSlackBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
         if (
           content.includes(mentionPattern) &&
@@ -183,12 +185,12 @@ export class SlackChannel implements Channel {
       this.opts.onMessage(jid, {
         id: msg.ts,
         chat_jid: jid,
-        sender: msg.user || msg.bot_id || '',
+        sender: userId || botId || '',
         sender_name: senderName,
         content,
         timestamp,
-        is_from_me: isBotMessage,
-        is_bot_message: isBotMessage,
+        is_from_me: isOwnBotMessage,
+        is_bot_message: isOwnBotMessage,
         is_dm: !isGroup,
         thread_id: threadTs,
       });
@@ -303,19 +305,34 @@ export class SlackChannel implements Channel {
       ts: threadId,
       limit,
     });
+    const replyMessages = result.messages || [];
+    const uniqueUserIds = new Set<string>();
+    for (const m of replyMessages) {
+      const userId = (m as { user?: string }).user;
+      const isOwnBot = !!this.botUserId && userId === this.botUserId;
+      if (userId && !isOwnBot) uniqueUserIds.add(userId);
+    }
+
+    const resolvedNames = new Map<string, string | undefined>();
+    await Promise.all(
+      [...uniqueUserIds].map(async (userId) => {
+        resolvedNames.set(userId, await this.resolveUserName(userId));
+      }),
+    );
+
     const out: NewMessage[] = [];
-    for (const m of result.messages || []) {
+    for (const m of replyMessages) {
       const ts = typeof m.ts === 'string' ? m.ts : '';
       const text = typeof m.text === 'string' ? m.text : '';
       if (!ts || !text) continue;
       const userId = (m as { user?: string }).user;
       const botId = (m as { bot_id?: string }).bot_id;
-      const isBot = !!botId || (!!this.botUserId && userId === this.botUserId);
-      const senderName = isBot
+      const isOwnBot = !!this.botUserId && userId === this.botUserId;
+      const senderName = isOwnBot
         ? ASSISTANT_NAME
-        : (userId ? await this.resolveUserName(userId) : undefined) ||
-          userId ||
-          'unknown';
+        : userId
+          ? resolvedNames.get(userId) || userId
+          : botId || 'unknown';
       out.push({
         id: ts,
         chat_jid: jid,
@@ -323,8 +340,8 @@ export class SlackChannel implements Channel {
         sender_name: senderName,
         content: text,
         timestamp: new Date(parseFloat(ts) * 1000).toISOString(),
-        is_from_me: isBot,
-        is_bot_message: isBot,
+        is_from_me: isOwnBot,
+        is_bot_message: isOwnBot,
         thread_id: threadId,
       });
     }

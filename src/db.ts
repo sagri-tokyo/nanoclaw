@@ -441,21 +441,22 @@ export function getLastBotMessageTimestamp(
 /**
  * Has the bot already posted in this thread? Used to decide whether a
  * no-mention reply in the thread is a candidate for the should-reply judge.
- * Mirrors the bot-detection in getLastBotMessageTimestamp (is_bot_message flag
- * OR the "<assistant>:" content prefix, as a pre-migration backstop).
+ * This intentionally trusts only the structured own-bot flag. A content prefix
+ * is not enough here because user-authored messages can start with the
+ * assistant name.
  */
 export function botRepliedInThread(
   chatJid: string,
   threadId: string,
-  botPrefix: string,
+  _botPrefix: string,
 ): boolean {
   const row = db
     .prepare(
       `SELECT 1 FROM messages
-       WHERE chat_jid = ? AND thread_id = ? AND (is_bot_message = 1 OR content LIKE ?)
+       WHERE chat_jid = ? AND thread_id = ? AND is_bot_message = 1
        LIMIT 1`,
     )
-    .get(chatJid, threadId, `${botPrefix}:%`);
+    .get(chatJid, threadId);
   return row !== undefined;
 }
 
