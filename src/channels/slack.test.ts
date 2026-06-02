@@ -63,6 +63,7 @@ vi.mock('@slack/bolt', () => ({
           channels: [],
           response_metadata: {},
         }),
+        replies: vi.fn().mockResolvedValue({ messages: [] }),
       },
       users: {
         info: vi.fn().mockResolvedValue({
@@ -1140,6 +1141,74 @@ describe('SlackChannel', () => {
       await expect(
         channel.setTyping('slack:C0123456789', false),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  // --- thread support (followups) ---
+
+  describe('thread support', () => {
+    it('captures thread_id from thread_ts on inbound', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ text: 'hi', threadTs: '111.222' }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ thread_id: '111.222' }),
+      );
+    });
+
+    it('fetchThread maps conversations.replies to NewMessage[]', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      currentApp().client.conversations.replies.mockResolvedValueOnce({
+        messages: [
+          { ts: '100.0', user: 'U_USER_456', text: 'parent question' },
+          { ts: '101.0', user: 'U_BOT_123', bot_id: 'B1', text: 'bot reply' },
+        ],
+      });
+
+      const out = await channel.fetchThread('slack:C0123456789', '100.0', 50);
+
+      expect(out).toHaveLength(2);
+      expect(out[0]).toMatchObject({
+        id: '100.0',
+        content: 'parent question',
+        thread_id: '100.0',
+        is_bot_message: false,
+      });
+      expect(out[1]).toMatchObject({
+        id: '101.0',
+        content: 'bot reply',
+        thread_id: '100.0',
+        is_bot_message: true,
+      });
+    });
+
+    it('sendMessage prefers opts.threadId over the channel lastThreadTs', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Prime lastThreadTs via an inbound threaded message.
+      await triggerMessageEvent(
+        createMessageEvent({ text: 'hi', threadTs: 'AAA.000' }),
+      );
+      currentApp().client.chat.postMessage.mockClear();
+
+      await channel.sendMessage('slack:C0123456789', 'reply', {
+        threadId: 'BBB.111',
+      });
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ thread_ts: 'BBB.111' }),
+      );
     });
   });
 

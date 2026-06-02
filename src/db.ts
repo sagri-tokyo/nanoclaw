@@ -32,6 +32,7 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      thread_id TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -159,6 +160,16 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add thread_id column for thread-aware triggering/context (migration).
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(chat_jid, thread_id)`,
+  );
 
   // Add runbook_url column if it doesn't exist (migration for existing DBs)
   try {
@@ -305,7 +316,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -318,6 +329,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.thread_id ?? null,
   );
 }
 
@@ -363,7 +375,8 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -397,7 +410,8 @@ export function getMessagesSince(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             thread_id
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -422,6 +436,27 @@ export function getLastBotMessageTimestamp(
     )
     .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
   return row?.ts ?? undefined;
+}
+
+/**
+ * Has the bot already posted in this thread? Used to decide whether a
+ * no-mention reply in the thread is a candidate for the should-reply judge.
+ * Mirrors the bot-detection in getLastBotMessageTimestamp (is_bot_message flag
+ * OR the "<assistant>:" content prefix, as a pre-migration backstop).
+ */
+export function botRepliedInThread(
+  chatJid: string,
+  threadId: string,
+  botPrefix: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM messages
+       WHERE chat_jid = ? AND thread_id = ? AND (is_bot_message = 1 OR content LIKE ?)
+       LIMIT 1`,
+    )
+    .get(chatJid, threadId, `${botPrefix}:%`);
+  return row !== undefined;
 }
 
 export function createTask(

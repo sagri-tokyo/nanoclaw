@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  botRepliedInThread,
   createTask,
   deleteTask,
   getAllChats,
@@ -43,6 +44,69 @@ function store(overrides: {
     is_from_me: overrides.is_from_me ?? false,
   });
 }
+
+// --- thread_id persistence + botRepliedInThread ---
+
+describe('thread_id + botRepliedInThread', () => {
+  it('persists thread_id through storeMessage and getMessagesSince', () => {
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'm1',
+      chat_jid: 'slack:C1',
+      sender: 'U1',
+      sender_name: 'Alice',
+      content: 'hello',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      thread_id: 'T1',
+    });
+    const msgs = getMessagesSince('slack:C1', '', 'sagri-ai', 10);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].thread_id).toBe('T1');
+  });
+
+  it('returns false until the bot posts in the thread, then true', () => {
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'h1',
+      chat_jid: 'slack:C1',
+      sender: 'U1',
+      sender_name: 'Alice',
+      content: 'question',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      thread_id: 'T1',
+    });
+    expect(botRepliedInThread('slack:C1', 'T1', 'sagri-ai')).toBe(false);
+
+    storeMessage({
+      id: 'b1',
+      chat_jid: 'slack:C1',
+      sender: 'BOT',
+      sender_name: 'sagri-ai',
+      content: 'answer',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      is_bot_message: true,
+      thread_id: 'T1',
+    });
+    expect(botRepliedInThread('slack:C1', 'T1', 'sagri-ai')).toBe(true);
+    // A different thread the bot hasn't touched stays false.
+    expect(botRepliedInThread('slack:C1', 'T2', 'sagri-ai')).toBe(false);
+  });
+
+  it('matches the "<assistant>:" content prefix as a pre-migration backstop', () => {
+    storeChatMetadata('slack:C2', '2024-01-01T00:00:00.000Z');
+    storeMessage({
+      id: 'b2',
+      chat_jid: 'slack:C2',
+      sender: 'BOT',
+      sender_name: 'someone',
+      content: 'sagri-ai: hi there',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_bot_message: false,
+      thread_id: 'T9',
+    });
+    expect(botRepliedInThread('slack:C2', 'T9', 'sagri-ai')).toBe(true);
+  });
+});
 
 // --- storeMessage (NewMessage format) ---
 

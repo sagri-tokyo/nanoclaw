@@ -12,10 +12,13 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
   READER_RPC_PORT,
+  SLACK_THREAD_CONTEXT_LIMIT,
+  SLACK_THREAD_FOLLOWUPS,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { startReaderRpc } from './reader-rpc.js';
+import { judgeShouldReply } from './reader.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -34,6 +37,7 @@ import {
 } from './container-runtime.js';
 import {
   getAllChats,
+  botRepliedInThread,
   getAllRegisteredGroups,
   getAllSessions,
   deleteSession,
@@ -191,6 +195,86 @@ export function _setRegisteredGroups(
 }
 
 /**
+ * Is the newest allow-listed human message in `msgs` a reply in a thread the
+ * bot has already posted in? Such a no-mention follow-up is a candidate for
+ * the should-reply judge. Returns the thread id, or null. Gated by
+ * SLACK_THREAD_FOLLOWUPS.
+ */
+function threadFollowupCandidate(
+  chatJid: string,
+  msgs: NewMessage[],
+): { threadId: string } | null {
+  if (!SLACK_THREAD_FOLLOWUPS) return null;
+  const allowlistCfg = loadSenderAllowlist();
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.is_from_me || m.is_bot_message) continue;
+    if (!isTriggerAllowed(chatJid, m.sender, allowlistCfg)) continue;
+    if (
+      m.thread_id &&
+      botRepliedInThread(chatJid, m.thread_id, ASSISTANT_NAME)
+    ) {
+      return { threadId: m.thread_id };
+    }
+    return null; // newest eligible message isn't a bot-thread follow-up
+  }
+  return null;
+}
+
+/**
+ * Render a thread compactly and ask the should-reply judge. Fails closed
+ * (returns false) on any judge error so a no-mention candidate is not answered
+ * on uncertainty.
+ */
+async function runShouldReplyJudge(
+  chatJid: string,
+  threadId: string,
+  thread: NewMessage[],
+): Promise<boolean> {
+  const rendered = thread
+    .map(
+      (m) =>
+        `${m.is_bot_message ? ASSISTANT_NAME : m.sender_name}: ${m.content}`,
+    )
+    .join('\n')
+    .slice(0, 8000);
+  try {
+    const verdict = await judgeShouldReply(rendered, ASSISTANT_NAME);
+    logger.info(
+      {
+        chatJid,
+        threadId,
+        should_reply: verdict.should_reply,
+        reason: verdict.reason,
+      },
+      'Thread follow-up judge verdict',
+    );
+    return verdict.should_reply;
+  } catch (err) {
+    logger.warn(
+      { chatJid, threadId, err },
+      'should-reply judge failed; not replying',
+    );
+    return false;
+  }
+}
+
+/** Merge thread history with the missed batch (dedupe by id, chronological, capped). */
+function mergeThreadContext(
+  thread: NewMessage[],
+  missed: NewMessage[],
+): NewMessage[] {
+  const byId = new Map<string, NewMessage>();
+  for (const m of thread) byId.set(m.id, m);
+  for (const m of missed) byId.set(m.id, m);
+  return [...byId.values()]
+    .sort((a, b) =>
+      a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+    )
+    .slice(-SLACK_THREAD_CONTEXT_LIMIT);
+}
+
+/**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
@@ -215,19 +299,76 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // Explicit @mention trigger (today's behaviour). Main / no-trigger groups
+  // always proceed.
+  let triggered = isMainGroup || group.requiresTrigger === false;
+  if (!triggered) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
+    triggered = missedMessages.some(
       (m) =>
         triggerPattern.test(m.content.trim()) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
-    if (!hasTrigger) return true;
   }
 
-  const prompt = await formatMessagesViaReader(missedMessages, TIMEZONE);
+  // Determine the thread to act in: an explicit trigger uses the newest missed
+  // message's thread; a no-mention follow-up uses the candidate's thread.
+  let targetThreadId: string | undefined;
+  if (triggered) {
+    for (let i = missedMessages.length - 1; i >= 0; i--) {
+      if (missedMessages[i].thread_id) {
+        targetThreadId = missedMessages[i].thread_id;
+        break;
+      }
+    }
+  } else {
+    const candidate = threadFollowupCandidate(chatJid, missedMessages);
+    if (!candidate) return true; // not a trigger and not a follow-up — keep as context
+    targetThreadId = candidate.threadId;
+  }
+
+  // Fetch thread context once (used by the judge and/or the prompt).
+  let threadMessages: NewMessage[] | null = null;
+  if (targetThreadId && channel.fetchThread) {
+    try {
+      const t = await channel.fetchThread(
+        chatJid,
+        targetThreadId,
+        SLACK_THREAD_CONTEXT_LIMIT,
+      );
+      threadMessages = t.length > 0 ? t : null;
+    } catch (err) {
+      logger.warn({ chatJid, targetThreadId, err }, 'Thread fetch failed');
+      threadMessages = null;
+    }
+  }
+
+  // No-mention follow-up: ask the judge before responding. Fail closed if the
+  // thread couldn't be fetched. Consume the cursor on a no/failure so the same
+  // batch is not re-judged forever.
+  if (!triggered) {
+    const decided =
+      targetThreadId && threadMessages
+        ? await runShouldReplyJudge(chatJid, targetThreadId, threadMessages)
+        : false;
+    if (!decided) {
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      return true;
+    }
+  }
+
+  // Build the prompt: full laundered thread when available (original question
+  // + the bot's own prior replies), else the missed-message batch.
+  const prompt =
+    threadMessages && threadMessages.length > 0
+      ? await formatMessagesViaReader(
+          mergeThreadContext(threadMessages, missedMessages),
+          TIMEZONE,
+        )
+      : await formatMessagesViaReader(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -279,6 +420,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         await channel.sendMessage(
           chatJid,
           formatErrorWrap(text, { runId: interactiveRunId, now: new Date() }),
+          targetThreadId ? { threadId: targetThreadId } : undefined,
         );
         outputSentToUser = true;
       }
@@ -501,7 +643,17 @@ async function startMessageLoop(): Promise<void> {
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
-            if (!hasTrigger) continue;
+            if (!hasTrigger) {
+              // No explicit @mention. In thread-followups mode, a reply in a
+              // thread the bot is part of is a candidate — hand it to
+              // processGroupMessages (which runs the should-reply judge and
+              // assembles thread context). Never pipe a non-explicit batch to
+              // an active container.
+              if (threadFollowupCandidate(chatJid, groupMessages)) {
+                queue.enqueueMessageCheck(chatJid);
+              }
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger

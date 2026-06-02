@@ -10,6 +10,8 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'SLACK_THREAD_FOLLOWUPS',
+  'SLACK_THREAD_CONTEXT_LIMIT',
   'TZ',
 ]);
 
@@ -63,6 +65,23 @@ export const READER_RPC_PORT = parseInt(
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
+);
+// Opt-in: when true, a reply in a Slack thread the bot is already part of can
+// trigger it without an explicit @mention — gated by an LLM "should I reply?"
+// judge. Default false = unchanged (explicit-mention-only) behaviour.
+export const SLACK_THREAD_FOLLOWUPS =
+  (process.env.SLACK_THREAD_FOLLOWUPS || envConfig.SLACK_THREAD_FOLLOWUPS) ===
+  'true';
+// Max messages of thread history pulled (and laundered) as context for a
+// triggered run, bounded independently of MAX_MESSAGES_PER_PROMPT.
+export const SLACK_THREAD_CONTEXT_LIMIT = Math.max(
+  1,
+  parseInt(
+    process.env.SLACK_THREAD_CONTEXT_LIMIT ||
+      envConfig.SLACK_THREAD_CONTEXT_LIMIT ||
+      '50',
+    10,
+  ) || 50,
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result

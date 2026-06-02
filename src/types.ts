@@ -90,10 +90,17 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+// Options for an outbound send. `threadId` pins the reply to a specific thread
+// (more reliable than a channel's "most recent thread" heuristic when multiple
+// threads in one channel are active or queued).
+export interface SendOptions {
+  threadId?: string;
+}
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, opts?: SendOptions): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -101,6 +108,13 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: fetch a thread's full message history (e.g. Slack
+  // conversations.replies). Channels without threads leave this undefined.
+  fetchThread?(
+    jid: string,
+    threadId: string,
+    limit: number,
+  ): Promise<NewMessage[]>;
 }
 
 // Callback type that channels use to deliver inbound messages

@@ -8,9 +8,11 @@ import { hashFailureOutput, hashPayload, logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  NewMessage,
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
+  SendOptions,
 } from '../types.js';
 
 // Slack's chat.postMessage API accepts up to 4000 chars, but the rendered UI
@@ -188,6 +190,7 @@ export class SlackChannel implements Channel {
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
         is_dm: !isGroup,
+        thread_id: threadTs,
       });
     });
   }
@@ -215,9 +218,13 @@ export class SlackChannel implements Channel {
     await this.syncChannelMetadata();
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    opts?: SendOptions,
+  ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    const threadTs = this.lastThreadTs.get(jid);
+    const threadTs = opts?.threadId ?? this.lastThreadTs.get(jid);
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });
@@ -277,6 +284,51 @@ export class SlackChannel implements Channel {
         group: jid,
       });
     }
+  }
+
+  /**
+   * Fetch a thread's full message history via conversations.replies (oldest
+   * first, includes the parent). Requires the bot to be a member of the
+   * channel and the appropriate history scope; throws on API error so callers
+   * can fail closed.
+   */
+  async fetchThread(
+    jid: string,
+    threadId: string,
+    limit: number,
+  ): Promise<NewMessage[]> {
+    const channelId = jid.replace(/^slack:/, '');
+    const result = await this.app.client.conversations.replies({
+      channel: channelId,
+      ts: threadId,
+      limit,
+    });
+    const out: NewMessage[] = [];
+    for (const m of result.messages || []) {
+      const ts = typeof m.ts === 'string' ? m.ts : '';
+      const text = typeof m.text === 'string' ? m.text : '';
+      if (!ts || !text) continue;
+      const userId = (m as { user?: string }).user;
+      const botId = (m as { bot_id?: string }).bot_id;
+      const isBot = !!botId || (!!this.botUserId && userId === this.botUserId);
+      const senderName = isBot
+        ? ASSISTANT_NAME
+        : (userId ? await this.resolveUserName(userId) : undefined) ||
+          userId ||
+          'unknown';
+      out.push({
+        id: ts,
+        chat_jid: jid,
+        sender: userId || botId || '',
+        sender_name: senderName,
+        content: text,
+        timestamp: new Date(parseFloat(ts) * 1000).toISOString(),
+        is_from_me: isBot,
+        is_bot_message: isBot,
+        thread_id: threadId,
+      });
+    }
+    return out;
   }
 
   isConnected(): boolean {
