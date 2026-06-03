@@ -113,8 +113,10 @@ function createSchema(database: Database.Database): void {
     );
     // Backfill: mark existing bot messages that used the content prefix pattern
     database
-      .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
-      .run(`${ASSISTANT_NAME}:%`);
+      .prepare(
+        `UPDATE messages SET is_bot_message = 1 WHERE content LIKE ? ESCAPE '\\'`,
+      )
+      .run(`${escapeLikePattern(ASSISTANT_NAME)}:%`);
   } catch {
     /* column already exists */
   }
@@ -425,6 +427,14 @@ export function storeMessageDirect(msg: {
   );
 }
 
+// Escape LIKE metacharacters (\ % _) in a literal prefix so it can't act as a
+// wildcard, paired with `ESCAPE '\'` in the query. Hardening for bot-prefix
+// matching (greptile #61 P2): the prefix is a trusted config value today, but a
+// name containing % or _ would otherwise match unintended rows.
+function escapeLikePattern(literal: string): string {
+  return literal.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 export function getNewMessages(
   jids: string[],
   lastTimestamp: string,
@@ -444,7 +454,7 @@ export function getNewMessages(
              thread_id, files
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND is_bot_message = 0 AND content NOT LIKE ? ESCAPE '\\'
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
@@ -453,7 +463,12 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(
+      lastTimestamp,
+      ...jids,
+      `${escapeLikePattern(botPrefix)}:%`,
+      limit,
+    ) as NewMessage[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
@@ -479,7 +494,7 @@ export function getMessagesSince(
              thread_id, files
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND is_bot_message = 0 AND content NOT LIKE ? ESCAPE '\\'
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
@@ -487,7 +502,12 @@ export function getMessagesSince(
   `;
   const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(
+      chatJid,
+      sinceTimestamp,
+      `${escapeLikePattern(botPrefix)}:%`,
+      limit,
+    ) as NewMessage[];
   return hydrateFiles(rows);
 }
 
@@ -498,9 +518,11 @@ export function getLastBotMessageTimestamp(
   const row = db
     .prepare(
       `SELECT MAX(timestamp) as ts FROM messages
-       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ?)`,
+       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ? ESCAPE '\\')`,
     )
-    .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
+    .get(chatJid, `${escapeLikePattern(botPrefix)}:%`) as
+    | { ts: string | null }
+    | undefined;
   return row?.ts ?? undefined;
 }
 
