@@ -194,9 +194,15 @@ export class SlackChannel implements Channel {
       // Bolt's event type is the full MessageEvent union (17+ subtypes).
       // We filter on subtype first, then narrow to the two types we handle.
       const subtype = (event as { subtype?: string }).subtype;
-      // file_share carries attachments (a file uploaded with a comment); accept
-      // it alongside regular messages and our own bot_message echoes.
-      if (subtype && subtype !== 'bot_message' && subtype !== 'file_share')
+      // file_share carries attachments (a file uploaded with a comment). Accept
+      // it ONLY when ingestion is enabled — otherwise flag-off behaviour must
+      // stay byte-identical to before (file_share dropped entirely, even with a
+      // text comment). bot_message is always kept so we track our own output.
+      if (
+        subtype &&
+        subtype !== 'bot_message' &&
+        !(SLACK_FILE_INGESTION && subtype === 'file_share')
+      )
         return;
 
       // After filtering, event is GenericMessageEvent | BotMessageEvent (or a

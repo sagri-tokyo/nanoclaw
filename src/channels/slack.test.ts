@@ -279,6 +279,23 @@ describe('SlackChannel', () => {
       expect(opts.onChatMetadata).not.toHaveBeenCalled();
     });
 
+    it('drops file_share subtype when ingestion is off (flag-off byte-identical)', async () => {
+      // SLACK_FILE_INGESTION is mocked false in this file. A file_share event —
+      // even one carrying a text comment — must be dropped exactly as before
+      // the file-ingestion change, not stored or delivered.
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = {
+        ...createMessageEvent({ subtype: 'file_share', text: 'see attached' }),
+        files: [{ id: 'F1', name: 'a.csv', mimetype: 'text/csv' }],
+      };
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
     it('allows bot_message subtype through', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
