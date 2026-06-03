@@ -384,11 +384,15 @@ export async function judgeShouldReply(
   assistantName: string,
 ): Promise<JudgeResult> {
   const { baseUrl, apiKey, oauthToken } = getAnthropicCreds();
+  // Escape angle brackets so a message containing a literal </thread> cannot
+  // close the envelope and smuggle text into an unguarded position. The judge
+  // only returns a boolean, but this is correct hygiene (greptile #61 P2).
+  const safeThread = threadText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const requestBody = JSON.stringify({
     model: READER_MODEL,
     max_tokens: JUDGE_MAX_TOKENS,
     system: JUDGE_SYSTEM_PROMPT.replace('{{ASSISTANT}}', assistantName),
-    messages: [{ role: 'user', content: `<thread>\n${threadText}\n</thread>` }],
+    messages: [{ role: 'user', content: `<thread>\n${safeThread}\n</thread>` }],
   });
 
   const { status, body } = await postMessages({
