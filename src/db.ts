@@ -6,6 +6,8 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  FileRef,
+  MessageFileBundle,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -33,6 +35,7 @@ function createSchema(database: Database.Database): void {
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
       thread_id TEXT,
+      files TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -110,8 +113,10 @@ function createSchema(database: Database.Database): void {
     );
     // Backfill: mark existing bot messages that used the content prefix pattern
     database
-      .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
-      .run(`${ASSISTANT_NAME}:%`);
+      .prepare(
+        `UPDATE messages SET is_bot_message = 1 WHERE content LIKE ? ESCAPE '\\'`,
+      )
+      .run(`${escapeLikePattern(ASSISTANT_NAME)}:%`);
   } catch {
     /* column already exists */
   }
@@ -170,6 +175,14 @@ function createSchema(database: Database.Database): void {
   database.exec(
     `CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(chat_jid, thread_id)`,
   );
+
+  // Add files column (JSON MessageFileBundle, metadata only) for Slack file
+  // ingestion (migration). No index — never queried by files.
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN files TEXT`);
+  } catch {
+    /* column already exists */
+  }
 
   // Add runbook_url column if it doesn't exist (migration for existing DBs)
   try {
@@ -316,7 +329,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, thread_id, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -330,7 +343,61 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
     msg.thread_id ?? null,
+    msg.files ? JSON.stringify(msg.files) : null,
   );
+}
+
+/**
+ * Parse the JSON `files` column into a typed MessageFileBundle. Tolerant:
+ * returns undefined for null/empty/malformed/non-array, and drops malformed
+ * refs (a ref must at least have a string id). Called at the read boundary so
+ * `NewMessage.files` is correctly typed for consumers.
+ */
+export function parseFilesColumn(raw: unknown): MessageFileBundle | undefined {
+  let value: unknown = raw;
+  if (value == null) return undefined;
+  if (typeof value === 'string') {
+    if (value.length === 0) return undefined;
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const rec = value as Record<string, unknown>;
+  if (!Array.isArray(rec.refs)) return undefined;
+  const refs: FileRef[] = [];
+  for (const r of rec.refs) {
+    if (!r || typeof r !== 'object') continue;
+    const ref = r as Record<string, unknown>;
+    if (typeof ref.id !== 'string' || ref.id.length === 0) continue;
+    const out: FileRef = { id: ref.id };
+    if (typeof ref.name === 'string') out.name = ref.name;
+    if (typeof ref.mimetype === 'string') out.mimetype = ref.mimetype;
+    if (typeof ref.size === 'number') out.size = ref.size;
+    if (typeof ref.url_private_download === 'string')
+      out.url_private_download = ref.url_private_download;
+    if (typeof ref.file_access === 'string') out.file_access = ref.file_access;
+    refs.push(out);
+  }
+  const bundle: MessageFileBundle = { refs };
+  if (typeof rec.omitted_count === 'number') {
+    bundle.omitted_count = rec.omitted_count;
+  }
+  return bundle;
+}
+
+// Replace each row's raw JSON `files` column with a parsed bundle (or undefined)
+// so callers receive a correctly-typed NewMessage. The SELECTs cast rows to
+// NewMessage[], where `files` is otherwise the raw DB string at runtime.
+function hydrateFiles(rows: NewMessage[]): NewMessage[] {
+  for (const row of rows) {
+    row.files = parseFilesColumn(
+      (row as unknown as Record<string, unknown>).files,
+    );
+  }
+  return rows;
 }
 
 /**
@@ -360,6 +427,14 @@ export function storeMessageDirect(msg: {
   );
 }
 
+// Escape LIKE metacharacters (\ % _) in a literal prefix so it can't act as a
+// wildcard, paired with `ESCAPE '\'` in the query. Hardening for bot-prefix
+// matching (greptile #61 P2): the prefix is a trusted config value today, but a
+// name containing % or _ would otherwise match unintended rows.
+function escapeLikePattern(literal: string): string {
+  return literal.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 export function getNewMessages(
   jids: string[],
   lastTimestamp: string,
@@ -376,10 +451,10 @@ export function getNewMessages(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             thread_id, files
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND is_bot_message = 0 AND content NOT LIKE ? ESCAPE '\\'
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
@@ -388,14 +463,19 @@ export function getNewMessages(
 
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(
+      lastTimestamp,
+      ...jids,
+      `${escapeLikePattern(botPrefix)}:%`,
+      limit,
+    ) as NewMessage[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
     if (row.timestamp > newTimestamp) newTimestamp = row.timestamp;
   }
 
-  return { messages: rows, newTimestamp };
+  return { messages: hydrateFiles(rows), newTimestamp };
 }
 
 export function getMessagesSince(
@@ -411,18 +491,24 @@ export function getMessagesSince(
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
              reply_to_message_id, reply_to_message_content, reply_to_sender_name,
-             thread_id
+             thread_id, files
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND is_bot_message = 0 AND content NOT LIKE ? ESCAPE '\\'
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
+  const rows = db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+    .all(
+      chatJid,
+      sinceTimestamp,
+      `${escapeLikePattern(botPrefix)}:%`,
+      limit,
+    ) as NewMessage[];
+  return hydrateFiles(rows);
 }
 
 export function getLastBotMessageTimestamp(
@@ -432,9 +518,11 @@ export function getLastBotMessageTimestamp(
   const row = db
     .prepare(
       `SELECT MAX(timestamp) as ts FROM messages
-       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ?)`,
+       WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ? ESCAPE '\\')`,
     )
-    .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
+    .get(chatJid, `${escapeLikePattern(botPrefix)}:%`) as
+    | { ts: string | null }
+    | undefined;
   return row?.ts ?? undefined;
 }
 

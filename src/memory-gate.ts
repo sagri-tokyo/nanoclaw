@@ -14,6 +14,10 @@ export const SOURCES = [
   // accepts it; it is intentionally absent from `ADMIN_SOURCES` below so any
   // memory-write attempt tagged with this source is rejected by `decideWrite`.
   'experiment_spec',
+  // `slack_file` tags untrusted Slack file-attachment content. Like
+  // `experiment_spec`, it is in SOURCES (so the reader accepts it) but NOT in
+  // ADMIN_SOURCES (file content can never authorize a memory write).
+  'slack_file',
 ] as const;
 export type Source = (typeof SOURCES)[number];
 

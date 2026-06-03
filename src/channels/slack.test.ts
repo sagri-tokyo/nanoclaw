@@ -9,6 +9,13 @@ vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Jonesy',
   TRIGGER_PATTERN: /^@Jonesy\b/i,
+  // File ingestion off here so existing tests assert unchanged behaviour;
+  // the dedicated slack-files.test.ts exercises the flag-on path.
+  SLACK_FILE_INGESTION: false,
+  SLACK_FILE_MAX_BYTES: 262144,
+  SLACK_FILE_MAX_COUNT: 10,
+  SLACK_FILE_MAX_ROWS: 1000,
+  SLACK_FILE_MAX_PROMPT_CHARS: 120000,
 }));
 
 // Mock logger — pass through real hashPayload + a real action emitter so any
@@ -270,6 +277,23 @@ describe('SlackChannel', () => {
 
       expect(opts.onMessage).not.toHaveBeenCalled();
       expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('drops file_share subtype when ingestion is off (flag-off byte-identical)', async () => {
+      // SLACK_FILE_INGESTION is mocked false in this file. A file_share event —
+      // even one carrying a text comment — must be dropped exactly as before
+      // the file-ingestion change, not stored or delivered.
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = {
+        ...createMessageEvent({ subtype: 'file_share', text: 'see attached' }),
+        files: [{ id: 'F1', name: 'a.csv', mimetype: 'text/csv' }],
+      };
+      await triggerMessageEvent(event);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
     });
 
     it('allows bot_message subtype through', async () => {

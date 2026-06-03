@@ -1,19 +1,90 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TRIGGER_PATTERN,
+  SLACK_FILE_INGESTION,
+  SLACK_FILE_MAX_BYTES,
+  SLACK_FILE_MAX_COUNT,
+} from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
+import {
+  fetchWithRedirects,
+  resolveDeps,
+  FetchUntrustedHttp4xx,
+  type FetchUntrustedDeps,
+} from '../fetch-untrusted.js';
 import { hashFailureOutput, hashPayload, logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  FileRef,
+  MessageFileBundle,
   NewMessage,
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
   SendOptions,
 } from '../types.js';
+
+// Typed file-fetch failure carrying a skip reason the prompt assembler renders
+// into a <file_skipped> marker. Keeps the user's request running on a per-file
+// download/resolve failure.
+export class FileFetchError extends Error {
+  constructor(
+    readonly reason: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+// Only send the bot token to Slack-owned hosts. Cross-origin redirects also
+// strip the Authorization header in fetch-untrusted, so this is defense in depth.
+function isSlackFileHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'slack.com' || host.endsWith('.slack.com');
+  } catch {
+    return false;
+  }
+}
+
+// Map raw Slack file objects to metadata-only FileRefs, capped at maxCount.
+// Refs may be incomplete (Slack Connect `file_access: "check_file_info"` omits
+// url/mime); fetchFileContent resolves the rest via files.info at download time.
+export function extractFileBundle(
+  rawFiles: unknown,
+  maxCount: number,
+): MessageFileBundle | undefined {
+  if (!Array.isArray(rawFiles) || rawFiles.length === 0) return undefined;
+  const refs: FileRef[] = [];
+  let omitted = 0;
+  for (const f of rawFiles) {
+    if (!f || typeof f !== 'object') continue;
+    const fo = f as Record<string, unknown>;
+    if (typeof fo.id !== 'string' || fo.id.length === 0) continue;
+    if (refs.length >= maxCount) {
+      omitted++;
+      continue;
+    }
+    const ref: FileRef = { id: fo.id };
+    if (typeof fo.name === 'string') ref.name = fo.name;
+    if (typeof fo.mimetype === 'string') ref.mimetype = fo.mimetype;
+    if (typeof fo.size === 'number') ref.size = fo.size;
+    if (typeof fo.url_private_download === 'string') {
+      ref.url_private_download = fo.url_private_download;
+    } else if (typeof fo.url_private === 'string') {
+      ref.url_private_download = fo.url_private;
+    }
+    if (typeof fo.file_access === 'string') ref.file_access = fo.file_access;
+    refs.push(ref);
+  }
+  if (refs.length === 0) return undefined;
+  return omitted > 0 ? { refs, omitted_count: omitted } : { refs };
+}
 
 // Slack's chat.postMessage API accepts up to 4000 chars, but the rendered UI
 // inserts an avatar/timestamp row around ~3500 chars and can split a chunk
@@ -66,6 +137,8 @@ export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Test seam: inject SSRF lookup / https factory for file downloads.
+  fetchDeps?: FetchUntrustedDeps;
 }
 
 export class SlackChannel implements Channel {
@@ -73,6 +146,9 @@ export class SlackChannel implements Channel {
 
   private app: App;
   private botUserId: string | undefined;
+  // Kept in host memory only (never process.env) so file downloads can send it
+  // as an Authorization header — never placed in prompts, DB rows, or errors.
+  private botToken: string;
   private connected = false;
   private outgoingQueue: Array<{
     jid: string;
@@ -99,6 +175,7 @@ export class SlackChannel implements Channel {
         'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
       );
     }
+    this.botToken = botToken;
 
     this.app = new App({
       token: botToken,
@@ -117,12 +194,29 @@ export class SlackChannel implements Channel {
       // Bolt's event type is the full MessageEvent union (17+ subtypes).
       // We filter on subtype first, then narrow to the two types we handle.
       const subtype = (event as { subtype?: string }).subtype;
-      if (subtype && subtype !== 'bot_message') return;
+      // file_share carries attachments (a file uploaded with a comment). Accept
+      // it ONLY when ingestion is enabled — otherwise flag-off behaviour must
+      // stay byte-identical to before (file_share dropped entirely, even with a
+      // text comment). bot_message is always kept so we track our own output.
+      if (
+        subtype &&
+        subtype !== 'bot_message' &&
+        !(SLACK_FILE_INGESTION && subtype === 'file_share')
+      )
+        return;
 
-      // After filtering, event is either GenericMessageEvent or BotMessageEvent
+      // After filtering, event is GenericMessageEvent | BotMessageEvent (or a
+      // file_share, shaped like GenericMessageEvent with a `files` array).
       const msg = event as HandledMessageEvent;
 
-      if (!msg.text) return;
+      // Capture attachments only when ingestion is enabled. A files-only message
+      // (no text) is still delivered so it can be context/processed; with the
+      // flag off, the original text-required behaviour is preserved exactly.
+      const rawFiles = (msg as { files?: unknown[] }).files;
+      const hasFiles =
+        SLACK_FILE_INGESTION && Array.isArray(rawFiles) && rawFiles.length > 0;
+
+      if (!msg.text && !hasFiles) return;
 
       const jid = `slack:${msg.channel}`;
 
@@ -166,7 +260,7 @@ export class SlackChannel implements Channel {
       // surrounding whitespace) so the rewritten content keeps the canonical
       // `^@<NAME>\s+<rest>` shape the kill-switch parser requires
       // (sagri-tokyo/sagri-ai#128).
-      let content = msg.text;
+      let content = msg.text || '';
       if (this.botUserId && !isOwnBotMessage && !isSlackBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
         if (
@@ -182,6 +276,20 @@ export class SlackChannel implements Channel {
         }
       }
 
+      // Attachments only from human messages (never our own / other bots).
+      const fileBundle =
+        hasFiles && !isOwnBotMessage && !isSlackBotMessage
+          ? extractFileBundle(rawFiles, SLACK_FILE_MAX_COUNT)
+          : undefined;
+
+      // Files-only message: give it neutral, non-trigger content so it survives
+      // the content-not-empty DB filter and flows through the normal trigger
+      // path (an explicit @mention is still required to act on attachments).
+      if (content.length === 0 && fileBundle) {
+        const n = fileBundle.refs.length;
+        content = `[shared ${n} file${n === 1 ? '' : 's'}]`;
+      }
+
       this.opts.onMessage(jid, {
         id: msg.ts,
         chat_jid: jid,
@@ -193,6 +301,7 @@ export class SlackChannel implements Channel {
         is_bot_message: isOwnBotMessage,
         is_dm: !isGroup,
         thread_id: threadTs,
+        files: fileBundle,
       });
     });
   }
@@ -323,11 +432,28 @@ export class SlackChannel implements Channel {
     const out: NewMessage[] = [];
     for (const m of replyMessages) {
       const ts = typeof m.ts === 'string' ? m.ts : '';
+      if (!ts) continue;
       const text = typeof m.text === 'string' ? m.text : '';
-      if (!ts || !text) continue;
       const userId = (m as { user?: string }).user;
       const botId = (m as { bot_id?: string }).bot_id;
       const isOwnBot = !!this.botUserId && userId === this.botUserId;
+      const fileBundle =
+        SLACK_FILE_INGESTION && !isOwnBot
+          ? extractFileBundle(
+              (m as { files?: unknown[] }).files,
+              SLACK_FILE_MAX_COUNT,
+            )
+          : undefined;
+      // A files-only reply (no text) is a real follow-up — keep it with the
+      // same neutral synthetic content as inbound capture so the should-reply
+      // judge sees the latest reply. Skip only genuinely empty messages
+      // (e.g. join notices) so they don't pollute thread context.
+      let content = text;
+      if (content.length === 0) {
+        if (!fileBundle) continue;
+        const n = fileBundle.refs.length;
+        content = `[shared ${n} file${n === 1 ? '' : 's'}]`;
+      }
       const senderName = isOwnBot
         ? ASSISTANT_NAME
         : userId
@@ -338,14 +464,113 @@ export class SlackChannel implements Channel {
         chat_jid: jid,
         sender: userId || botId || '',
         sender_name: senderName,
-        content: text,
+        content,
         timestamp: new Date(parseFloat(ts) * 1000).toISOString(),
         is_from_me: isOwnBot,
         is_bot_message: isOwnBot,
         thread_id: threadId,
+        files: fileBundle,
       });
     }
     return out;
+  }
+
+  /**
+   * Download one attached file's bytes. Resolves incomplete refs (Slack Connect
+   * `file_access: "check_file_info"`, or a ref missing url/mime) via files.info,
+   * then GETs `url_private_download` with the bot token through the shared
+   * SSRF-guarded fetcher (HTTPS-only, public-address, redirect-revalidated,
+   * byte-capped). Only Slack hosts receive the token. Throws FileFetchError with
+   * a skip reason on any failure so the caller can render <file_skipped> and
+   * keep the user's request running. Raw bytes are returned for the host
+   * sanitizer; they never reach the actor unsanitized.
+   */
+  async fetchFileContent(
+    file: FileRef,
+  ): Promise<{ bytes: Buffer; file: FileRef; mimetype: string }> {
+    let resolved = file;
+    if (
+      !resolved.url_private_download ||
+      !resolved.mimetype ||
+      resolved.file_access === 'check_file_info'
+    ) {
+      let info: { file?: unknown };
+      try {
+        info = await this.app.client.files.info({ file: file.id });
+      } catch {
+        throw new FileFetchError(
+          'files_info_failed',
+          'could not resolve file metadata',
+        );
+      }
+      const sf =
+        info.file && typeof info.file === 'object'
+          ? (info.file as Record<string, unknown>)
+          : undefined;
+      if (sf) {
+        const download =
+          typeof sf.url_private_download === 'string'
+            ? sf.url_private_download
+            : typeof sf.url_private === 'string'
+              ? sf.url_private
+              : resolved.url_private_download;
+        resolved = {
+          id: file.id,
+          name: typeof sf.name === 'string' ? sf.name : resolved.name,
+          mimetype:
+            typeof sf.mimetype === 'string' ? sf.mimetype : resolved.mimetype,
+          size: typeof sf.size === 'number' ? sf.size : resolved.size,
+          url_private_download: download,
+          file_access:
+            typeof sf.file_access === 'string'
+              ? sf.file_access
+              : resolved.file_access,
+        };
+      }
+    }
+
+    const url = resolved.url_private_download;
+    if (!url) {
+      throw new FileFetchError('no_download_url', 'file has no download url');
+    }
+    if (!isSlackFileHost(url)) {
+      throw new FileFetchError(
+        'untrusted_host',
+        'file url is not on a slack host',
+      );
+    }
+
+    const deps = resolveDeps(this.opts.fetchDeps);
+    try {
+      const resp = await fetchWithRedirects({
+        url,
+        headers: {
+          authorization: `Bearer ${this.botToken}`,
+          'user-agent': 'nanoclaw-slack-file-ingestion/1.0',
+        },
+        deps,
+        maxBytes: SLACK_FILE_MAX_BYTES,
+      });
+      return {
+        bytes: resp.bodyBytes,
+        file: resolved,
+        mimetype: resolved.mimetype || '',
+      };
+    } catch (err) {
+      // 401/403 almost always means the app lacks files:read (or access to the
+      // file). Surface a specific operator-actionable reason; never leak the
+      // token or the private URL in the error.
+      if (
+        err instanceof FetchUntrustedHttp4xx &&
+        (err.httpStatus === 401 || err.httpStatus === 403)
+      ) {
+        throw new FileFetchError(
+          'slack_files_read_denied',
+          'slack files:read scope missing or no access to file',
+        );
+      }
+      throw new FileFetchError('download_failed', 'file download failed');
+    }
   }
 
   isConnected(): boolean {

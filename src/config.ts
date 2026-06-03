@@ -12,6 +12,11 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'SLACK_THREAD_FOLLOWUPS',
   'SLACK_THREAD_CONTEXT_LIMIT',
+  'SLACK_FILE_INGESTION',
+  'SLACK_FILE_MAX_BYTES',
+  'SLACK_FILE_MAX_COUNT',
+  'SLACK_FILE_MAX_ROWS',
+  'SLACK_FILE_MAX_PROMPT_CHARS',
   'TZ',
 ]);
 
@@ -82,6 +87,50 @@ export const SLACK_THREAD_CONTEXT_LIMIT = Math.max(
       '50',
     10,
   ) || 50,
+);
+// Opt-in: when true, the Slack adapter ingests whitelisted text/tabular file
+// attachments, sanitizes them host-side, and surfaces them as laundered run
+// context. Requires the Slack app `files:read` scope. Default false = files
+// ignored, unchanged behaviour.
+export const SLACK_FILE_INGESTION =
+  (process.env.SLACK_FILE_INGESTION || envConfig.SLACK_FILE_INGESTION) ===
+  'true';
+// Per-file download byte cap (streamed; socket destroyed on exceed). 256 KiB.
+export const SLACK_FILE_MAX_BYTES = Math.max(
+  1,
+  parseInt(
+    process.env.SLACK_FILE_MAX_BYTES ||
+      envConfig.SLACK_FILE_MAX_BYTES ||
+      '262144',
+    10,
+  ) || 262144,
+);
+// Max files ingested per actor run. Default 10 so a 6-attachment message fits.
+export const SLACK_FILE_MAX_COUNT = Math.max(
+  1,
+  parseInt(
+    process.env.SLACK_FILE_MAX_COUNT || envConfig.SLACK_FILE_MAX_COUNT || '10',
+    10,
+  ) || 10,
+);
+// Max rows emitted per delimited (CSV/TSV) file.
+export const SLACK_FILE_MAX_ROWS = Math.max(
+  1,
+  parseInt(
+    process.env.SLACK_FILE_MAX_ROWS || envConfig.SLACK_FILE_MAX_ROWS || '1000',
+    10,
+  ) || 1000,
+);
+// Total character budget for the appended <untrusted_files> prompt section
+// across all files in one run.
+export const SLACK_FILE_MAX_PROMPT_CHARS = Math.max(
+  1,
+  parseInt(
+    process.env.SLACK_FILE_MAX_PROMPT_CHARS ||
+      envConfig.SLACK_FILE_MAX_PROMPT_CHARS ||
+      '120000',
+    10,
+  ) || 120000,
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
