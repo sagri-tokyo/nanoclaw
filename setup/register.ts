@@ -24,6 +24,7 @@ export interface RegisterArgs {
   isMain: boolean;
   assistantName: string;
   containerConfig?: string;
+  containerConfigMissing?: boolean;
 }
 
 export class InvalidContainerConfigError extends Error {
@@ -84,9 +85,18 @@ export function parseArgs(args: string[]): RegisterArgs {
       case '--assistant-name':
         result.assistantName = args[++i] || 'Andy';
         break;
-      case '--container-config':
-        result.containerConfig = args[++i];
+      case '--container-config': {
+        const next = args[i + 1];
+        // Treat a missing value or the next flag as a user error — container-config
+        // values are always JSON objects, never '--'-prefixed strings.
+        if (next === undefined || next.startsWith('--')) {
+          result.containerConfigMissing = true;
+        } else {
+          i++;
+          result.containerConfig = next;
+        }
         break;
+      }
     }
   }
 
@@ -112,6 +122,10 @@ export async function run(args: string[]): Promise<void> {
 
   if (!isValidGroupFolder(parsed.folder)) {
     failRegistration('invalid_folder');
+  }
+
+  if (parsed.containerConfigMissing) {
+    failRegistration('invalid_container_config');
   }
 
   let containerConfig: ContainerConfig | undefined;

@@ -322,6 +322,53 @@ describe('container-config flag', () => {
       InvalidContainerConfigError,
     );
   });
+
+});
+
+describe('parseContainerConfig validation', () => {
+  it('rejects the JSON null literal', () => {
+    expect(() => parseContainerConfig('null')).toThrow(
+      InvalidContainerConfigError,
+    );
+  });
+});
+
+describe('parseArgs container-config missing value', () => {
+  it('sets containerConfigMissing when --container-config has no following value', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--container-config',
+    ]);
+
+    expect(parsed.containerConfigMissing).toBe(true);
+    expect(parsed.containerConfig).toBeUndefined();
+  });
+
+  it('sets containerConfigMissing when --container-config is followed by another flag', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--container-config',
+      '--is-main',
+    ]);
+
+    expect(parsed.containerConfigMissing).toBe(true);
+    expect(parsed.containerConfig).toBeUndefined();
+    expect(parsed.isMain).toBe(true);
+  });
 });
 
 describe('file templating', () => {
