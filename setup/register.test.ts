@@ -5,6 +5,20 @@ import { afterEach, describe, it, expect, beforeEach } from 'vitest';
 
 import Database from 'better-sqlite3';
 
+import {
+  _closeDatabase,
+  _initTestDatabase,
+  getRegisteredGroup,
+  setRegisteredGroup,
+} from '../src/db.ts';
+import type { ContainerConfig } from '../src/types.ts';
+
+import {
+  InvalidContainerConfigError,
+  parseArgs,
+  parseContainerConfig,
+} from './register.ts';
+
 /**
  * Tests for the register step.
  *
@@ -212,6 +226,101 @@ describe('parameterized SQL registration', () => {
     expect(row.name).toBe('Updated');
     expect(row.trigger_pattern).toBe('@Bot');
     expect(row.requires_trigger).toBe(0);
+  });
+});
+
+describe('container-config flag', () => {
+  const contractJson =
+    '{"additionalMounts":[{"hostPath":"/opt/sagri-ai/wiki","containerPath":"wiki","readonly":true}]}';
+
+  const expectedConfig: ContainerConfig = {
+    additionalMounts: [
+      {
+        hostPath: '/opt/sagri-ai/wiki',
+        containerPath: 'wiki',
+        readonly: true,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('stores the raw container-config JSON string from the flag', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--is-main',
+      '--container-config',
+      contractJson,
+    ]);
+
+    expect(parsed.containerConfig).toEqual(contractJson);
+  });
+
+  it('round-trips the wiki-mount contract through the database unchanged', () => {
+    const config = parseContainerConfig(contractJson);
+
+    setRegisteredGroup('123@g.us', {
+      name: 'Main',
+      folder: 'slack_main',
+      trigger: '@Andy',
+      added_at: '2026-06-15T00:00:00.000Z',
+      requiresTrigger: false,
+      isMain: true,
+      containerConfig: config,
+    });
+
+    const group = getRegisteredGroup('123@g.us');
+    expect(group?.containerConfig).toEqual(expectedConfig);
+  });
+
+  it('leaves containerConfig undefined when the flag is absent', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+    ]);
+
+    expect(parsed.containerConfig).toBeUndefined();
+  });
+
+  it('throws InvalidContainerConfigError on malformed JSON', () => {
+    expect(() => parseContainerConfig('{not valid json')).toThrow(
+      InvalidContainerConfigError,
+    );
+  });
+
+  it('rejects an empty string as invalid JSON', () => {
+    expect(() => parseContainerConfig('')).toThrow(InvalidContainerConfigError);
+  });
+
+  it('rejects JSON that is not an object', () => {
+    expect(() => parseContainerConfig('"null"')).toThrow(
+      InvalidContainerConfigError,
+    );
+    expect(() => parseContainerConfig('42')).toThrow(
+      InvalidContainerConfigError,
+    );
+    expect(() => parseContainerConfig('[]')).toThrow(
+      InvalidContainerConfigError,
+    );
   });
 });
 
