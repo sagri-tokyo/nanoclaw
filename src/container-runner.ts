@@ -31,6 +31,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { buildTelemetryEnv } from './telemetry.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -46,6 +47,13 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /**
+   * Triggering Slack user id (NewMessage.sender), used as OTel enduser.id when
+   * telemetry is enabled (RFC 0001 Phase 1). Absent for scheduled tasks and
+   * any spawn with no human trigger — the telemetry layer substitutes a
+   * namespaced unattributed placeholder rather than fabricating an identity.
+   */
+  triggeringUserId?: string;
 }
 
 export type ContainerOutput =
@@ -123,8 +131,9 @@ interface ContainerPlan {
 
 function buildContainerPlan(
   group: RegisteredGroup,
-  isMain: boolean,
+  input: ContainerInput,
 ): ContainerPlan {
+  const isMain = input.isMain;
   const mounts: VolumeMount[] = [];
   const extraEnv: Record<string, string> = {};
   const projectRoot = process.cwd();
@@ -440,6 +449,15 @@ function buildContainerPlan(
     mounts.push(...validatedMounts);
   }
 
+  Object.assign(
+    extraEnv,
+    buildTelemetryEnv({
+      triggeringUserId: input.triggeringUserId,
+      isScheduledTask: input.isScheduledTask === true,
+      tenantId: group.folder,
+    }),
+  );
+
   return { mounts, extraEnv };
 }
 
@@ -532,7 +550,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const plan = buildContainerPlan(group, input.isMain);
+  const plan = buildContainerPlan(group, input);
   const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;

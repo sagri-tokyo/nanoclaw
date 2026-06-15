@@ -121,6 +121,7 @@ vi.mock('child_process', async () => {
 import {
   runContainerAgent,
   ContainerOutput,
+  ContainerInput,
   mapContainerOutputForUser,
 } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
@@ -608,6 +609,112 @@ describe('container-runner env forwarding', () => {
     expect(envFlagIdx).toBeGreaterThan(0);
     expect(firstVolumeIdx).toBeGreaterThan(0);
     expect(envFlagIdx).toBeLessThan(firstVolumeIdx);
+  });
+});
+
+describe('container-runner OTel telemetry wiring (RFC 0001 Phase 1)', () => {
+  const TELEMETRY_KEYS = [
+    'CLAUDE_CODE_ENABLE_TELEMETRY',
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'OTEL_EXPORTER_OTLP_PROTOCOL',
+    'OTEL_EXPORTER_OTLP_HEADERS',
+    'OTEL_RESOURCE_ATTRIBUTES',
+  ] as const;
+
+  function clearTelemetryEnv(): void {
+    for (const key of TELEMETRY_KEYS) {
+      delete process.env[key];
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    clearTelemetryEnv();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearTelemetryEnv();
+  });
+
+  async function captureArgs(input: ContainerInput): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, input, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  function envValue(args: string[], key: string): string | null {
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] !== '-e') continue;
+      if (args[i + 1].startsWith(`${key}=`)) {
+        return args[i + 1].slice(key.length + 1);
+      }
+    }
+    return null;
+  }
+
+  it('injects telemetry env with per-user/per-task resource attributes when enabled and endpoint set', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
+
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBe('1');
+    expect(envValue(args, 'OTEL_EXPORTER_OTLP_ENDPOINT')).toBe(
+      'http://langfuse.internal:4318',
+    );
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBe(
+      'enduser.id=U07ABCDEF,tenant.id=test-group',
+    );
+  });
+
+  it('uses the namespaced unattributed placeholder when there is no triggering user (scheduled task)', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
+
+    const args = await captureArgs({ ...testInput, isScheduledTask: true });
+
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBe(
+      'enduser.id=nanoclaw:unattributed,tenant.id=test-group',
+    );
+  });
+
+  it('adds no telemetry env vars when telemetry is disabled', async () => {
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBeNull();
+    expect(envValue(args, 'OTEL_EXPORTER_OTLP_ENDPOINT')).toBeNull();
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBeNull();
+  });
+
+  it('adds no telemetry env vars when enabled but the OTLP endpoint is absent', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBeNull();
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBeNull();
   });
 });
 

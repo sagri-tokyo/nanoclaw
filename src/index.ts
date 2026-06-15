@@ -443,6 +443,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     basePrompt,
   );
 
+  // OTel enduser.id (RFC 0001 Phase 1): the human who triggered this run — the
+  // most recent non-bot sender in the prompt batch. Undefined when the batch
+  // carries no human message; the telemetry layer substitutes a namespaced
+  // placeholder rather than fabricating identity.
+  const triggeringUserId = [...promptMessages]
+    .reverse()
+    .find((message) => !message.is_bot_message)?.sender;
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -480,43 +488,51 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   activeThreadByChatJid.set(chatJid, targetThreadId);
   try {
-    const output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.debug(
-          { group: group.name },
-          `Agent output: ${raw.length} chars`,
-        );
-        aggregatedOutput += raw;
-        if (text) {
-          await channel.sendMessage(
-            chatJid,
-            formatErrorWrap(text, {
-              runId: interactiveRunId,
-              now: new Date(),
-            }),
-            targetThreadId ? { threadId: targetThreadId } : undefined,
+    const output = await runAgent(
+      group,
+      prompt,
+      chatJid,
+      triggeringUserId,
+      async (result) => {
+        // Streaming output callback — called for each agent result
+        if (result.result) {
+          const raw =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          const text = raw
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          logger.debug(
+            { group: group.name },
+            `Agent output: ${raw.length} chars`,
           );
-          outputSentToUser = true;
+          aggregatedOutput += raw;
+          if (text) {
+            await channel.sendMessage(
+              chatJid,
+              formatErrorWrap(text, {
+                runId: interactiveRunId,
+                now: new Date(),
+              }),
+              targetThreadId ? { threadId: targetThreadId } : undefined,
+            );
+            outputSentToUser = true;
+          }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
         }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
-      }
 
-      if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
-      }
+        if (result.status === 'success') {
+          queue.notifyIdle(chatJid);
+        }
 
-      if (result.status === 'error') {
-        hadError = true;
-      }
-    });
+        if (result.status === 'error') {
+          hadError = true;
+        }
+      },
+    );
 
     const sessionId = sessions[group.folder] || group.folder;
     const failed = output === 'error' || hadError;
@@ -567,6 +583,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  triggeringUserId: string | undefined,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -619,6 +636,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        triggeringUserId,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
