@@ -266,10 +266,6 @@ describe('buildTelemetryEnv', () => {
 });
 
 describe('buildTelemetryEnv spawn-path resilience', () => {
-  afterEach(() => {
-    clearTelemetryEnv();
-  });
-
   it('produces an empty env when the caller catches a telemetry-build failure, so the agent run continues', () => {
     // Simulates the try/catch wrapper in the spawn path (container-runner.ts).
     // A bad identity config (missing triggeringUserId on an interactive spawn)
