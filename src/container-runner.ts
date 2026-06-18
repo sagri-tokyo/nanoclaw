@@ -449,14 +449,23 @@ function buildContainerPlan(
     mounts.push(...validatedMounts);
   }
 
-  Object.assign(
-    extraEnv,
-    buildTelemetryEnv({
-      triggeringUserId: input.triggeringUserId,
-      isScheduledTask: input.isScheduledTask === true,
-      tenantId: group.folder,
-    }),
-  );
+  // Telemetry is best-effort: a config/identity error must not abort the spawn.
+  // Catch only the telemetry-env build; all other errors in this function propagate normally.
+  try {
+    Object.assign(
+      extraEnv,
+      buildTelemetryEnv({
+        triggeringUserId: input.triggeringUserId,
+        isScheduledTask: input.isScheduledTask === true,
+        tenantId: group.folder,
+      }),
+    );
+  } catch (error) {
+    logger.warn(
+      { error },
+      'telemetry-env build failed; telemetry disabled for this run',
+    );
+  }
 
   return { mounts, extraEnv };
 }

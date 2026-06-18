@@ -264,3 +264,33 @@ describe('buildTelemetryEnv', () => {
     ).toThrow(/line break or null byte/);
   });
 });
+
+describe('buildTelemetryEnv spawn-path resilience', () => {
+  afterEach(() => {
+    clearTelemetryEnv();
+  });
+
+  it('produces an empty env when the caller catches a telemetry-build failure, so the agent run continues', () => {
+    // Simulates the try/catch wrapper in the spawn path (container-runner.ts).
+    // A bad identity config (missing triggeringUserId on an interactive spawn)
+    // must not propagate to the caller; the run proceeds with telemetry disabled.
+    enableTelemetry();
+
+    let telemetryEnv: Record<string, string> = {};
+    let caughtError: unknown = null;
+
+    try {
+      telemetryEnv = buildTelemetryEnv({
+        triggeringUserId: undefined,
+        isScheduledTask: false,
+        tenantId: 'soil-team',
+      });
+    } catch (error) {
+      caughtError = error;
+      telemetryEnv = {};
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    expect(telemetryEnv).toEqual({});
+  });
+});
