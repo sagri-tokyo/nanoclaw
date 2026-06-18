@@ -23,7 +23,7 @@ export interface RegisterArgs {
   requiresTrigger: boolean;
   isMain: boolean;
   assistantName: string;
-  containerConfig?: string;
+  containerConfigJson?: string;
   containerConfigMissing?: boolean;
 }
 
@@ -93,7 +93,7 @@ export function parseArgs(args: string[]): RegisterArgs {
           result.containerConfigMissing = true;
         } else {
           i++;
-          result.containerConfig = next;
+          result.containerConfigJson = next;
         }
         break;
       }
@@ -129,9 +129,9 @@ export async function run(args: string[]): Promise<void> {
   }
 
   let containerConfig: ContainerConfig | undefined;
-  if (parsed.containerConfig !== undefined) {
+  if (parsed.containerConfigJson !== undefined) {
     try {
-      containerConfig = parseContainerConfig(parsed.containerConfig);
+      containerConfig = parseContainerConfig(parsed.containerConfigJson);
     } catch (error) {
       if (!(error instanceof InvalidContainerConfigError)) {
         throw error;

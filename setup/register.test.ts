@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 
 import Database from 'better-sqlite3';
 
@@ -17,6 +17,7 @@ import {
   InvalidContainerConfigError,
   parseArgs,
   parseContainerConfig,
+  run,
 } from './register.ts';
 
 /**
@@ -266,7 +267,7 @@ describe('container-config flag', () => {
       contractJson,
     ]);
 
-    expect(parsed.containerConfig).toEqual(contractJson);
+    expect(parsed.containerConfigJson).toEqual(contractJson);
   });
 
   it('round-trips the wiki-mount contract through the database unchanged', () => {
@@ -286,7 +287,7 @@ describe('container-config flag', () => {
     expect(group?.containerConfig).toEqual(expectedConfig);
   });
 
-  it('leaves containerConfig undefined when the flag is absent', () => {
+  it('leaves containerConfigJson undefined when the flag is absent', () => {
     const parsed = parseArgs([
       '--jid',
       '123@g.us',
@@ -298,7 +299,15 @@ describe('container-config flag', () => {
       'slack_main',
     ]);
 
-    expect(parsed.containerConfig).toBeUndefined();
+    expect(parsed.containerConfigJson).toBeUndefined();
+  });
+});
+
+describe('parseContainerConfig validation', () => {
+  it('rejects the JSON null literal', () => {
+    expect(() => parseContainerConfig('null')).toThrow(
+      InvalidContainerConfigError,
+    );
   });
 
   it('throws InvalidContainerConfigError on malformed JSON', () => {
@@ -322,15 +331,6 @@ describe('container-config flag', () => {
       InvalidContainerConfigError,
     );
   });
-
-});
-
-describe('parseContainerConfig validation', () => {
-  it('rejects the JSON null literal', () => {
-    expect(() => parseContainerConfig('null')).toThrow(
-      InvalidContainerConfigError,
-    );
-  });
 });
 
 describe('parseArgs container-config missing value', () => {
@@ -348,7 +348,7 @@ describe('parseArgs container-config missing value', () => {
     ]);
 
     expect(parsed.containerConfigMissing).toBe(true);
-    expect(parsed.containerConfig).toBeUndefined();
+    expect(parsed.containerConfigJson).toBeUndefined();
   });
 
   it('sets containerConfigMissing when --container-config is followed by another flag', () => {
@@ -366,8 +366,37 @@ describe('parseArgs container-config missing value', () => {
     ]);
 
     expect(parsed.containerConfigMissing).toBe(true);
-    expect(parsed.containerConfig).toBeUndefined();
+    expect(parsed.containerConfigJson).toBeUndefined();
     expect(parsed.isMain).toBe(true);
+  });
+});
+
+describe('run() with invalid --container-config', () => {
+  it('exits with code 4 when --container-config value is not valid JSON', async () => {
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((_code?: number | string | null) => {
+        throw new Error('process.exit called');
+      });
+
+    await expect(
+      run([
+        '--jid',
+        '123@g.us',
+        '--name',
+        'Main',
+        '--trigger',
+        '@Andy',
+        '--folder',
+        'slack_main',
+        '--container-config',
+        '{not valid json',
+      ]),
+    ).rejects.toThrow('process.exit called');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+
+    exitSpy.mockRestore();
   });
 });
 
