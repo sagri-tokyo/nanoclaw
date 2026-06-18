@@ -124,6 +124,7 @@ import {
   ContainerInput,
   mapContainerOutputForUser,
 } from './container-runner.js';
+import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 
@@ -690,7 +691,7 @@ describe('container-runner OTel telemetry wiring (RFC 0001 Phase 1)', () => {
     const args = await captureArgs({ ...testInput, isScheduledTask: true });
 
     expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBe(
-      'enduser.id=nanoclaw:unattributed,tenant.id=test-group',
+      `enduser.id=${UNATTRIBUTED_ENDUSER_ID},tenant.id=test-group`,
     );
   });
 
