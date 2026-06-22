@@ -435,6 +435,35 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     expect(rec.posted).toHaveLength(1);
   });
 
+  it('leaves a row that re-classifies as refuse approved, executing nothing', async () => {
+    const { deps, rec } = makeDeps();
+    const row: PendingActionRow = {
+      token: 'T'.repeat(43),
+      source_group: 'g',
+      chat_jid: 'slack:C0AAA1111',
+      action: 'notion.write_property',
+      target_ref: `prod-${HEX32}`,
+      reversibility: 'reversible',
+      stakes_hint: 'gated',
+      citation_refs: '[]',
+      canonical_args: '{"property":"Status","value":"Ready for AI"}',
+      summary: 's',
+      requester: 'g',
+      state: 'approved',
+      created_at: '2026-06-22T00:00:00.000Z',
+      expires_at: '2026-06-23T00:00:00.000Z',
+      approved_by: 'U_APPROVER',
+      consumed_at: null,
+    };
+    createPendingAction(row);
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(rec.posted).toHaveLength(0);
+    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  });
+
   it('isolates an unparseable row and still drives the healthy rows behind it', async () => {
     const { deps, rec } = makeDeps();
     const base: Omit<PendingActionRow, 'token' | 'canonical_args'> = {

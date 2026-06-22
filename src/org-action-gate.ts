@@ -37,12 +37,12 @@ export const STAKES_HINT_VALUES = ['safe', 'gated'] as const;
 export type Reversibility = (typeof REVERSIBILITY_VALUES)[number];
 export type StakesHint = (typeof STAKES_HINT_VALUES)[number];
 
-export function isReversibility(value: string): value is Reversibility {
-  return (REVERSIBILITY_VALUES as readonly string[]).includes(value);
+export function isReversibility(value: unknown): value is Reversibility {
+  return (REVERSIBILITY_VALUES as readonly unknown[]).includes(value);
 }
 
-export function isStakesHint(value: string): value is StakesHint {
-  return (STAKES_HINT_VALUES as readonly string[]).includes(value);
+export function isStakesHint(value: unknown): value is StakesHint {
+  return (STAKES_HINT_VALUES as readonly unknown[]).includes(value);
 }
 
 export function isStringArray(value: unknown): value is string[] {
