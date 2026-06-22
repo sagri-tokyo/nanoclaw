@@ -13,6 +13,13 @@ import {
 } from '../src/db.ts';
 import type { ContainerConfig } from '../src/types.ts';
 
+const { emitStatusMock } = vi.hoisted(() => ({ emitStatusMock: vi.fn() }));
+vi.mock('./status.ts', () => ({ emitStatus: emitStatusMock }));
+
+afterEach(() => {
+  emitStatusMock.mockClear();
+});
+
 import {
   InvalidContainerConfigError,
   parseArgs,
@@ -372,13 +379,21 @@ describe('parseArgs container-config missing value', () => {
 });
 
 describe('run() with invalid --container-config', () => {
-  it('exits with code 4 when --container-config value is not valid JSON', async () => {
-    const exitSpy = vi
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((_code?: number | string | null) => {
         throw new Error('process.exit called');
       });
+  });
 
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  it('exits with code 4 when --container-config value is not valid JSON', async () => {
     await expect(
       run([
         '--jid',
@@ -395,8 +410,35 @@ describe('run() with invalid --container-config', () => {
     ).rejects.toThrow('process.exit called');
 
     expect(exitSpy).toHaveBeenCalledWith(4);
+  });
 
-    exitSpy.mockRestore();
+  it('emits a failed status with the invalid_container_config error and exits with code 4 for malformed JSON', async () => {
+    await expect(
+      run([
+        '--jid',
+        '123@g.us',
+        '--name',
+        'Main',
+        '--trigger',
+        '@Andy',
+        '--folder',
+        'slack_main',
+        '--container-config',
+        '{bad}',
+      ]),
+    ).rejects.toThrow('process.exit called');
+
+    expect(emitStatusMock.mock.calls).toStrictEqual([
+      [
+        'REGISTER_CHANNEL',
+        {
+          STATUS: 'failed',
+          ERROR: 'invalid_container_config',
+          LOG: 'logs/setup.log',
+        },
+      ],
+    ]);
+    expect(exitSpy).toHaveBeenCalledWith(4);
   });
 });
 
