@@ -190,8 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_pending_actions_state ON pending_actions(state, e
   `UPDATE pending_actions SET state='consumed', consumed_at=? WHERE token=? AND state='approved'`,
   executed only if `.changes === 1` (same host process, same DB handle as the
   classifier that set `approved` — no cross-process gap).
-- **Terminal deny**: `deny <token>` sets `state='denied'`; the approve path
-  refuses any transition out of `denied`/`consumed`/`expired`.
+- **Terminal reject**: `reject <token>` sets `state='denied'`; the approve path
+  refuses any transition out of `denied`/`consumed`/`expired`. (The operator
+  keyword is `reject`; the internal state and DB accessor use `denied`/`deny`.)
 - **TTL + expiry**: a sweep (folded into the existing IPC poll or a small
   interval) marks `state='pending' AND expires_at < now` as `expired`. The TTL
   value is an OPEN QUESTION (ADR open question 1) — proposed default below,
@@ -206,7 +207,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_actions_state ON pending_actions(state, e
 - **Prompt** (host-rendered, posted via the channel that owns `chat_jid`):
   shows action, target_ref, reversibility, the host-rendered summary, the
   citation_refs, and the 43-char token with the literal `approve <token>` /
-  `deny <token>` instruction. No Block Kit (decision 7, deferred behind the
+  `reject <token>` instruction. No Block Kit (decision 7, deferred behind the
   emit/capture seam).
 - **Capture**: a new `parseApprovalIntent(content)` classifier
   (`src/approval-trigger.ts`, modelled on `abort-trigger.ts`), whole-message
@@ -295,7 +296,7 @@ Each phase is independently mergeable and reversible.
   `loadApproverAllowlist(path?): Set<string>` (fail-CLOSED empty on any error),
   `isApprover(sender, set): boolean`.
 - Acceptance: `is_bot_message` true for any `bot_id` message at both sites;
-  classifier matches only whole-message `approve <43-char>` / `deny <token>`,
+  classifier matches only whole-message `approve <43-char>` / `reject <token>`,
   rejects a human quoting the prompt; approver loader returns empty set on
   ENOENT/bad-JSON; `is_from_me`/`is_bot_message` rejected; unresolved `botUserId`
   treated as deny.
@@ -413,4 +414,4 @@ Each phase is independently mergeable and reversible.
 | Credential location | host `process.env` (already present), NOT forwarded to the container after the forward-list edit |
 | Idempotency | atomic single-use consume `UPDATE ... WHERE token=? AND state='approved'`, `.changes===1` |
 | Retry/backoff | host write client failures fail-fast (no silent retry); a failed replay leaves the row `approved` so a manual re-approve or boot re-drive can retry; surface the failure to the approver channel |
-| Transport | reply-keyword (`approve <token>` / `deny <token>`), whole-message anchored, host-classified, human-only; Block Kit deferred behind the emit/capture seam |
+| Transport | reply-keyword (`approve <token>` / `reject <token>`), whole-message anchored, host-classified, human-only; Block Kit deferred behind the emit/capture seam |

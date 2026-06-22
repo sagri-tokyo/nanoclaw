@@ -112,10 +112,12 @@ function requireString(args: Record<string, unknown>, key: string): string {
 
 const TITLE_MAX = 200;
 const BODY_MAX = 10000;
-// Conservative git ref shape. A value starting with `-` would be read by `gh`
-// as a flag rather than a branch name (argv flag injection), so it is rejected
-// outright even though the argv array is spawned without a shell.
-const BRANCH_NAME = /^[A-Za-z0-9_./-]{1,255}$/;
+// Conservative git ref shape. The first character is anchored to exclude `-`
+// so a leading `-` (which `gh` would read as a flag, not a branch name — argv
+// flag injection) can never match, independent of the explicit startsWith check
+// below. The argv array is spawned without a shell, but flag injection does not
+// need a shell.
+const BRANCH_NAME = /^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,254}$/;
 
 function requireBoundedString(
   args: Record<string, unknown>,

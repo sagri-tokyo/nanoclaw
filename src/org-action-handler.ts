@@ -48,8 +48,14 @@ import { parseApprovalIntent } from './approval-trigger.js';
 import { isApprover } from './approver-allowlist.js';
 import {
   classifyOrgAction,
+  isPlainObject,
+  isReversibility,
+  isStakesHint,
+  isStringArray,
   renderApprovalSummary,
   type OrgActionRecord,
+  type Reversibility,
+  type StakesHint,
 } from './org-action-gate.js';
 import type { OrgActionExecRequest } from './org-action-clients.js';
 import type { NewMessage, PendingActionRow } from './types.js';
@@ -70,8 +76,8 @@ export interface OrgActionGateDeps {
 export interface OrgActionRequestInput {
   action: string;
   target_ref: string;
-  reversibility: 'reversible' | 'draft';
-  stakes_hint: 'safe' | 'gated';
+  reversibility: Reversibility;
+  stakes_hint: StakesHint;
   citation_refs: string[];
   canonical_args: Record<string, unknown>;
 }
@@ -104,12 +110,6 @@ function toClassifierRecord(
   };
 }
 
-const REVERSIBILITY_VALUES: ReadonlySet<string> = new Set([
-  'reversible',
-  'draft',
-]);
-const STAKES_HINT_VALUES: ReadonlySet<string> = new Set(['safe', 'gated']);
-
 interface ParsedPendingRow {
   record: OrgActionRecord;
   execRequest: OrgActionExecRequest;
@@ -126,55 +126,44 @@ interface ParsedPendingRow {
  */
 function parsePendingRow(row: PendingActionRow): ParsedPendingRow {
   const citationRefs: unknown = JSON.parse(row.citation_refs);
-  if (
-    !Array.isArray(citationRefs) ||
-    !citationRefs.every((c) => typeof c === 'string')
-  ) {
+  if (!isStringArray(citationRefs)) {
     throw new Error(
       `org-action: pending row ${row.token} has a non-string[] citation_refs`,
     );
   }
 
   const canonicalArgs: unknown = JSON.parse(row.canonical_args);
-  if (
-    canonicalArgs === null ||
-    typeof canonicalArgs !== 'object' ||
-    Array.isArray(canonicalArgs)
-  ) {
+  if (!isPlainObject(canonicalArgs)) {
     throw new Error(
       `org-action: pending row ${row.token} has a non-object canonical_args`,
     );
   }
 
-  if (!REVERSIBILITY_VALUES.has(row.reversibility)) {
+  if (!isReversibility(row.reversibility)) {
     throw new Error(
       `org-action: pending row ${row.token} has an invalid reversibility "${row.reversibility}"`,
     );
   }
-  if (!STAKES_HINT_VALUES.has(row.stakes_hint)) {
+  if (!isStakesHint(row.stakes_hint)) {
     throw new Error(
       `org-action: pending row ${row.token} has an invalid stakes_hint "${row.stakes_hint}"`,
     );
   }
 
-  const reversibility = row.reversibility as 'reversible' | 'draft';
-  const stakesHint = row.stakes_hint as 'safe' | 'gated';
-  const args = canonicalArgs as Record<string, unknown>;
-
   return {
     record: {
       action: row.action,
       target_ref: row.target_ref,
-      reversibility,
-      stakes_hint: stakesHint,
+      reversibility: row.reversibility,
+      stakes_hint: row.stakes_hint,
       citation_refs: citationRefs,
-      canonical_args: args,
+      canonical_args: canonicalArgs,
       origin_channel: row.chat_jid,
     },
     execRequest: {
       action: row.action,
       target_ref: row.target_ref,
-      canonical_args: args,
+      canonical_args: canonicalArgs,
     },
   };
 }
@@ -407,7 +396,20 @@ export async function reDriveApprovedActions(
 ): Promise<void> {
   const rows = getApprovedUnconsumed();
   for (const row of rows) {
-    const parsed = parsePendingRow(row);
+    // A corrupt persisted row can never succeed on retry, so it must not strand
+    // the healthy rows behind it in the loop (and must not crash the boot). The
+    // catch is scoped to the parse only: a write-client failure below is left to
+    // propagate (fail-fast) so the abandoned row is retried on the next restart.
+    let parsed: ParsedPendingRow;
+    try {
+      parsed = parsePendingRow(row);
+    } catch (err) {
+      logger.error(
+        { token: row.token, err },
+        'org-action boot re-drive: unparseable row — skipping (left approved for inspection)',
+      );
+      continue;
+    }
     const verdict = classifyOrgAction(parsed.record);
     if (verdict === 'refuse') {
       logger.error(

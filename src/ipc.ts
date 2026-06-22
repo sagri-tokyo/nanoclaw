@@ -13,6 +13,14 @@ import {
   logger,
   type ActionRecord,
 } from './logger.js';
+import {
+  isPlainObject,
+  isReversibility,
+  isStakesHint,
+  isStringArray,
+  type Reversibility,
+  type StakesHint,
+} from './org-action-gate.js';
 import { RegisteredGroup } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
@@ -73,8 +81,8 @@ export interface IpcDeps {
     record: {
       action: string;
       target_ref: string;
-      reversibility: string;
-      stakes_hint: string;
+      reversibility: Reversibility;
+      stakes_hint: StakesHint;
       citation_refs: string[];
       canonical_args: Record<string, unknown>;
     },
@@ -699,15 +707,27 @@ export async function processTaskIpc(
         emitReject('ipc_org_action', 'MissingRequiredField');
         break;
       }
+      // reversibility/stakes_hint are closed enums; an out-of-set value must be
+      // a hard reject, never coerced. A coerced stakes_hint='safe' would route a
+      // gated action through the execute path; a coerced reversibility hides the
+      // true tier from the approver summary.
+      if (
+        !isReversibility(data.reversibility) ||
+        !isStakesHint(data.stakes_hint)
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'Invalid org_action — reversibility/stakes_hint outside the allowed set',
+        );
+        emitReject('ipc_org_action', 'InvalidPayload');
+        break;
+      }
+      const reversibility: Reversibility = data.reversibility;
+      const stakesHint: StakesHint = data.stakes_hint;
       // canonical_args is the exact arg set the host replays. A malformed
       // value must be a hard reject, never coerced to {} — a coerced {} would
       // pass the gate, consume the approval, and then drop the write silently.
-      if (
-        data.canonical_args === undefined ||
-        data.canonical_args === null ||
-        typeof data.canonical_args !== 'object' ||
-        Array.isArray(data.canonical_args)
-      ) {
+      if (!isPlainObject(data.canonical_args)) {
         logger.warn(
           { sourceGroup },
           'Invalid org_action — canonical_args must be a non-array object',
@@ -715,10 +735,10 @@ export async function processTaskIpc(
         emitReject('ipc_org_action', 'InvalidPayload');
         break;
       }
+      const canonicalArgs: Record<string, unknown> = data.canonical_args;
       if (
         data.citation_refs !== undefined &&
-        (!Array.isArray(data.citation_refs) ||
-          !data.citation_refs.every((c) => typeof c === 'string'))
+        !isStringArray(data.citation_refs)
       ) {
         logger.warn(
           { sourceGroup },
@@ -727,11 +747,7 @@ export async function processTaskIpc(
         emitReject('ipc_org_action', 'InvalidPayload');
         break;
       }
-      const citationRefs: string[] =
-        data.citation_refs === undefined
-          ? []
-          : (data.citation_refs as string[]);
-      const canonicalArgs = data.canonical_args as Record<string, unknown>;
+      const citationRefs: string[] = data.citation_refs ?? [];
       // The chat jid that owns the source group is where the approval prompt
       // posts. For main, fall back to the requesting group's own jid.
       let chatJid: string | undefined;
@@ -753,8 +769,8 @@ export async function processTaskIpc(
         {
           action: data.action,
           target_ref: data.target_ref,
-          reversibility: data.reversibility,
-          stakes_hint: data.stakes_hint,
+          reversibility,
+          stakes_hint: stakesHint,
           citation_refs: citationRefs,
           canonical_args: canonicalArgs,
         },

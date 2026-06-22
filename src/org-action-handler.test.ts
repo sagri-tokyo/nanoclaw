@@ -325,7 +325,7 @@ describe('handleApprovalReply — execution + exactly-once', () => {
 });
 
 describe('parsePendingRow validation — no coercion on the security path', () => {
-  function approvedRow(
+  function pendingRow(
     overrides: Partial<PendingActionRow> = {},
   ): PendingActionRow {
     return {
@@ -340,47 +340,56 @@ describe('parsePendingRow validation — no coercion on the security path', () =
       canonical_args: '{"property":"Status","value":"Ready for AI"}',
       summary: 's',
       requester: 'g',
-      state: 'approved',
+      state: 'pending',
       created_at: '2026-06-22T00:00:00.000Z',
       expires_at: '2026-06-23T00:00:00.000Z',
-      approved_by: 'U_APPROVER',
+      approved_by: null,
       consumed_at: null,
       ...overrides,
     };
   }
 
-  it('throws and never consumes when canonical_args is a JSON array, not an object', async () => {
+  // On the live approve path the validation throw propagates (fail-fast). The
+  // row is left approved (approvePendingAction ran), never consumed or executed.
+  async function approveAndExpect(
+    bad: Partial<PendingActionRow>,
+    pattern: RegExp,
+  ): Promise<void> {
     const { deps, rec } = makeDeps();
-    createPendingAction(approvedRow({ canonical_args: '[1,2,3]' }));
-    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
-      /non-object canonical_args/,
-    );
+    createPendingAction(pendingRow(bad));
+    await expect(
+      handleApprovalReply('slack:C0AAA1111', approval(), deps),
+    ).rejects.toThrow(pattern);
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  }
+
+  it('throws and never consumes when canonical_args is a JSON array, not an object', async () => {
+    await approveAndExpect(
+      { canonical_args: '[1,2,3]' },
+      /non-object canonical_args/,
+    );
   });
 
   it('throws and never consumes when citation_refs is not a string array', async () => {
-    const { deps, rec } = makeDeps();
-    createPendingAction(approvedRow({ citation_refs: '[1,2]' }));
-    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+    await approveAndExpect(
+      { citation_refs: '[1,2]' },
       /non-string\[\] citation_refs/,
     );
-    expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
   });
 
   it('throws and never consumes when reversibility is outside the allowed set', async () => {
-    const { deps, rec } = makeDeps();
-    createPendingAction(
-      approvedRow({
-        reversibility: 'bogus' as PendingActionRow['reversibility'],
-      }),
-    );
-    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+    await approveAndExpect(
+      { reversibility: 'bogus' as PendingActionRow['reversibility'] },
       /invalid reversibility/,
     );
-    expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  });
+
+  it('throws and never consumes when stakes_hint is outside the allowed set', async () => {
+    await approveAndExpect(
+      { stakes_hint: 'bogus' as PendingActionRow['stakes_hint'] },
+      /invalid stakes_hint/,
+    );
   });
 });
 
@@ -424,5 +433,43 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     await reDriveApprovedActions(deps);
     expect(rec.executed).toHaveLength(1);
     expect(rec.posted).toHaveLength(1);
+  });
+
+  it('isolates an unparseable row and still drives the healthy rows behind it', async () => {
+    const { deps, rec } = makeDeps();
+    const base: Omit<PendingActionRow, 'token' | 'canonical_args'> = {
+      source_group: 'g',
+      chat_jid: 'slack:C0AAA1111',
+      action: 'notion.write_property',
+      target_ref: HEX32,
+      reversibility: 'reversible',
+      stakes_hint: 'gated',
+      citation_refs: '[]',
+      summary: 's',
+      requester: 'g',
+      state: 'approved',
+      created_at: '2026-06-22T00:00:00.000Z',
+      expires_at: '2026-06-23T00:00:00.000Z',
+      approved_by: 'U_APPROVER',
+      consumed_at: null,
+    };
+    createPendingAction({
+      ...base,
+      token: 'C'.repeat(43),
+      canonical_args: '[1,2,3]',
+    });
+    createPendingAction({
+      ...base,
+      token: 'H'.repeat(43),
+      canonical_args: '{"property":"Status","value":"Ready for AI"}',
+    });
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toEqual([
+      { action: 'notion.write_property', target_ref: HEX32 },
+    ]);
+    expect(getPendingAction('C'.repeat(43))?.state).toBe('approved');
+    expect(getPendingAction('H'.repeat(43))?.state).toBe('consumed');
   });
 });

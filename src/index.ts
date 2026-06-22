@@ -1061,19 +1061,20 @@ async function main(): Promise<void> {
       }
     },
     onOrgAction: async (record, sourceGroup, chatJid) => {
-      // ipc.ts hard-rejects malformed citation_refs/canonical_args before this
-      // handler is called, so the values arrive already typed. No coercion: a
-      // coerced {} would pass the gate, consume the approval, then drop the
-      // write silently (the footgun ipc.ts names). The requester is the source
-      // GROUP FOLDER, not a user — see the separation-of-duty scope note in
-      // org-action-handler.ts; user-level dual control is not enforced.
+      // ipc.ts hard-rejects every malformed field (reversibility/stakes_hint
+      // outside their enums, non-object canonical_args, non-string[]
+      // citation_refs) before this handler is called, so the record arrives
+      // fully typed. No coercion: a coerced value would pass the gate, consume
+      // the approval, then drop or mis-tier the write silently (the footgun
+      // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
+      // see the separation-of-duty scope note in org-action-handler.ts;
+      // user-level dual control is not enforced.
       await driveOrgActionRequest(
         {
           action: record.action,
           target_ref: record.target_ref,
-          reversibility:
-            record.reversibility === 'draft' ? 'draft' : 'reversible',
-          stakes_hint: record.stakes_hint === 'gated' ? 'gated' : 'safe',
+          reversibility: record.reversibility,
+          stakes_hint: record.stakes_hint,
           citation_refs: record.citation_refs,
           canonical_args: record.canonical_args,
         },

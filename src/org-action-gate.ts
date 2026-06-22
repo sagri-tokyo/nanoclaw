@@ -32,11 +32,34 @@ const FIXED_ACTIONS: ReadonlySet<string> = new Set<OrgActionName>([
   'doc.draft',
 ]);
 
+export const REVERSIBILITY_VALUES = ['reversible', 'draft'] as const;
+export const STAKES_HINT_VALUES = ['safe', 'gated'] as const;
+export type Reversibility = (typeof REVERSIBILITY_VALUES)[number];
+export type StakesHint = (typeof STAKES_HINT_VALUES)[number];
+
+export function isReversibility(value: string): value is Reversibility {
+  return (REVERSIBILITY_VALUES as readonly string[]).includes(value);
+}
+
+export function isStakesHint(value: string): value is StakesHint {
+  return (STAKES_HINT_VALUES as readonly string[]).includes(value);
+}
+
+export function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((c) => typeof c === 'string');
+}
+
+export function isPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 export interface OrgActionRecord {
   action: string;
   target_ref: string;
-  reversibility: 'reversible' | 'draft';
-  stakes_hint: 'safe' | 'gated';
+  reversibility: Reversibility;
+  stakes_hint: StakesHint;
   citation_refs: string[];
   canonical_args: Record<string, unknown>;
   // The Slack channel jid the request originated in. The cross-channel digest
@@ -74,7 +97,10 @@ function isRedLine(record: OrgActionRecord): boolean {
   if (stringContainsRedLine(record.target_ref)) return true;
   // A red-line marker in a body/value field (e.g. a digest body about MRV or a
   // Notion property value naming a jichitai) must refuse just as a red-line
-  // target does — otherwise the marker hides one level below target_ref.
+  // target does — otherwise the marker hides one level below target_ref. The
+  // scan is one level deep on purpose: every exec-class arg the write client
+  // consumes is a top-level string (`requireString`/`requireBoundedString`), so
+  // a nested object value can never reach execution and need not be scanned.
   for (const value of Object.values(record.canonical_args)) {
     if (typeof value === 'string' && stringContainsRedLine(value)) return true;
   }

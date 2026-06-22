@@ -131,6 +131,40 @@ describe('org_action IPC drain', () => {
     expect(orgActionCalls).toHaveLength(0);
   });
 
+  it('rejects a record whose reversibility is outside the allowed set', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        reversibility: 'irreversible',
+        stakes_hint: 'gated',
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
+    expect(orgActionCalls).toHaveLength(0);
+  });
+
+  it('rejects a record whose stakes_hint is outside the allowed set', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'red_line',
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
+    expect(orgActionCalls).toHaveLength(0);
+  });
+
   it('rejects a record whose canonical_args is not a non-array object', async () => {
     for (const bad of ['a string', 42, ['array'], null]) {
       orgActionCalls.length = 0;
