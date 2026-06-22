@@ -480,6 +480,104 @@ export async function fetchJsonObject(
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * SSRF-guarded write (POST/PATCH). Mirrors `performHttpsGet` but sends a body
+ * and does NOT follow redirects — a write must hit the validated origin or
+ * fail, never replay its credentialed body to a redirect target. Reuses
+ * `validatePublicHttpsUrl` so the host write path inherits the public-address /
+ * DNS-rebinding guards. Returns the parsed JSON object on a 2xx; throws on any
+ * non-2xx or non-JSON response (fail-fast — no silent retry).
+ */
+export async function fetchJsonWrite(args: {
+  url: string;
+  method: 'POST' | 'PATCH';
+  headers: Record<string, string>;
+  body: string;
+  deps: Required<FetchUntrustedDeps>;
+}): Promise<Record<string, unknown>> {
+  const validated = await validatePublicHttpsUrl(args.url, args.deps);
+  const { parsed, resolvedAddress } = validated;
+  const bodyBuffer = Buffer.from(args.body, 'utf-8');
+  const response = await new Promise<{ status: number; body: string }>(
+    (resolve, reject) => {
+      const tcpHostname =
+        resolvedAddress.includes(':') && !resolvedAddress.startsWith('[')
+          ? `[${resolvedAddress}]`
+          : resolvedAddress;
+      const finalHeaders: Record<string, string> = {
+        ...args.headers,
+        'content-length': String(bodyBuffer.length),
+      };
+      if (finalHeaders.host === undefined && finalHeaders.Host === undefined) {
+        finalHeaders.host = parsed.hostname;
+      }
+      const req = args.deps.httpsRequestFactory({
+        hostname: tcpHostname,
+        port: parsed.port || 443,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: args.method,
+        headers: finalHeaders,
+        servername: parsed.hostname,
+      });
+      const timer = setTimeout(() => {
+        req.destroy(
+          new FetchUntrustedTimeout(`write timed out after ${FETCH_TIMEOUT_MS}ms`),
+        );
+      }, FETCH_TIMEOUT_MS);
+      req.on('response', (res) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on('data', (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > MAX_BODY_BYTES) {
+            req.destroy(new Error('response body exceeded cap'));
+            clearTimeout(timer);
+            reject(new FetchUntrustedError('fetch_failure', 'body too large'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          clearTimeout(timer);
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf-8'),
+          });
+        });
+        res.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+      req.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      req.write(bodyBuffer);
+      req.end();
+    },
+  );
+  if (response.status < 200 || response.status >= 300) {
+    throwForNon2xxStatus(
+      response.status,
+      `write target returned non-2xx status ${response.status}: ${response.body.slice(0, 500)}`,
+    );
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(response.body);
+  } catch {
+    throw new FetchUntrustedError('fetch_failure', 'write response was not json');
+  }
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    throw new FetchUntrustedError(
+      'fetch_failure',
+      'write response was not an object',
+    );
+  }
+  return json as Record<string, unknown>;
+}
+
 interface ParsedNotionId {
   canonicalId: string;
   canonicalUrl: string;

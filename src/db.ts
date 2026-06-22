@@ -9,6 +9,7 @@ import {
   FileRef,
   MessageFileBundle,
   NewMessage,
+  PendingActionRow,
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
@@ -88,6 +89,27 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS pending_actions (
+      token TEXT PRIMARY KEY,
+      source_group TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target_ref TEXT NOT NULL,
+      reversibility TEXT NOT NULL,
+      stakes_hint TEXT NOT NULL,
+      citation_refs TEXT NOT NULL,
+      canonical_args TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      requester TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      approved_by TEXT,
+      consumed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_actions_state
+      ON pending_actions(state, expires_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -860,6 +882,109 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Pending org-action accessors (D2.4 approval gate) ---
+
+export function createPendingAction(rowInput: PendingActionRow): void {
+  db.prepare(
+    `INSERT INTO pending_actions
+      (token, source_group, chat_jid, action, target_ref, reversibility,
+       stakes_hint, citation_refs, canonical_args, summary, requester, state,
+       created_at, expires_at, approved_by, consumed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    rowInput.token,
+    rowInput.source_group,
+    rowInput.chat_jid,
+    rowInput.action,
+    rowInput.target_ref,
+    rowInput.reversibility,
+    rowInput.stakes_hint,
+    rowInput.citation_refs,
+    rowInput.canonical_args,
+    rowInput.summary,
+    rowInput.requester,
+    rowInput.state,
+    rowInput.created_at,
+    rowInput.expires_at,
+    rowInput.approved_by,
+    rowInput.consumed_at,
+  );
+}
+
+export function getPendingAction(token: string): PendingActionRow | undefined {
+  return db
+    .prepare('SELECT * FROM pending_actions WHERE token = ?')
+    .get(token) as PendingActionRow | undefined;
+}
+
+/**
+ * Transition a row from `pending` to `approved`, recording the approver. Returns
+ * true only when exactly one `pending` row changed — a denied/expired/consumed
+ * row cannot be re-approved (the WHERE state='pending' guard is terminal).
+ */
+export function approvePendingAction(
+  token: string,
+  approverId: string,
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE pending_actions SET state = 'approved', approved_by = ?
+       WHERE token = ? AND state = 'pending'`,
+    )
+    .run(approverId, token);
+  return result.changes === 1;
+}
+
+/**
+ * Atomic single-use consume. Returns true only on the one statement that flips
+ * an `approved` row to `consumed`; every later call returns false. This is the
+ * exactly-once execution gate (ADR-0002 decision 4).
+ */
+export function consumePendingAction(token: string, consumedAt: string): boolean {
+  const result = db
+    .prepare(
+      `UPDATE pending_actions SET state = 'consumed', consumed_at = ?
+       WHERE token = ? AND state = 'approved'`,
+    )
+    .run(consumedAt, token);
+  return result.changes === 1;
+}
+
+export function denyPendingAction(token: string): boolean {
+  const result = db
+    .prepare(
+      `UPDATE pending_actions SET state = 'denied'
+       WHERE token = ? AND state = 'pending'`,
+    )
+    .run(token);
+  return result.changes === 1;
+}
+
+/**
+ * Mark every still-`pending` row whose TTL has passed as `expired`. Approved
+ * rows are never swept (an approval awaiting execution must survive). Returns
+ * the number of rows expired.
+ */
+export function expirePendingActions(now: string): number {
+  const result = db
+    .prepare(
+      `UPDATE pending_actions SET state = 'expired'
+       WHERE state = 'pending' AND expires_at < ?`,
+    )
+    .run(now);
+  return result.changes;
+}
+
+/** Rows approved but not yet consumed — re-driven on boot for exactly-once. */
+export function getApprovedUnconsumed(): PendingActionRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM pending_actions WHERE state = 'approved'
+       ORDER BY created_at`,
+    )
+    .all() as PendingActionRow[];
 }
 
 // --- JSON migration ---

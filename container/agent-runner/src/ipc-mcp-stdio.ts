@@ -624,6 +624,76 @@ source_type values and required params:
   },
 );
 
+server.tool(
+  'org_action',
+  `Request a higher-stakes internal org-action (D2.4). Drops a request for the host to classify, execute, or hold pending a human approval. You never execute the effect yourself; the host owns the write tokens.
+
+The host re-classifies every request authoritatively — your stakes_hint is advisory only and is NEVER trusted for the decision. A safe action runs immediately host-side; a gated action is held and an approver is notified.
+
+IMPORTANT: a gated action returns "submitted; held pending approval — do not proceed". Treat it as a BLOCKER: surface it upward and do NOT start any dependent work on the assumption it succeeded. The host posts the result asynchronously once an approver acts.
+
+action must be one of the fixed seven:
+• notion.append_progress  — append a progress block to an existing page
+• notion.write_property   — set a property on an existing page
+• notion.create_task      — create a Draft row in the Tasks DB
+• github.file_issue       — open an issue in sagri-tokyo/sagri-ai
+• github.open_draft_pr    — open a draft PR in sagri-tokyo/sagri-ai
+• slack.post_digest       — post a digest to a channel
+• doc.draft               — produce a Notion draft page (never sends)
+
+target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack channel id), never prose.`,
+  {
+    action: z.enum([
+      'notion.append_progress',
+      'notion.write_property',
+      'notion.create_task',
+      'github.file_issue',
+      'github.open_draft_pr',
+      'slack.post_digest',
+      'doc.draft',
+    ]),
+    target_ref: z
+      .string()
+      .min(1)
+      .describe('Constrained id: Notion 32-hex id | repo slug | Slack channel id'),
+    reversibility: z.enum(['reversible', 'draft']),
+    stakes_hint: z
+      .enum(['safe', 'gated'])
+      .describe('Advisory only — the host classifier is authoritative'),
+    citation_refs: z
+      .array(z.string())
+      .default([])
+      .describe('Read-half citation ids the act consumed (provenance)'),
+    canonical_args: z
+      .record(z.string(), z.unknown())
+      .describe('The exact args the host will replay (property/value, title, body, text, etc.)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'org_action',
+      action: args.action,
+      target_ref: args.target_ref,
+      reversibility: args.reversibility,
+      stakes_hint: args.stakes_hint,
+      citation_refs: args.citation_refs,
+      canonical_args: args.canonical_args,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: 'submitted; held pending approval — do not proceed with dependent work. The host will execute it (or report the result) asynchronously.',
+        },
+      ],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

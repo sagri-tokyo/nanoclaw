@@ -238,6 +238,50 @@ describe('handleInboundMessage — abort intercept', () => {
     expect(storeMessage).not.toHaveBeenCalled();
   });
 
+  it('intercepts an approval reply ahead of storeMessage', () => {
+    const token = 'T'.repeat(43);
+    const handleApproval = vi.fn(() => true);
+    const msg = buildMessage({ content: `approve ${token}`, is_dm: false });
+
+    handleInboundMessage('slack:C0123456789', msg, {
+      registeredGroups: () => registeredGroups,
+      storeMessage,
+      handleAbort,
+      handleRemoteControl,
+      handleApproval,
+      loadSenderAllowlist: () => ({
+        default: { allow: '*', mode: 'trigger' },
+        chats: {},
+        logDenied: false,
+      }),
+    });
+
+    expect(handleApproval).toHaveBeenCalledWith('slack:C0123456789', msg);
+    expect(storeMessage).not.toHaveBeenCalled();
+    expect(handleAbort).not.toHaveBeenCalled();
+  });
+
+  it('falls through to storeMessage when handleApproval reports not-an-approval', () => {
+    const handleApproval = vi.fn(() => false);
+    const msg = buildMessage({ content: 'ordinary text', is_dm: false });
+
+    handleInboundMessage('slack:C0123456789', msg, {
+      registeredGroups: () => registeredGroups,
+      storeMessage,
+      handleAbort,
+      handleRemoteControl,
+      handleApproval,
+      loadSenderAllowlist: () => ({
+        default: { allow: '*', mode: 'trigger' },
+        chats: {},
+        logDenied: false,
+      }),
+    });
+
+    expect(handleApproval).toHaveBeenCalledTimes(1);
+    expect(storeMessage).toHaveBeenCalledWith(msg);
+  });
+
   it('logs when an abort intent is intercepted', () => {
     const msg = buildMessage({ content: '/stop', is_dm: false });
 

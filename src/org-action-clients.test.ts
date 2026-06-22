@@ -1,0 +1,282 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import http from 'http';
+import type { AddressInfo } from 'net';
+import type { RequestOptions } from 'https';
+
+import {
+  executeOrgAction,
+  type OrgActionClientDeps,
+} from './org-action-clients.js';
+import type { FetchUntrustedDeps } from './fetch-untrusted.js';
+
+const HEX32 = 'a'.repeat(32);
+
+interface CapturedRequest {
+  method: string;
+  path: string;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}
+
+interface FakeServer {
+  port: number;
+  captured: CapturedRequest[];
+  setResponse: (status: number, body: string) => void;
+  close: () => Promise<void>;
+}
+
+async function startFakeServer(): Promise<FakeServer> {
+  const captured: CapturedRequest[] = [];
+  let response = { status: 200, body: '{"ok":true}' };
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      captured.push({
+        method: req.method ?? '',
+        path: req.url ?? '',
+        headers: req.headers,
+        body: Buffer.concat(chunks).toString('utf-8'),
+      });
+      res.writeHead(response.status, { 'content-type': 'application/json' });
+      res.end(response.body);
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    port: (server.address() as AddressInfo).port,
+    captured,
+    setResponse: (status, body) => {
+      response = { status, body };
+    },
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
+// Route every https request for any host to the one loopback server, and make
+// DNS resolve every host to a routable-looking public IP so the SSRF guard
+// passes (the production guard rejects RFC1918; 93.184.216.34 is public).
+function loopbackDeps(port: number): FetchUntrustedDeps {
+  return {
+    lookup: async () => ({ address: '93.184.216.34', family: 4 }),
+    httpsRequestFactory: (options: RequestOptions) =>
+      http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: options.path,
+        method: options.method,
+        headers: options.headers,
+      }),
+  };
+}
+
+let server: FakeServer;
+const ghCalls: { args: string[] }[] = [];
+
+beforeEach(async () => {
+  server = await startFakeServer();
+  ghCalls.length = 0;
+});
+
+afterEach(async () => {
+  await server.close();
+});
+
+function deps(overrides: Partial<OrgActionClientDeps> = {}): OrgActionClientDeps {
+  return {
+    notionApiKey: 'notion-secret',
+    githubToken: 'gh-secret',
+    fetchDeps: loopbackDeps(server.port),
+    spawnGh: async (args) => {
+      ghCalls.push({ args });
+      return { stdout: 'https://github.com/sagri-tokyo/sagri-ai/issues/1\n', code: 0 };
+    },
+    sendDigest: async () => {},
+    ...overrides,
+  };
+}
+
+describe('notion writers', () => {
+  it('append_progress PATCHes /v1/blocks/{id}/children with the host token', async () => {
+    await executeOrgAction(
+      {
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        canonical_args: { text: 'progress note' },
+      },
+      deps(),
+    );
+    expect(server.captured).toHaveLength(1);
+    const req = server.captured[0];
+    expect(req.method).toBe('PATCH');
+    expect(req.path).toBe(`/v1/blocks/${HEX32}/children`);
+    expect(req.headers.authorization).toBe('Bearer notion-secret');
+    expect(req.headers['notion-version']).toBe('2022-06-28');
+  });
+
+  it('write_property PATCHes /v1/pages/{id} with a rich_text body for a text property', async () => {
+    await executeOrgAction(
+      {
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        canonical_args: { property: 'Results Summary', value: 'done' },
+      },
+      deps(),
+    );
+    const req = server.captured[0];
+    expect(req.method).toBe('PATCH');
+    expect(req.path).toBe(`/v1/pages/${HEX32}`);
+    expect(JSON.parse(req.body)).toEqual({
+      properties: {
+        'Results Summary': { rich_text: [{ text: { content: 'done' } }] },
+      },
+    });
+  });
+
+  it('write_property sends a select body for the Status lifecycle property', async () => {
+    await executeOrgAction(
+      {
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      deps(),
+    );
+    expect(JSON.parse(server.captured[0].body)).toEqual({
+      properties: { Status: { select: { name: 'Ready for AI' } } },
+    });
+  });
+
+  it('create_task POSTs /v1/pages', async () => {
+    await executeOrgAction(
+      {
+        action: 'notion.create_task',
+        target_ref: HEX32,
+        canonical_args: { title: 'New task' },
+      },
+      deps(),
+    );
+    const req = server.captured[0];
+    expect(req.method).toBe('POST');
+    expect(req.path).toBe('/v1/pages');
+  });
+
+  it('throws (fail-fast) on a non-2xx Notion response', async () => {
+    server.setResponse(400, '{"message":"bad"}');
+    await expect(
+      executeOrgAction(
+        {
+          action: 'notion.write_property',
+          target_ref: HEX32,
+          canonical_args: { property: 'X', value: 'y' },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+describe('github writers', () => {
+  it('file_issue spawns gh with an arg array against the allowlisted repo', async () => {
+    await executeOrgAction(
+      {
+        action: 'github.file_issue',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        canonical_args: { title: 'Bug', body: 'Details' },
+      },
+      deps(),
+    );
+    expect(ghCalls).toHaveLength(1);
+    expect(ghCalls[0].args).toEqual([
+      'issue',
+      'create',
+      '--repo',
+      'sagri-tokyo/sagri-ai',
+      '--title',
+      'Bug',
+      '--body',
+      'Details',
+    ]);
+  });
+
+  it('open_draft_pr always passes --draft', async () => {
+    await executeOrgAction(
+      {
+        action: 'github.open_draft_pr',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        canonical_args: {
+          head: 'feat/x',
+          base: 'main',
+          title: 'PR',
+          body: 'body',
+        },
+      },
+      deps(),
+    );
+    expect(ghCalls[0].args).toContain('--draft');
+    expect(ghCalls[0].args).not.toContain('ready');
+    expect(ghCalls[0].args).not.toContain('merge');
+  });
+
+  it('refuses any repo other than the allowlisted one', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/nanoclaw',
+          canonical_args: { title: 'X', body: 'y' },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow(/allowlist/i);
+    expect(ghCalls).toHaveLength(0);
+  });
+
+  it('throws when gh exits non-zero', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'X', body: 'y' },
+        },
+        deps({
+          spawnGh: async () => ({ stdout: '', stderr: 'boom', code: 1 }),
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+describe('slack digest + doc.draft', () => {
+  it('post_digest delegates to the host send seam', async () => {
+    const posted: { channelId: string; text: string }[] = [];
+    await executeOrgAction(
+      {
+        action: 'slack.post_digest',
+        target_ref: 'C0AAA1111',
+        canonical_args: { text: 'the digest' },
+      },
+      deps({
+        sendDigest: async (channelId, text) => {
+          posted.push({ channelId, text });
+        },
+      }),
+    );
+    expect(posted).toEqual([{ channelId: 'C0AAA1111', text: 'the digest' }]);
+  });
+
+  it('doc.draft creates a Notion page (POST /v1/pages)', async () => {
+    await executeOrgAction(
+      {
+        action: 'doc.draft',
+        target_ref: HEX32,
+        canonical_args: { title: 'Draft', body: 'content' },
+      },
+      deps(),
+    );
+    const req = server.captured[0];
+    expect(req.method).toBe('POST');
+    expect(req.path).toBe('/v1/pages');
+  });
+});
