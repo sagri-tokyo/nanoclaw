@@ -445,8 +445,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // OTel enduser.id (RFC 0001 Phase 1): the human who triggered this run — the
   // most recent non-bot sender in the prompt batch. Undefined when the batch
-  // carries no human message; the telemetry layer substitutes a namespaced
-  // placeholder rather than fabricating identity.
+  // carries no human message; for an interactive run the telemetry layer then
+  // disables telemetry for that spawn (no trace reaches Langfuse) rather than
+  // fabricating identity. The namespaced unattributed placeholder applies only
+  // to scheduled tasks.
   const triggeringUserId = [...promptMessages]
     .reverse()
     .find((message) => !message.is_bot_message)?.sender;

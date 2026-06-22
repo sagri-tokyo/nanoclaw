@@ -449,8 +449,13 @@ function buildContainerPlan(
     mounts.push(...validatedMounts);
   }
 
-  // Telemetry is best-effort: a config/identity error must not abort the spawn.
-  // Catch only the telemetry-env build; all other errors in this function propagate normally.
+  // Telemetry is best-effort: it must never abort a spawn. The unattributable
+  // interactive run is handled inside buildTelemetryEnv (warn + empty env).
+  // This catch covers the remaining failure mode — an infra-config injection
+  // guard throwing (bad OTLP headers, host attribute collision, unsafe
+  // identity value). Because buildTelemetryEnv throws before Object.assign
+  // runs, extraEnv is left untouched and the container simply receives no OTel
+  // env; nothing partial or corrupted reaches it.
   try {
     Object.assign(
       extraEnv,

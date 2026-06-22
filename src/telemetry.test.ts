@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import { buildTelemetryEnv, UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
 
@@ -131,16 +131,42 @@ describe('buildTelemetryEnv', () => {
     );
   });
 
-  it('throws for an interactive spawn missing its triggering user rather than mis-attributing', () => {
+  it('returns an empty env for an interactive spawn missing its triggering user, disabling telemetry rather than throwing', () => {
     enableTelemetry();
 
-    expect(() =>
+    const result = buildTelemetryEnv({
+      triggeringUserId: undefined,
+      isScheduledTask: false,
+      tenantId: 'soil-team',
+    });
+
+    expect(result).toEqual({});
+  });
+
+  it('warns with the tenant id and a disabled-telemetry message for an interactive spawn missing its triggering user', () => {
+    enableTelemetry();
+    const written: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: string | Uint8Array) => {
+        written.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+
+    try {
       buildTelemetryEnv({
         triggeringUserId: undefined,
         isScheduledTask: false,
         tenantId: 'soil-team',
-      }),
-    ).toThrow(/triggeringUserId is required/);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatch(
+      /WARN.*telemetry disabled for this run: interactive spawn has no triggering user to attribute[\s\S]*tenantId[\s\S]*"soil-team"/,
+    );
   });
 
   it('prepends host-level resource attributes before the per-spawn identity', () => {
@@ -265,28 +291,59 @@ describe('buildTelemetryEnv', () => {
   });
 });
 
-describe('buildTelemetryEnv spawn-path resilience', () => {
-  it('produces an empty env when the caller catches a telemetry-build failure, so the agent run continues', () => {
-    // Simulates the try/catch wrapper in the spawn path (container-runner.ts).
-    // A bad identity config (missing triggeringUserId on an interactive spawn)
-    // must not propagate to the caller; the run proceeds with telemetry disabled.
+describe('buildTelemetryEnv OTLP header safety', () => {
+  it('rejects OTLP headers containing a newline', () => {
     enableTelemetry();
+    process.env.OTEL_EXPORTER_OTLP_HEADERS =
+      'Authorization=Basic cGs6c2s=\nX-Inject=evil';
 
-    let telemetryEnv: Record<string, string> = {};
-    let caughtError: unknown = null;
-
-    try {
-      telemetryEnv = buildTelemetryEnv({
-        triggeringUserId: undefined,
+    expect(() =>
+      buildTelemetryEnv({
+        triggeringUserId: 'U123',
         isScheduledTask: false,
         tenantId: 'soil-team',
-      });
-    } catch (error) {
-      caughtError = error;
-      telemetryEnv = {};
-    }
+      }),
+    ).toThrow('OTEL_EXPORTER_OTLP_HEADERS contains a line break or null byte');
+  });
 
-    expect(caughtError).toBeInstanceOf(Error);
-    expect(telemetryEnv).toEqual({});
+  it('rejects OTLP headers containing a carriage return', () => {
+    enableTelemetry();
+    process.env.OTEL_EXPORTER_OTLP_HEADERS =
+      'Authorization=Basic cGs6c2s=\r\nX-Inject=evil';
+
+    expect(() =>
+      buildTelemetryEnv({
+        triggeringUserId: 'U123',
+        isScheduledTask: false,
+        tenantId: 'soil-team',
+      }),
+    ).toThrow('OTEL_EXPORTER_OTLP_HEADERS contains a line break or null byte');
+  });
+
+  it('rejects an OTLP protocol containing a newline', () => {
+    enableTelemetry();
+    process.env.OTEL_EXPORTER_OTLP_PROTOCOL = 'http/protobuf\nX-Inject=evil';
+
+    expect(() =>
+      buildTelemetryEnv({
+        triggeringUserId: 'U123',
+        isScheduledTask: false,
+        tenantId: 'soil-team',
+      }),
+    ).toThrow('OTEL_EXPORTER_OTLP_PROTOCOL contains a line break or null byte');
+  });
+
+  it('rejects an OTLP endpoint containing a carriage return', () => {
+    enableTelemetry();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT =
+      'http://langfuse.internal:4318\r\nX-Inject=evil';
+
+    expect(() =>
+      buildTelemetryEnv({
+        triggeringUserId: 'U123',
+        isScheduledTask: false,
+        tenantId: 'soil-team',
+      }),
+    ).toThrow('OTEL_EXPORTER_OTLP_ENDPOINT contains a line break or null byte');
   });
 });
