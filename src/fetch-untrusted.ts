@@ -521,7 +521,9 @@ export async function fetchJsonWrite(args: {
       });
       const timer = setTimeout(() => {
         req.destroy(
-          new FetchUntrustedTimeout(`write timed out after ${FETCH_TIMEOUT_MS}ms`),
+          new FetchUntrustedTimeout(
+            `write timed out after ${FETCH_TIMEOUT_MS}ms`,
+          ),
         );
       }, FETCH_TIMEOUT_MS);
       req.on('response', (res) => {
@@ -567,7 +569,10 @@ export async function fetchJsonWrite(args: {
   try {
     json = JSON.parse(response.body);
   } catch {
-    throw new FetchUntrustedError('fetch_failure', 'write response was not json');
+    throw new FetchUntrustedError(
+      'fetch_failure',
+      'write response was not json',
+    );
   }
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
     throw new FetchUntrustedError(

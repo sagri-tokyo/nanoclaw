@@ -82,14 +82,19 @@ afterEach(async () => {
   await server.close();
 });
 
-function deps(overrides: Partial<OrgActionClientDeps> = {}): OrgActionClientDeps {
+function deps(
+  overrides: Partial<OrgActionClientDeps> = {},
+): OrgActionClientDeps {
   return {
     notionApiKey: 'notion-secret',
     githubToken: 'gh-secret',
     fetchDeps: loopbackDeps(server.port),
     spawnGh: async (args) => {
       ghCalls.push({ args });
-      return { stdout: 'https://github.com/sagri-tokyo/sagri-ai/issues/1\n', code: 0 };
+      return {
+        stdout: 'https://github.com/sagri-tokyo/sagri-ai/issues/1\n',
+        code: 0,
+      };
     },
     sendDigest: async () => {},
     ...overrides,
@@ -245,6 +250,72 @@ describe('github writers', () => {
         }),
       ),
     ).rejects.toThrow();
+  });
+
+  it('rejects a file_issue title over the 200-char cap without spawning gh', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'x'.repeat(201), body: 'y' },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow(/200-character limit/);
+    expect(ghCalls).toHaveLength(0);
+  });
+
+  it('rejects a file_issue body over the 10000-char cap without spawning gh', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'ok', body: 'y'.repeat(10001) },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow(/10000-character limit/);
+    expect(ghCalls).toHaveLength(0);
+  });
+
+  it('rejects an open_draft_pr head beginning with "-" (flag injection) without spawning gh', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: '--force',
+            base: 'main',
+            title: 'PR',
+            body: 'body',
+          },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow(/flag injection/);
+    expect(ghCalls).toHaveLength(0);
+  });
+
+  it('rejects an open_draft_pr base with characters outside the branch-name set', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: 'feat/x',
+            base: 'main; rm -rf /',
+            title: 'PR',
+            body: 'body',
+          },
+        },
+        deps(),
+      ),
+    ).rejects.toThrow(/valid branch name/);
+    expect(ghCalls).toHaveLength(0);
   });
 });
 

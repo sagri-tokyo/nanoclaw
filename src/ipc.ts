@@ -75,8 +75,8 @@ export interface IpcDeps {
       target_ref: string;
       reversibility: string;
       stakes_hint: string;
-      citation_refs: unknown;
-      canonical_args: unknown;
+      citation_refs: string[];
+      canonical_args: Record<string, unknown>;
     },
     sourceGroup: string,
     chatJid: string,
@@ -238,7 +238,6 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // org_action (D2.4)
     action?: string;
     target_ref?: string;
     reversibility?: string;
@@ -718,15 +717,21 @@ export async function processTaskIpc(
       }
       if (
         data.citation_refs !== undefined &&
-        !Array.isArray(data.citation_refs)
+        (!Array.isArray(data.citation_refs) ||
+          !data.citation_refs.every((c) => typeof c === 'string'))
       ) {
         logger.warn(
           { sourceGroup },
-          'Invalid org_action — citation_refs must be an array',
+          'Invalid org_action — citation_refs must be a string array',
         );
         emitReject('ipc_org_action', 'InvalidPayload');
         break;
       }
+      const citationRefs: string[] =
+        data.citation_refs === undefined
+          ? []
+          : (data.citation_refs as string[]);
+      const canonicalArgs = data.canonical_args as Record<string, unknown>;
       // The chat jid that owns the source group is where the approval prompt
       // posts. For main, fall back to the requesting group's own jid.
       let chatJid: string | undefined;
@@ -750,8 +755,8 @@ export async function processTaskIpc(
           target_ref: data.target_ref,
           reversibility: data.reversibility,
           stakes_hint: data.stakes_hint,
-          citation_refs: data.citation_refs,
-          canonical_args: data.canonical_args,
+          citation_refs: citationRefs,
+          canonical_args: canonicalArgs,
         },
         sourceGroup,
         chatJid,

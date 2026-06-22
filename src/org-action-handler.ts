@@ -8,8 +8,24 @@
  *
  * The approval reply path is the fail-closed sibling of `parseAbortIntent`:
  * it parses `approve <token>` / `reject <token>`, rejects any non-allowlisted
- * approver, any bot/self message, and `requester === approver`, then runs the
- * atomic single-use consume so a gated action executes exactly once.
+ * approver and any bot/self message, then runs the atomic single-use consume so
+ * a gated action executes exactly once.
+ *
+ * SEPARATION-OF-DUTY SCOPE (read before relying on the guard):
+ * The dual-control property enforced here is the approver-allowlist gate plus
+ * the bot/self reject. It is NOT user-level "the requesting human cannot
+ * self-approve". The originating Slack user id is not available at the
+ * `org_action` IPC drain: the container is launched per group on a BATCH of
+ * laundered messages (potentially several distinct senders), the MCP tool that
+ * emits the request runs inside the container with only the group folder as
+ * identity, and the triggering user's id is never forwarded into the container
+ * or the IPC request. So the persisted `requester_group` is the requesting
+ * GROUP FOLDER, not a user. The `requesterGroup !== approver` check below can
+ * never be a user-level self-approval guard (a group folder string and a Slack
+ * user id never collide); it only excludes the degenerate case where the
+ * approver allowlist itself names a group-folder string. Wiring real user-level
+ * dual control would require new plumbing to carry the triggering sender id
+ * through container launch into the org_action request (tracked separately).
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -63,7 +79,10 @@ export interface OrgActionRequestInput {
 export interface OrgActionRequestContext {
   sourceGroup: string;
   chatJid: string;
-  requester: string;
+  // The requesting GROUP FOLDER, not a user id. See the separation-of-duty
+  // scope note in the module docstring: user-level dual control is not enforced
+  // here because the triggering Slack user id is not available at this drain.
+  requesterGroup: string;
 }
 
 function defaultMintToken(): string {
@@ -85,23 +104,78 @@ function toClassifierRecord(
   };
 }
 
-function rowToClassifierRecord(row: PendingActionRow): OrgActionRecord {
-  return {
-    action: row.action,
-    target_ref: row.target_ref,
-    reversibility: row.reversibility,
-    stakes_hint: row.stakes_hint,
-    citation_refs: JSON.parse(row.citation_refs) as string[],
-    canonical_args: JSON.parse(row.canonical_args) as Record<string, unknown>,
-    origin_channel: row.chat_jid,
-  };
+const REVERSIBILITY_VALUES: ReadonlySet<string> = new Set([
+  'reversible',
+  'draft',
+]);
+const STAKES_HINT_VALUES: ReadonlySet<string> = new Set(['safe', 'gated']);
+
+interface ParsedPendingRow {
+  record: OrgActionRecord;
+  execRequest: OrgActionExecRequest;
 }
 
-function rowToExecRequest(row: PendingActionRow): OrgActionExecRequest {
+/**
+ * Validate a persisted pending row back into typed records on the security
+ * path. The DB stores `citation_refs`/`canonical_args` as JSON text and
+ * `reversibility`/`stakes_hint` as plain columns; this is the only place that
+ * turns those strings back into the shapes the classifier and the exec client
+ * trust, so it validates rather than casts. A row that fails any check throws
+ * (fail-closed) — a malformed persisted row must never reach `classifyOrgAction`
+ * or the write client with an unchecked shape.
+ */
+function parsePendingRow(row: PendingActionRow): ParsedPendingRow {
+  const citationRefs: unknown = JSON.parse(row.citation_refs);
+  if (
+    !Array.isArray(citationRefs) ||
+    !citationRefs.every((c) => typeof c === 'string')
+  ) {
+    throw new Error(
+      `org-action: pending row ${row.token} has a non-string[] citation_refs`,
+    );
+  }
+
+  const canonicalArgs: unknown = JSON.parse(row.canonical_args);
+  if (
+    canonicalArgs === null ||
+    typeof canonicalArgs !== 'object' ||
+    Array.isArray(canonicalArgs)
+  ) {
+    throw new Error(
+      `org-action: pending row ${row.token} has a non-object canonical_args`,
+    );
+  }
+
+  if (!REVERSIBILITY_VALUES.has(row.reversibility)) {
+    throw new Error(
+      `org-action: pending row ${row.token} has an invalid reversibility "${row.reversibility}"`,
+    );
+  }
+  if (!STAKES_HINT_VALUES.has(row.stakes_hint)) {
+    throw new Error(
+      `org-action: pending row ${row.token} has an invalid stakes_hint "${row.stakes_hint}"`,
+    );
+  }
+
+  const reversibility = row.reversibility as 'reversible' | 'draft';
+  const stakesHint = row.stakes_hint as 'safe' | 'gated';
+  const args = canonicalArgs as Record<string, unknown>;
+
   return {
-    action: row.action,
-    target_ref: row.target_ref,
-    canonical_args: JSON.parse(row.canonical_args) as Record<string, unknown>,
+    record: {
+      action: row.action,
+      target_ref: row.target_ref,
+      reversibility,
+      stakes_hint: stakesHint,
+      citation_refs: citationRefs,
+      canonical_args: args,
+      origin_channel: row.chat_jid,
+    },
+    execRequest: {
+      action: row.action,
+      target_ref: row.target_ref,
+      canonical_args: args,
+    },
   };
 }
 
@@ -124,7 +198,11 @@ export async function driveOrgActionRequest(
 
   if (verdict === 'refuse') {
     logger.warn(
-      { action: input.action, target_ref: input.target_ref, sourceGroup: ctx.sourceGroup },
+      {
+        action: input.action,
+        target_ref: input.target_ref,
+        sourceGroup: ctx.sourceGroup,
+      },
       'org-action refused host-side (red line / allowlist / id shape)',
     );
     return;
@@ -143,7 +221,6 @@ export async function driveOrgActionRequest(
     return;
   }
 
-  // hold
   const token = (deps.mintToken ?? defaultMintToken)();
   const createdAt = deps.now();
   const summary = renderApprovalSummary(record);
@@ -158,7 +235,7 @@ export async function driveOrgActionRequest(
     citation_refs: JSON.stringify(input.citation_refs),
     canonical_args: JSON.stringify(input.canonical_args),
     summary,
-    requester: ctx.requester,
+    requester: ctx.requesterGroup,
     state: 'pending',
     created_at: createdAt,
     expires_at: addMs(createdAt, deps.ttlMs),
@@ -180,7 +257,7 @@ function renderApprovalPrompt(token: string, summary: string): string {
     summary,
     '',
     `Reply \`approve ${token}\` to authorize or \`reject ${token}\` to drop it.`,
-    'A different person than the requester must approve.',
+    'An allow-listed approver must authorize this.',
   ].join('\n');
 }
 
@@ -190,8 +267,11 @@ function renderApprovalPrompt(token: string, summary: string): string {
  * authorized execution, was rejected, or was denied by a fail-closed check),
  * false if it was ordinary text the caller should keep processing.
  *
- * Every reject path is fail-closed: a non-allowlisted approver, a bot/self
- * message, or `requester === approver` leaves the row untouched.
+ * Every reject path is fail-closed: a non-allowlisted approver or a bot/self
+ * message leaves the row untouched. The `row.requester === msg.sender` check is
+ * a group-level guard only (row.requester holds the requesting GROUP FOLDER, not
+ * the triggering user id — see the module docstring's separation-of-duty scope),
+ * so it does NOT enforce user-level "the requester cannot self-approve".
  */
 export async function handleApprovalReply(
   chatJid: string,
@@ -228,10 +308,13 @@ export async function handleApprovalReply(
     return true;
   }
 
+  // Group-level guard only: row.requester is the requesting group folder, never
+  // a user id, so this excludes the degenerate case where the approver allowlist
+  // names a group-folder string. It is NOT user-level self-approval prevention.
   if (row.requester === msg.sender) {
     logger.warn(
       { chatJid, sender: msg.sender, token: intent.token },
-      'org-action approval rejected: requester cannot self-approve',
+      'org-action approval rejected: approver matches the requesting group',
     );
     return true;
   }
@@ -247,7 +330,6 @@ export async function handleApprovalReply(
     return true;
   }
 
-  // approve
   const approved = approvePendingAction(intent.token, msg.sender);
   if (!approved) {
     await deps.sendMessage(
@@ -277,10 +359,18 @@ async function executeApproved(
   deps: OrgActionGateDeps,
 ): Promise<void> {
   const row = getPendingAction(token);
-  if (!row || row.state !== 'approved') return;
+  if (!row || row.state !== 'approved') {
+    logger.error(
+      { token, state: row?.state ?? 'missing' },
+      'org-action executeApproved: row not in approved state — not executing',
+    );
+    return;
+  }
+
+  const parsed = parsePendingRow(row);
 
   // Never trust the original classification: re-run it on the persisted record.
-  const verdict = classifyOrgAction(rowToClassifierRecord(row));
+  const verdict = classifyOrgAction(parsed.record);
   if (verdict === 'refuse') {
     logger.error(
       { token, action: row.action, target_ref: row.target_ref },
@@ -299,7 +389,7 @@ async function executeApproved(
     return;
   }
 
-  await deps.executeAction(rowToExecRequest(row));
+  await deps.executeAction(parsed.execRequest);
   logger.info(
     { token, action: row.action, target_ref: row.target_ref },
     'org-action executed after approval (exactly-once)',
@@ -317,7 +407,8 @@ export async function reDriveApprovedActions(
 ): Promise<void> {
   const rows = getApprovedUnconsumed();
   for (const row of rows) {
-    const verdict = classifyOrgAction(rowToClassifierRecord(row));
+    const parsed = parsePendingRow(row);
+    const verdict = classifyOrgAction(parsed.record);
     if (verdict === 'refuse') {
       logger.error(
         { token: row.token },
@@ -327,10 +418,14 @@ export async function reDriveApprovedActions(
     }
     const consumed = consumePendingAction(row.token, deps.now());
     if (!consumed) continue;
-    await deps.executeAction(rowToExecRequest(row));
+    await deps.executeAction(parsed.execRequest);
     logger.info(
       { token: row.token, action: row.action },
       'org-action boot re-drive executed (exactly-once)',
+    );
+    await deps.sendMessage(
+      row.chat_jid,
+      `Executed a previously approved action (${row.token}) on restart.`,
     );
   }
 }

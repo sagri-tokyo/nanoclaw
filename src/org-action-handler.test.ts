@@ -72,7 +72,11 @@ describe('driveOrgActionRequest — safe vs gated', () => {
         citation_refs: [],
         canonical_args: { text: 'hi' },
       },
-      { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requester: 'U_REQ' },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterGroup: 'g',
+      },
       deps,
     );
     expect(rec.executed).toEqual([
@@ -92,13 +96,17 @@ describe('driveOrgActionRequest — safe vs gated', () => {
         citation_refs: ['wiki/x.md'],
         canonical_args: { property: 'Status', value: 'Ready for AI' },
       },
-      { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requester: 'U_REQ' },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterGroup: 'g',
+      },
       deps,
     );
     expect(rec.executed).toHaveLength(0);
     const row = getPendingAction('T'.repeat(43));
     expect(row?.state).toBe('pending');
-    expect(row?.requester).toBe('U_REQ');
+    expect(row?.requester).toBe('g');
     expect(rec.posted).toHaveLength(1);
     expect(rec.posted[0].text).toContain('T'.repeat(43));
     expect(rec.posted[0].text).toContain('Ready for AI');
@@ -115,7 +123,11 @@ describe('driveOrgActionRequest — safe vs gated', () => {
         citation_refs: [],
         canonical_args: { property: 'Status', value: 'Ready for AI' },
       },
-      { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requester: 'U_REQ' },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterGroup: 'g',
+      },
       deps,
     );
     expect(rec.executed).toHaveLength(0);
@@ -123,7 +135,10 @@ describe('driveOrgActionRequest — safe vs gated', () => {
   });
 });
 
-function seedGated(deps: OrgActionGateDeps, requester = 'U_REQ'): Promise<void> {
+function seedGated(
+  deps: OrgActionGateDeps,
+  requesterGroup = 'g',
+): Promise<void> {
   return driveOrgActionRequest(
     {
       action: 'notion.write_property',
@@ -133,7 +148,7 @@ function seedGated(deps: OrgActionGateDeps, requester = 'U_REQ'): Promise<void> 
       citation_refs: [],
       canonical_args: { property: 'Status', value: 'Ready for AI' },
     },
-    { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requester },
+    { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requesterGroup },
     deps,
   );
 }
@@ -175,18 +190,44 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     expect(rec.executed).toHaveLength(0);
   });
 
-  it('rejects requester === approver (no self-approve)', async () => {
+  it('rejects an approver whose id equals the requesting group (group-level guard)', async () => {
+    // row.requester holds the requesting GROUP FOLDER, not a user id. This
+    // guard only excludes the degenerate case where the approver allowlist
+    // names a group-folder string. It is NOT user-level self-approval
+    // prevention — see the documented limitation below.
     const { deps, rec } = makeDeps({
-      approvers: () => new Set(['U_REQ']),
+      approvers: () => new Set(['g']),
     });
-    await seedGated(deps, 'U_REQ');
+    await seedGated(deps, 'g');
     await handleApprovalReply(
       'slack:C0AAA1111',
-      approval({ sender: 'U_REQ' }),
+      approval({ sender: 'g' }),
       deps,
     );
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction('T'.repeat(43))?.state).toBe('pending');
+  });
+
+  it('DOES NOT block a user-level self-approval — the guard is group-level only', async () => {
+    // The triggering Slack user id is not available at the org_action drain,
+    // so the persisted requester is the group folder ('g'), never the user.
+    // An approver who was also the (unknowable) triggering human is therefore
+    // NOT excluded by row.requester !== msg.sender. This test pins the TRUE
+    // property: user-level dual control is enforced by the approver allowlist
+    // membership, not by a requester-vs-approver comparison.
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_HUMAN']),
+    });
+    await seedGated(deps, 'g');
+    await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval({ sender: 'U_HUMAN' }),
+      deps,
+    );
+    expect(rec.executed).toEqual([
+      { action: 'notion.write_property', target_ref: HEX32 },
+    ]);
+    expect(getPendingAction('T'.repeat(43))?.state).toBe('consumed');
   });
 
   it('returns false (not an approval message) for ordinary text', async () => {
@@ -283,6 +324,66 @@ describe('handleApprovalReply — execution + exactly-once', () => {
   });
 });
 
+describe('parsePendingRow validation — no coercion on the security path', () => {
+  function approvedRow(
+    overrides: Partial<PendingActionRow> = {},
+  ): PendingActionRow {
+    return {
+      token: 'T'.repeat(43),
+      source_group: 'g',
+      chat_jid: 'slack:C0AAA1111',
+      action: 'notion.write_property',
+      target_ref: HEX32,
+      reversibility: 'reversible',
+      stakes_hint: 'gated',
+      citation_refs: '[]',
+      canonical_args: '{"property":"Status","value":"Ready for AI"}',
+      summary: 's',
+      requester: 'g',
+      state: 'approved',
+      created_at: '2026-06-22T00:00:00.000Z',
+      expires_at: '2026-06-23T00:00:00.000Z',
+      approved_by: 'U_APPROVER',
+      consumed_at: null,
+      ...overrides,
+    };
+  }
+
+  it('throws and never consumes when canonical_args is a JSON array, not an object', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(approvedRow({ canonical_args: '[1,2,3]' }));
+    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+      /non-object canonical_args/,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  });
+
+  it('throws and never consumes when citation_refs is not a string array', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(approvedRow({ citation_refs: '[1,2]' }));
+    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+      /non-string\[\] citation_refs/,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  });
+
+  it('throws and never consumes when reversibility is outside the allowed set', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(
+      approvedRow({
+        reversibility: 'bogus' as PendingActionRow['reversibility'],
+      }),
+    );
+    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+      /invalid reversibility/,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+  });
+});
+
 describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
   it('replays an approved-unconsumed row and consumes it', async () => {
     const { deps, rec } = makeDeps();
@@ -312,9 +413,16 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
       { action: 'notion.write_property', target_ref: HEX32 },
     ]);
     expect(getPendingAction('T'.repeat(43))?.state).toBe('consumed');
+    expect(rec.posted).toEqual([
+      {
+        jid: 'slack:C0AAA1111',
+        text: `Executed a previously approved action (${'T'.repeat(43)}) on restart.`,
+      },
+    ]);
 
     // Idempotent: a second boot does nothing.
     await reDriveApprovedActions(deps);
     expect(rec.executed).toHaveLength(1);
+    expect(rec.posted).toHaveLength(1);
   });
 });

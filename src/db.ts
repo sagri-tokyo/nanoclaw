@@ -942,7 +942,10 @@ export function approvePendingAction(
  * an `approved` row to `consumed`; every later call returns false. This is the
  * exactly-once execution gate (ADR-0002 decision 4).
  */
-export function consumePendingAction(token: string, consumedAt: string): boolean {
+export function consumePendingAction(
+  token: string,
+  consumedAt: string,
+): boolean {
   const result = db
     .prepare(
       `UPDATE pending_actions SET state = 'consumed', consumed_at = ?

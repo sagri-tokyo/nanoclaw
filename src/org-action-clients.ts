@@ -19,10 +19,10 @@ import {
   resolveDeps,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
+import { GITHUB_REPO_ALLOWLIST } from './org-action-gate.js';
 
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
-const GITHUB_REPO_ALLOWLIST = 'sagri-tokyo/sagri-ai';
 
 export interface OrgActionExecRequest {
   action: string;
@@ -60,7 +60,10 @@ function notionHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-function defaultSpawnGh(args: string[], githubToken: string): Promise<GhResult> {
+function defaultSpawnGh(
+  args: string[],
+  githubToken: string,
+): Promise<GhResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('gh', args, {
       env: { ...process.env, GITHUB_TOKEN: githubToken, GH_TOKEN: githubToken },
@@ -99,13 +102,44 @@ function notionPropertyBody(property: string, value: string): object {
   return { rich_text: [{ text: { content: value } }] };
 }
 
-function requireString(
-  args: Record<string, unknown>,
-  key: string,
-): string {
+function requireString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`org-action: missing required string arg "${key}"`);
+  }
+  return value;
+}
+
+const TITLE_MAX = 200;
+const BODY_MAX = 10000;
+// Conservative git ref shape. A value starting with `-` would be read by `gh`
+// as a flag rather than a branch name (argv flag injection), so it is rejected
+// outright even though the argv array is spawned without a shell.
+const BRANCH_NAME = /^[A-Za-z0-9_./-]{1,255}$/;
+
+function requireBoundedString(
+  args: Record<string, unknown>,
+  key: string,
+  max: number,
+): string {
+  const value = requireString(args, key);
+  if (value.length > max) {
+    throw new Error(
+      `org-action: "${key}" exceeds the ${max}-character limit (${value.length})`,
+    );
+  }
+  return value;
+}
+
+function requireBranchName(args: Record<string, unknown>, key: string): string {
+  const value = requireString(args, key);
+  if (value.startsWith('-')) {
+    throw new Error(
+      `org-action: "${key}" must not start with "-" (flag injection)`,
+    );
+  }
+  if (!BRANCH_NAME.test(value)) {
+    throw new Error(`org-action: "${key}" is not a valid branch name`);
   }
   return value;
 }
@@ -159,7 +193,11 @@ export async function executeOrgAction(
 
     case 'notion.create_task':
     case 'doc.draft': {
-      const title = requireString(request.canonical_args, 'title');
+      const title = requireBoundedString(
+        request.canonical_args,
+        'title',
+        TITLE_MAX,
+      );
       await fetchJsonWrite({
         url: `${NOTION_API_BASE}/pages`,
         method: 'POST',
@@ -178,8 +216,16 @@ export async function executeOrgAction(
 
     case 'github.file_issue': {
       assertAllowlistedRepo(request.target_ref);
-      const title = requireString(request.canonical_args, 'title');
-      const body = requireString(request.canonical_args, 'body');
+      const title = requireBoundedString(
+        request.canonical_args,
+        'title',
+        TITLE_MAX,
+      );
+      const body = requireBoundedString(
+        request.canonical_args,
+        'body',
+        BODY_MAX,
+      );
       const result = await spawnGh(
         [
           'issue',
@@ -199,10 +245,18 @@ export async function executeOrgAction(
 
     case 'github.open_draft_pr': {
       assertAllowlistedRepo(request.target_ref);
-      const head = requireString(request.canonical_args, 'head');
-      const base = requireString(request.canonical_args, 'base');
-      const title = requireString(request.canonical_args, 'title');
-      const body = requireString(request.canonical_args, 'body');
+      const head = requireBranchName(request.canonical_args, 'head');
+      const base = requireBranchName(request.canonical_args, 'base');
+      const title = requireBoundedString(
+        request.canonical_args,
+        'title',
+        TITLE_MAX,
+      );
+      const body = requireBoundedString(
+        request.canonical_args,
+        'body',
+        BODY_MAX,
+      );
       const result = await spawnGh(
         [
           'pr',

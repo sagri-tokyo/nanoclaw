@@ -13,8 +13,21 @@ const SOURCE_GROUP: RegisteredGroup = {
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
+interface OrgActionRecordArg {
+  action: string;
+  target_ref: string;
+  reversibility: string;
+  stakes_hint: string;
+  citation_refs: string[];
+  canonical_args: Record<string, unknown>;
+}
+
 let groups: Record<string, RegisteredGroup>;
-let orgActionCalls: { record: unknown; sourceGroup: string; chatJid: string }[];
+let orgActionCalls: {
+  record: OrgActionRecordArg;
+  sourceGroup: string;
+  chatJid: string;
+}[];
 let deps: IpcDeps;
 
 beforeEach(() => {
@@ -31,7 +44,11 @@ beforeEach(() => {
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
     onOrgAction: async (record, sourceGroup, chatJid) => {
-      orgActionCalls.push({ record, sourceGroup, chatJid });
+      orgActionCalls.push({
+        record: record as OrgActionRecordArg,
+        sourceGroup,
+        chatJid,
+      });
     },
   };
 });
@@ -52,9 +69,56 @@ describe('org_action IPC drain', () => {
       false,
       deps,
     );
+    expect(orgActionCalls).toEqual([
+      {
+        record: {
+          action: 'notion.write_property',
+          target_ref: HEX32,
+          reversibility: 'reversible',
+          stakes_hint: 'gated',
+          citation_refs: ['wiki/x.md'],
+          canonical_args: { property: 'Status', value: 'Ready for AI' },
+        },
+        sourceGroup: 'slack_sagri-ai-dev',
+        chatJid: 'slack:C0AAA1111',
+      },
+    ]);
+  });
+
+  it('defaults a missing citation_refs to an empty array (typed, not undefined)', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        canonical_args: { text: 'hi' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
     expect(orgActionCalls).toHaveLength(1);
-    expect(orgActionCalls[0].sourceGroup).toBe('slack_sagri-ai-dev');
-    expect(orgActionCalls[0].chatJid).toBe('slack:C0AAA1111');
+    expect(orgActionCalls[0].record.citation_refs).toEqual([]);
+  });
+
+  it('rejects a citation_refs with non-string elements', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        citation_refs: ['ok', 42],
+        canonical_args: { text: 'hi' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
+    expect(orgActionCalls).toHaveLength(0);
   });
 
   it('rejects a record missing required fields without calling the handler', async () => {

@@ -37,8 +37,36 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
   );
 
   it('matches the romaji red line case-insensitively', () => {
+    expect(classifyOrgAction(record({ target_ref: `PROD-${HEX32}` }))).toBe(
+      'refuse',
+    );
+  });
+
+  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
+    'refuses when a canonical_args string value contains %s even on a clean target',
+    (marker) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'slack.post_digest',
+            target_ref: 'C0AAA1111',
+            origin_channel: 'slack:C0AAA1111',
+            canonical_args: { text: `quarterly ${marker} rollup` },
+          }),
+        ),
+      ).toBe('refuse');
+    },
+  );
+
+  it('refuses a notion body field that names a red line on a clean target', () => {
     expect(
-      classifyOrgAction(record({ target_ref: `PROD-${HEX32}` })),
+      classifyOrgAction(
+        record({
+          action: 'notion.append_progress',
+          target_ref: HEX32,
+          canonical_args: { text: '自治体 onboarding notes' },
+        }),
+      ),
     ).toBe('refuse');
   });
 });
@@ -47,7 +75,10 @@ describe('classifyOrgAction — github allowlist', () => {
   it('executes file_issue against the allowlisted repo', () => {
     expect(
       classifyOrgAction(
-        record({ action: 'github.file_issue', target_ref: 'sagri-tokyo/sagri-ai' }),
+        record({
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+        }),
       ),
     ).toBe('execute');
   });
@@ -55,7 +86,10 @@ describe('classifyOrgAction — github allowlist', () => {
   it('refuses any other repo', () => {
     expect(
       classifyOrgAction(
-        record({ action: 'github.file_issue', target_ref: 'sagri-tokyo/nanoclaw' }),
+        record({
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/nanoclaw',
+        }),
       ),
     ).toBe('refuse');
     expect(
@@ -69,25 +103,39 @@ describe('classifyOrgAction — github allowlist', () => {
 describe('classifyOrgAction — id shape / traversal guards', () => {
   it('refuses a notion target that is not a 32-char hex id', () => {
     expect(
-      classifyOrgAction(record({ action: 'notion.write_property', target_ref: 'not-hex' })),
+      classifyOrgAction(
+        record({ action: 'notion.write_property', target_ref: 'not-hex' }),
+      ),
     ).toBe('refuse');
   });
 
   it('refuses a traversal component in target_ref', () => {
     expect(
-      classifyOrgAction(record({ action: 'github.file_issue', target_ref: '../sagri-tokyo/sagri-ai' })),
+      classifyOrgAction(
+        record({
+          action: 'github.file_issue',
+          target_ref: '../sagri-tokyo/sagri-ai',
+        }),
+      ),
     ).toBe('refuse');
   });
 
   it('refuses a slack target that is not a channel id', () => {
     expect(
-      classifyOrgAction(record({ action: 'slack.post_digest', target_ref: HEX32 })),
+      classifyOrgAction(
+        record({ action: 'slack.post_digest', target_ref: HEX32 }),
+      ),
     ).toBe('refuse');
   });
 
   it('refuses an action not in the fixed table', () => {
     expect(
-      classifyOrgAction(record({ action: 'github.delete_branch', target_ref: 'sagri-tokyo/sagri-ai' })),
+      classifyOrgAction(
+        record({
+          action: 'github.delete_branch',
+          target_ref: 'sagri-tokyo/sagri-ai',
+        }),
+      ),
     ).toBe('refuse');
   });
 });
@@ -152,15 +200,14 @@ describe('classifyOrgAction — gated rows', () => {
 });
 
 describe('classifyOrgAction — safe rows execute', () => {
-  it.each([
-    'notion.append_progress',
-    'notion.create_task',
-    'doc.draft',
-  ])('executes %s on an allowlisted target', (action) => {
-    expect(
-      classifyOrgAction(record({ action, target_ref: HEX32 })),
-    ).toBe('execute');
-  });
+  it.each(['notion.append_progress', 'notion.create_task', 'doc.draft'])(
+    'executes %s on an allowlisted target',
+    (action) => {
+      expect(classifyOrgAction(record({ action, target_ref: HEX32 }))).toBe(
+        'execute',
+      );
+    },
+  );
 });
 
 describe('renderApprovalSummary — host-rendered, prose-independent', () => {

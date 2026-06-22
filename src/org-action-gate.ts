@@ -46,7 +46,7 @@ export interface OrgActionRecord {
 
 export type OrgActionVerdict = 'execute' | 'hold' | 'refuse';
 
-const GITHUB_REPO_ALLOWLIST = 'sagri-tokyo/sagri-ai';
+export const GITHUB_REPO_ALLOWLIST = 'sagri-tokyo/sagri-ai';
 const NOTION_PAGE_ID = /^[0-9a-fA-F]{32}$/;
 const SLACK_CHANNEL_ID = /^C[A-Za-z0-9]{7,21}$/;
 const RED_LINE_ROMAJI = ['mrv', 'carbon', 'jichitai', 'prod'];
@@ -64,10 +64,21 @@ function hasTraversal(id: string): boolean {
   return /(^|\/)\.\.(\/|$)/.test(id);
 }
 
-function isRedLine(targetRef: string): boolean {
-  const lower = targetRef.toLowerCase();
+function stringContainsRedLine(value: string): boolean {
+  const lower = value.toLowerCase();
   if (lower.includes(RED_LINE_JP)) return true;
   return RED_LINE_ROMAJI.some((marker) => lower.includes(marker));
+}
+
+function isRedLine(record: OrgActionRecord): boolean {
+  if (stringContainsRedLine(record.target_ref)) return true;
+  // A red-line marker in a body/value field (e.g. a digest body about MRV or a
+  // Notion property value naming a jichitai) must refuse just as a red-line
+  // target does — otherwise the marker hides one level below target_ref.
+  for (const value of Object.values(record.canonical_args)) {
+    if (typeof value === 'string' && stringContainsRedLine(value)) return true;
+  }
+  return false;
 }
 
 function originChannelId(originChannel: string): string {
@@ -76,12 +87,10 @@ function originChannelId(originChannel: string): string {
 
 export function classifyOrgAction(record: OrgActionRecord): OrgActionVerdict {
   // Red line first: never autonomous, regardless of stakes_hint or action.
-  if (isRedLine(record.target_ref)) return 'refuse';
+  if (isRedLine(record)) return 'refuse';
 
-  // The action must be one of the fixed seven.
   if (!FIXED_ACTIONS.has(record.action)) return 'refuse';
 
-  // Traversal guard on the constrained target id.
   if (hasTraversal(record.target_ref)) return 'refuse';
 
   if (record.action.startsWith('github.')) {

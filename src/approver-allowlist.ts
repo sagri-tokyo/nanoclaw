@@ -24,7 +24,10 @@ export function loadApproverAllowlist(pathOverride?: string): Set<string> {
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
       logger.warn(
         { path: filePath },
         'approver-allowlist: config missing — deny-all (fail-closed)',

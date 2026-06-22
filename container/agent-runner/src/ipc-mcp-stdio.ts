@@ -11,6 +11,8 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
+import { ORG_ACTION_SUBMITTED_MESSAGE } from './org-action-messages.js';
+
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
@@ -655,7 +657,9 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
     target_ref: z
       .string()
       .min(1)
-      .describe('Constrained id: Notion 32-hex id | repo slug | Slack channel id'),
+      .describe(
+        'Constrained id: Notion 32-hex id | repo slug | Slack channel id',
+      ),
     reversibility: z.enum(['reversible', 'draft']),
     stakes_hint: z
       .enum(['safe', 'gated'])
@@ -666,7 +670,9 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
       .describe('Read-half citation ids the act consumed (provenance)'),
     canonical_args: z
       .record(z.string(), z.unknown())
-      .describe('The exact args the host will replay (property/value, title, body, text, etc.)'),
+      .describe(
+        'The exact args the host will replay (property/value, title, body, text, etc.)',
+      ),
   },
   async (args) => {
     const data = {
@@ -687,7 +693,7 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
       content: [
         {
           type: 'text' as const,
-          text: 'submitted; held pending approval — do not proceed with dependent work. The host will execute it (or report the result) asynchronously.',
+          text: ORG_ACTION_SUBMITTED_MESSAGE,
         },
       ],
     };

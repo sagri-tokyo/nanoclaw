@@ -77,9 +77,9 @@ describe('approve + atomic single-use consume', () => {
 
   it('consume on a non-approved row is a no-op returning false', () => {
     createPendingAction(row({ token: 'tok-pending' }));
-    expect(consumePendingAction('tok-pending', '2026-06-22T01:00:00.000Z')).toBe(
-      false,
-    );
+    expect(
+      consumePendingAction('tok-pending', '2026-06-22T01:00:00.000Z'),
+    ).toBe(false);
     expect(getPendingAction('tok-pending')?.state).toBe('pending');
   });
 });
