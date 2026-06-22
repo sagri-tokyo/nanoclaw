@@ -60,6 +60,32 @@ function approval(overrides: Partial<NewMessage> = {}): NewMessage {
   };
 }
 
+const TOKEN = 'T'.repeat(43);
+
+function pendingActionRow(
+  overrides: Partial<PendingActionRow> = {},
+): PendingActionRow {
+  return {
+    token: TOKEN,
+    source_group: 'g',
+    chat_jid: 'slack:C0AAA1111',
+    action: 'notion.write_property',
+    target_ref: HEX32,
+    reversibility: 'reversible',
+    stakes_hint: 'gated',
+    citation_refs: '[]',
+    canonical_args: '{"property":"Status","value":"Ready for AI"}',
+    summary: 's',
+    requester: 'g',
+    state: 'pending',
+    created_at: '2026-06-22T00:00:00.000Z',
+    expires_at: '2026-06-23T00:00:00.000Z',
+    approved_by: null,
+    consumed_at: null,
+    ...overrides,
+  };
+}
+
 describe('driveOrgActionRequest — safe vs gated', () => {
   it('executes a safe action immediately, no row, no prompt', async () => {
     const { deps, rec } = makeDeps();
@@ -260,25 +286,7 @@ describe('handleApprovalReply — execution + exactly-once', () => {
     const { deps, rec } = makeDeps();
     // Insert an approved row directly whose target is a red line — the
     // approve-time re-check must refuse it even though it is already approved.
-    const row: PendingActionRow = {
-      token: 'T'.repeat(43),
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: `prod-${HEX32}`,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-      summary: 's',
-      requester: 'U_REQ',
-      state: 'pending',
-      created_at: '2026-06-22T00:00:00.000Z',
-      expires_at: '2026-06-23T00:00:00.000Z',
-      approved_by: null,
-      consumed_at: null,
-    };
-    createPendingAction(row);
+    createPendingAction(pendingActionRow({ target_ref: `prod-${HEX32}` }));
     await handleApprovalReply('slack:C0AAA1111', approval(), deps);
     expect(rec.executed).toHaveLength(0);
   });
@@ -299,25 +307,13 @@ describe('handleApprovalReply — execution + exactly-once', () => {
 
   it('cannot approve an expired token', async () => {
     const { deps, rec } = makeDeps();
-    const row: PendingActionRow = {
-      token: 'T'.repeat(43),
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: HEX32,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-      summary: 's',
-      requester: 'U_REQ',
-      state: 'expired',
-      created_at: '2026-06-20T00:00:00.000Z',
-      expires_at: '2026-06-21T00:00:00.000Z',
-      approved_by: null,
-      consumed_at: null,
-    };
-    createPendingAction(row);
+    createPendingAction(
+      pendingActionRow({
+        state: 'expired',
+        created_at: '2026-06-20T00:00:00.000Z',
+        expires_at: '2026-06-21T00:00:00.000Z',
+      }),
+    );
     await handleApprovalReply('slack:C0AAA1111', approval(), deps);
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction('T'.repeat(43))?.state).toBe('expired');
@@ -325,30 +321,6 @@ describe('handleApprovalReply — execution + exactly-once', () => {
 });
 
 describe('parsePendingRow validation — no coercion on the security path', () => {
-  function pendingRow(
-    overrides: Partial<PendingActionRow> = {},
-  ): PendingActionRow {
-    return {
-      token: 'T'.repeat(43),
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: HEX32,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-      summary: 's',
-      requester: 'g',
-      state: 'pending',
-      created_at: '2026-06-22T00:00:00.000Z',
-      expires_at: '2026-06-23T00:00:00.000Z',
-      approved_by: null,
-      consumed_at: null,
-      ...overrides,
-    };
-  }
-
   // On the live approve path the validation throw propagates (fail-fast). The
   // row is left approved (approvePendingAction ran), never consumed or executed.
   async function approveAndExpect(
@@ -356,7 +328,7 @@ describe('parsePendingRow validation — no coercion on the security path', () =
     pattern: RegExp,
   ): Promise<void> {
     const { deps, rec } = makeDeps();
-    createPendingAction(pendingRow(bad));
+    createPendingAction(pendingActionRow(bad));
     await expect(
       handleApprovalReply('slack:C0AAA1111', approval(), deps),
     ).rejects.toThrow(pattern);
@@ -396,25 +368,9 @@ describe('parsePendingRow validation — no coercion on the security path', () =
 describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
   it('replays an approved-unconsumed row and consumes it', async () => {
     const { deps, rec } = makeDeps();
-    const row: PendingActionRow = {
-      token: 'T'.repeat(43),
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: HEX32,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-      summary: 's',
-      requester: 'U_REQ',
-      state: 'approved',
-      created_at: '2026-06-22T00:00:00.000Z',
-      expires_at: '2026-06-23T00:00:00.000Z',
-      approved_by: 'U_APPROVER',
-      consumed_at: null,
-    };
-    createPendingAction(row);
+    createPendingAction(
+      pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
+    );
     expect(getApprovedUnconsumed()).toHaveLength(1);
 
     await reDriveApprovedActions(deps);
@@ -437,25 +393,13 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
 
   it('leaves a row that re-classifies as refuse approved, executing nothing', async () => {
     const { deps, rec } = makeDeps();
-    const row: PendingActionRow = {
-      token: 'T'.repeat(43),
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: `prod-${HEX32}`,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-      summary: 's',
-      requester: 'g',
-      state: 'approved',
-      created_at: '2026-06-22T00:00:00.000Z',
-      expires_at: '2026-06-23T00:00:00.000Z',
-      approved_by: 'U_APPROVER',
-      consumed_at: null,
-    };
-    createPendingAction(row);
+    createPendingAction(
+      pendingActionRow({
+        target_ref: `prod-${HEX32}`,
+        state: 'approved',
+        approved_by: 'U_APPROVER',
+      }),
+    );
 
     await reDriveApprovedActions(deps);
 
@@ -466,32 +410,20 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
 
   it('isolates an unparseable row and still drives the healthy rows behind it', async () => {
     const { deps, rec } = makeDeps();
-    const base: Omit<PendingActionRow, 'token' | 'canonical_args'> = {
-      source_group: 'g',
-      chat_jid: 'slack:C0AAA1111',
-      action: 'notion.write_property',
-      target_ref: HEX32,
-      reversibility: 'reversible',
-      stakes_hint: 'gated',
-      citation_refs: '[]',
-      summary: 's',
-      requester: 'g',
+    const approved: Partial<PendingActionRow> = {
       state: 'approved',
-      created_at: '2026-06-22T00:00:00.000Z',
-      expires_at: '2026-06-23T00:00:00.000Z',
       approved_by: 'U_APPROVER',
-      consumed_at: null,
     };
-    createPendingAction({
-      ...base,
-      token: 'C'.repeat(43),
-      canonical_args: '[1,2,3]',
-    });
-    createPendingAction({
-      ...base,
-      token: 'H'.repeat(43),
-      canonical_args: '{"property":"Status","value":"Ready for AI"}',
-    });
+    createPendingAction(
+      pendingActionRow({
+        ...approved,
+        token: 'C'.repeat(43),
+        canonical_args: '[1,2,3]',
+      }),
+    );
+    createPendingAction(
+      pendingActionRow({ ...approved, token: 'H'.repeat(43) }),
+    );
 
     await reDriveApprovedActions(deps);
 
