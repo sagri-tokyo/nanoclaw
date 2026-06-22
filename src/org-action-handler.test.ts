@@ -15,6 +15,7 @@ import {
 import type { NewMessage, PendingActionRow } from './types.js';
 
 const HEX32 = 'a'.repeat(32);
+const TOKEN = 'T'.repeat(43);
 
 beforeEach(() => {
   _initTestDatabase();
@@ -40,7 +41,7 @@ function makeDeps(overrides: Partial<OrgActionGateDeps> = {}): {
     },
     now: () => '2026-06-22T00:00:00.000Z',
     ttlMs: 24 * 60 * 60 * 1000,
-    mintToken: () => 'T'.repeat(43),
+    mintToken: () => TOKEN,
     ...overrides,
   };
   return { deps, rec };
@@ -52,15 +53,13 @@ function approval(overrides: Partial<NewMessage> = {}): NewMessage {
     chat_jid: 'slack:C0AAA1111',
     sender: 'U_APPROVER',
     sender_name: 'Approver',
-    content: `approve ${'T'.repeat(43)}`,
+    content: `approve ${TOKEN}`,
     timestamp: '2026-06-22T01:00:00.000Z',
     is_from_me: false,
     is_bot_message: false,
     ...overrides,
   };
 }
-
-const TOKEN = 'T'.repeat(43);
 
 function pendingActionRow(
   overrides: Partial<PendingActionRow> = {},
@@ -130,11 +129,11 @@ describe('driveOrgActionRequest — safe vs gated', () => {
       deps,
     );
     expect(rec.executed).toHaveLength(0);
-    const row = getPendingAction('T'.repeat(43));
+    const row = getPendingAction(TOKEN);
     expect(row?.state).toBe('pending');
     expect(row?.requester).toBe('g');
     expect(rec.posted).toHaveLength(1);
-    expect(rec.posted[0].text).toContain('T'.repeat(43));
+    expect(rec.posted[0].text).toContain(TOKEN);
     expect(rec.posted[0].text).toContain('Ready for AI');
   });
 
@@ -157,7 +156,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
       deps,
     );
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))).toBeUndefined();
+    expect(getPendingAction(TOKEN)).toBeUndefined();
   });
 });
 
@@ -190,7 +189,7 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     );
     expect(handled).toBe(true);
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('pending');
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 
   it('rejects a bot-sourced approval message', async () => {
@@ -202,7 +201,7 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
       deps,
     );
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('pending');
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 
   it('rejects is_from_me', async () => {
@@ -231,7 +230,7 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
       deps,
     );
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('pending');
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 
   it('DOES NOT block a user-level self-approval — the guard is group-level only', async () => {
@@ -253,7 +252,7 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     expect(rec.executed).toEqual([
       { action: 'notion.write_property', target_ref: HEX32 },
     ]);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('consumed');
+    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
   });
 
   it('returns false (not an approval message) for ordinary text', async () => {
@@ -276,7 +275,7 @@ describe('handleApprovalReply — execution + exactly-once', () => {
     expect(rec.executed).toEqual([
       { action: 'notion.write_property', target_ref: HEX32 },
     ]);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('consumed');
+    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
 
     await handleApprovalReply('slack:C0AAA1111', approval(), deps);
     expect(rec.executed).toHaveLength(1);
@@ -296,10 +295,10 @@ describe('handleApprovalReply — execution + exactly-once', () => {
     await seedGated(deps);
     await handleApprovalReply(
       'slack:C0AAA1111',
-      approval({ content: `reject ${'T'.repeat(43)}` }),
+      approval({ content: `reject ${TOKEN}` }),
       deps,
     );
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('denied');
+    expect(getPendingAction(TOKEN)?.state).toBe('denied');
     // A later approve cannot revive it.
     await handleApprovalReply('slack:C0AAA1111', approval(), deps);
     expect(rec.executed).toHaveLength(0);
@@ -316,7 +315,7 @@ describe('handleApprovalReply — execution + exactly-once', () => {
     );
     await handleApprovalReply('slack:C0AAA1111', approval(), deps);
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('expired');
+    expect(getPendingAction(TOKEN)?.state).toBe('expired');
   });
 });
 
@@ -333,7 +332,7 @@ describe('parsePendingRow validation — no coercion on the security path', () =
       handleApprovalReply('slack:C0AAA1111', approval(), deps),
     ).rejects.toThrow(pattern);
     expect(rec.executed).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
   }
 
   it('throws and never consumes when canonical_args is a JSON array, not an object', async () => {
@@ -377,11 +376,11 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     expect(rec.executed).toEqual([
       { action: 'notion.write_property', target_ref: HEX32 },
     ]);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('consumed');
+    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
     expect(rec.posted).toEqual([
       {
         jid: 'slack:C0AAA1111',
-        text: `Executed a previously approved action (${'T'.repeat(43)}) on restart.`,
+        text: `Executed a previously approved action (${TOKEN}) on restart.`,
       },
     ]);
 
@@ -405,24 +404,25 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
 
     expect(rec.executed).toHaveLength(0);
     expect(rec.posted).toHaveLength(0);
-    expect(getPendingAction('T'.repeat(43))?.state).toBe('approved');
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
   });
 
   it('isolates an unparseable row and still drives the healthy rows behind it', async () => {
     const { deps, rec } = makeDeps();
-    const approved: Partial<PendingActionRow> = {
-      state: 'approved',
-      approved_by: 'U_APPROVER',
-    };
     createPendingAction(
       pendingActionRow({
-        ...approved,
+        state: 'approved',
+        approved_by: 'U_APPROVER',
         token: 'C'.repeat(43),
         canonical_args: '[1,2,3]',
       }),
     );
     createPendingAction(
-      pendingActionRow({ ...approved, token: 'H'.repeat(43) }),
+      pendingActionRow({
+        state: 'approved',
+        approved_by: 'U_APPROVER',
+        token: 'H'.repeat(43),
+      }),
     );
 
     await reDriveApprovedActions(deps);
