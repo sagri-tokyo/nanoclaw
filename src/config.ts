@@ -1,3 +1,4 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -170,3 +171,25 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+function loadCredentialsDirectory(key: string): string | undefined {
+  const dir = process.env.CREDENTIALS_DIRECTORY;
+  if (!dir) return undefined;
+  const filePath = path.join(dir, key);
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+}
+
+export const GITHUB_FORCE_PAT = process.env.GITHUB_FORCE_PAT;
+export const GITHUB_APP_ID =
+  process.env.GITHUB_APP_ID || loadCredentialsDirectory('GITHUB_APP_ID');
+export const GITHUB_APP_PRIVATE_KEY =
+  process.env.GITHUB_APP_PRIVATE_KEY ||
+  loadCredentialsDirectory('GITHUB_APP_PRIVATE_KEY');
+export const GITHUB_APP_INSTALLATION_ID =
+  process.env.GITHUB_APP_INSTALLATION_ID ||
+  loadCredentialsDirectory('GITHUB_APP_INSTALLATION_ID');

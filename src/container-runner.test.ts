@@ -13,6 +13,10 @@ vi.mock('./config.js', () => ({
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  GITHUB_APP_ID: undefined,
+  GITHUB_APP_INSTALLATION_ID: undefined,
+  GITHUB_APP_PRIVATE_KEY: undefined,
+  GITHUB_FORCE_PAT: undefined,
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   READER_RPC_PORT: 3002,
@@ -251,6 +255,7 @@ describe('container-runner timeout behavior', () => {
   it('non-zero exit carries a required error string with result: null', async () => {
     const resultPromise = runContainerAgent(testGroup, testInput, () => {});
 
+    await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('close', 1);
     await vi.advanceTimersByTimeAsync(10);
 
@@ -265,6 +270,7 @@ describe('container-runner timeout behavior', () => {
   it('spawn error carries a required error string with result: null', async () => {
     const resultPromise = runContainerAgent(testGroup, testInput, () => {});
 
+    await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('error', new Error('ENOENT: docker not found'));
     await vi.advanceTimersByTimeAsync(10);
 

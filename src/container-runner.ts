@@ -12,6 +12,10 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  GITHUB_APP_ID,
+  GITHUB_APP_INSTALLATION_ID,
+  GITHUB_APP_PRIVATE_KEY,
+  GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   READER_RPC_PORT,
@@ -475,15 +479,43 @@ function buildContainerPlan(
   return { mounts, extraEnv };
 }
 
-function buildContainerArgs(
+async function resolveGitHubToken(): Promise<string | undefined> {
+  if (GITHUB_FORCE_PAT) return GITHUB_FORCE_PAT;
+
+  if (GITHUB_APP_ID && GITHUB_APP_PRIVATE_KEY && GITHUB_APP_INSTALLATION_ID) {
+    const installationId = parseInt(GITHUB_APP_INSTALLATION_ID, 10);
+    if (!Number.isSafeInteger(installationId) || installationId <= 0) {
+      throw new Error(
+        `GITHUB_APP_INSTALLATION_ID must be a positive integer, got: ${GITHUB_APP_INSTALLATION_ID}`,
+      );
+    }
+    const { mintInstallationToken } = await import('./github-app-auth.js');
+    const { token } = await mintInstallationToken(
+      GITHUB_APP_ID,
+      GITHUB_APP_PRIVATE_KEY,
+      installationId,
+      [],
+    );
+    return token;
+  }
+
+  return process.env.GITHUB_TOKEN;
+}
+
+async function buildContainerArgs(
   plan: ContainerPlan,
   containerName: string,
-): string[] {
+): Promise<string[]> {
   const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  const githubToken = await resolveGitHubToken();
+  if (githubToken) {
+    args.push('-e', `GITHUB_TOKEN=${githubToken}`);
+  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -568,7 +600,7 @@ export async function runContainerAgent(
   const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(plan, containerName);
+  const containerArgs = await buildContainerArgs(plan, containerName);
 
   logger.debug(
     {
