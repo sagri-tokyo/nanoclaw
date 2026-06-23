@@ -14,17 +14,19 @@ const tokenCache = new Map<string, InstallationToken>();
 // here keyed by scope; the second awaits it instead of calling createAppAuth.
 const inflightMints = new Map<string, Promise<InstallationToken>>();
 
-function scopeKey(repos: string[]): string {
+function scopeKey(
+  appId: string,
+  installationId: number,
+  repos: string[],
+): string {
   return crypto
     .createHash('sha256')
-    .update([...repos].sort().join('\n'))
+    .update([appId, String(installationId), ...[...repos].sort()].join('\n'))
     .digest('hex');
 }
 
 function redactToken(message: string): string {
-  return message
-    .replace(/ghs_[A-Za-z0-9]+/g, '[REDACTED]')
-    .replace(/ghu_[A-Za-z0-9]+/g, '[REDACTED]');
+  return message.replace(/gh[a-z]_[A-Za-z0-9]+/g, '[REDACTED]');
 }
 
 function hasExpiryHeadroom(expiresAt: Date): boolean {
@@ -47,7 +49,7 @@ export async function mintInstallationToken(
 ): Promise<InstallationToken> {
   assertValidInstallationId(installationId);
 
-  const key = scopeKey(repos);
+  const key = scopeKey(appId, installationId, repos);
   const cached = tokenCache.get(key);
   if (cached && hasExpiryHeadroom(cached.expiresAt)) {
     return cached;

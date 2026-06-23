@@ -104,6 +104,64 @@ describe('mintInstallationToken', () => {
     expect(mockAuth).toHaveBeenCalledTimes(1);
   });
 
+  it('does not collide the cache across different apps sharing a repo scope', async () => {
+    const expiresAt = makeFutureDate(60);
+    const mockAuth = vi
+      .fn()
+      .mockResolvedValue({ token: 'ghs_abc123', expiresAt });
+    vi.mocked(createAppAuth).mockReturnValue(
+      mockAuth as unknown as ReturnType<typeof createAppAuth>,
+    );
+
+    await mintInstallationToken('app-1', MOCK_PRIVATE_KEY, 456, ['repo']);
+    await mintInstallationToken('app-2', MOCK_PRIVATE_KEY, 456, ['repo']);
+
+    expect(mockAuth).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not collide the cache across different installations sharing a repo scope', async () => {
+    const expiresAt = makeFutureDate(60);
+    const mockAuth = vi
+      .fn()
+      .mockResolvedValue({ token: 'ghs_abc123', expiresAt });
+    vi.mocked(createAppAuth).mockReturnValue(
+      mockAuth as unknown as ReturnType<typeof createAppAuth>,
+    );
+
+    await mintInstallationToken(MOCK_APP_ID, MOCK_PRIVATE_KEY, 456, ['repo']);
+    await mintInstallationToken(MOCK_APP_ID, MOCK_PRIVATE_KEY, 789, ['repo']);
+
+    expect(mockAuth).toHaveBeenCalledTimes(2);
+  });
+
+  it('redacts ghp_ and gho_ prefixed tokens from re-thrown error messages', async () => {
+    const mockAuth = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('ghp_personalpat111 and gho_oauthtoken222 rejected'),
+      );
+    vi.mocked(createAppAuth).mockReturnValue(
+      mockAuth as unknown as ReturnType<typeof createAppAuth>,
+    );
+
+    let caughtMessage = '';
+    try {
+      await mintInstallationToken(
+        MOCK_APP_ID,
+        MOCK_PRIVATE_KEY,
+        MOCK_INSTALLATION_ID,
+        [],
+      );
+    } catch (err) {
+      caughtMessage = err instanceof Error ? err.message : String(err);
+    }
+
+    expect(caughtMessage).not.toContain('ghp_');
+    expect(caughtMessage).not.toContain('gho_');
+    expect(caughtMessage).not.toContain('personalpat111');
+    expect(caughtMessage).not.toContain('oauthtoken222');
+  });
+
   it('does not cache tokens expiring within 5 minutes', async () => {
     const expiresAt = makeFutureDate(3);
     const mockAuth = vi

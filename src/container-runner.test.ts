@@ -6,21 +6,49 @@ import { PassThrough } from 'stream';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-// Mock config
+// Mock config. The GitHub App vars are read through mutable holders so
+// individual tests can exercise the resolveGitHubToken branches without
+// re-mocking the whole module.
+const githubConfig: {
+  GITHUB_APP_ID: string | undefined;
+  GITHUB_APP_INSTALLATION_ID: string | undefined;
+  GITHUB_APP_PRIVATE_KEY: string | undefined;
+  GITHUB_FORCE_PAT: string | undefined;
+} = {
+  GITHUB_APP_ID: undefined,
+  GITHUB_APP_INSTALLATION_ID: undefined,
+  GITHUB_APP_PRIVATE_KEY: undefined,
+  GITHUB_FORCE_PAT: undefined,
+};
+
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
-  GITHUB_APP_ID: undefined,
-  GITHUB_APP_INSTALLATION_ID: undefined,
-  GITHUB_APP_PRIVATE_KEY: undefined,
-  GITHUB_FORCE_PAT: undefined,
+  get GITHUB_APP_ID() {
+    return githubConfig.GITHUB_APP_ID;
+  },
+  get GITHUB_APP_INSTALLATION_ID() {
+    return githubConfig.GITHUB_APP_INSTALLATION_ID;
+  },
+  get GITHUB_APP_PRIVATE_KEY() {
+    return githubConfig.GITHUB_APP_PRIVATE_KEY;
+  },
+  get GITHUB_FORCE_PAT() {
+    return githubConfig.GITHUB_FORCE_PAT;
+  },
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   READER_RPC_PORT: 3002,
   TIMEZONE: 'America/Los_Angeles',
+}));
+
+const mockMintInstallationToken = vi.fn();
+vi.mock('./github-app-auth.js', () => ({
+  mintInstallationToken: (...args: unknown[]) =>
+    mockMintInstallationToken(...args),
 }));
 
 // Mock logger
@@ -616,6 +644,77 @@ describe('container-runner env forwarding', () => {
     expect(envFlagIdx).toBeGreaterThan(0);
     expect(firstVolumeIdx).toBeGreaterThan(0);
     expect(envFlagIdx).toBeLessThan(firstVolumeIdx);
+  });
+});
+
+describe('container-runner GitHub token injection', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    githubConfig.GITHUB_APP_ID = undefined;
+    githubConfig.GITHUB_APP_INSTALLATION_ID = undefined;
+    githubConfig.GITHUB_APP_PRIVATE_KEY = undefined;
+    githubConfig.GITHUB_FORCE_PAT = undefined;
+    mockMintInstallationToken.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    githubConfig.GITHUB_APP_ID = undefined;
+    githubConfig.GITHUB_APP_INSTALLATION_ID = undefined;
+    githubConfig.GITHUB_APP_PRIVATE_KEY = undefined;
+    githubConfig.GITHUB_FORCE_PAT = undefined;
+  });
+
+  async function captureArgs(): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  it('injects GITHUB_FORCE_PAT verbatim as GITHUB_TOKEN', async () => {
+    githubConfig.GITHUB_FORCE_PAT = 'ghp_forcedpat';
+
+    const args = await captureArgs();
+
+    const idx = args.indexOf('GITHUB_TOKEN=ghp_forcedpat');
+    expect(idx).toBeGreaterThan(0);
+    expect(args[idx - 1]).toBe('-e');
+    expect(mockMintInstallationToken).not.toHaveBeenCalled();
+  });
+
+  it('mints an installation token and injects it as GITHUB_TOKEN when the App vars are set', async () => {
+    githubConfig.GITHUB_APP_ID = '123';
+    githubConfig.GITHUB_APP_PRIVATE_KEY = 'fake-private-key';
+    githubConfig.GITHUB_APP_INSTALLATION_ID = '456';
+    mockMintInstallationToken.mockResolvedValue({
+      token: 'ghs_mintedtoken',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    const args = await captureArgs();
+
+    expect(mockMintInstallationToken).toHaveBeenCalledTimes(1);
+    expect(mockMintInstallationToken).toHaveBeenCalledWith(
+      '123',
+      'fake-private-key',
+      456,
+      [],
+    );
+    const idx = args.indexOf('GITHUB_TOKEN=ghs_mintedtoken');
+    expect(idx).toBeGreaterThan(0);
+    expect(args[idx - 1]).toBe('-e');
   });
 });
 

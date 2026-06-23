@@ -484,11 +484,6 @@ async function resolveGitHubToken(): Promise<string | undefined> {
 
   if (GITHUB_APP_ID && GITHUB_APP_PRIVATE_KEY && GITHUB_APP_INSTALLATION_ID) {
     const installationId = parseInt(GITHUB_APP_INSTALLATION_ID, 10);
-    if (!Number.isSafeInteger(installationId) || installationId <= 0) {
-      throw new Error(
-        `GITHUB_APP_INSTALLATION_ID must be a positive integer, got: ${GITHUB_APP_INSTALLATION_ID}`,
-      );
-    }
     const { mintInstallationToken } = await import('./github-app-auth.js');
     const { token } = await mintInstallationToken(
       GITHUB_APP_ID,

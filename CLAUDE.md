@@ -25,6 +25,8 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 
 API keys, secret keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway — which handles secret injection into containers at request time, so no keys or tokens are ever passed to containers directly. Run `onecli --help`.
 
+Carve-out: host-minted, short-lived (1h), repo-scoped GitHub App installation tokens are injected directly via `-e GITHUB_TOKEN` by design — the App private key stays host-side and never enters the container, so the host mints an ephemeral token per session. OneCLI holds static vault secrets, not per-request minted tokens.
+
 ## Skills
 
 Four types of skills exist in NanoClaw. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy and guidelines.
