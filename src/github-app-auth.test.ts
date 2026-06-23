@@ -156,11 +156,9 @@ describe('mintInstallationToken', () => {
       caughtMessage = err instanceof Error ? err.message : String(err);
     }
 
-    expect(caughtMessage).not.toBe('');
-    expect(caughtMessage).not.toContain('ghp_');
-    expect(caughtMessage).not.toContain('gho_');
-    expect(caughtMessage).not.toContain('personalpat111');
-    expect(caughtMessage).not.toContain('oauthtoken222');
+    expect(caughtMessage).toBe(
+      'GitHub App token mint failed: [REDACTED] and [REDACTED] rejected',
+    );
   });
 
   it('does not cache tokens expiring within 5 minutes', async () => {

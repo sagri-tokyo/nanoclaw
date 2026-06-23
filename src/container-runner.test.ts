@@ -664,6 +664,7 @@ describe('container-runner GitHub token injection', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    resetGithubConfig();
   });
 
   async function captureArgs(): Promise<string[]> {
