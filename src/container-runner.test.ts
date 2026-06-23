@@ -648,22 +648,22 @@ describe('container-runner env forwarding', () => {
 });
 
 describe('container-runner GitHub token injection', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    fakeProc = createFakeProcess();
+  function resetGithubConfig(): void {
     githubConfig.GITHUB_APP_ID = undefined;
     githubConfig.GITHUB_APP_INSTALLATION_ID = undefined;
     githubConfig.GITHUB_APP_PRIVATE_KEY = undefined;
     githubConfig.GITHUB_FORCE_PAT = undefined;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    resetGithubConfig();
     mockMintInstallationToken.mockReset();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    githubConfig.GITHUB_APP_ID = undefined;
-    githubConfig.GITHUB_APP_INSTALLATION_ID = undefined;
-    githubConfig.GITHUB_APP_PRIVATE_KEY = undefined;
-    githubConfig.GITHUB_FORCE_PAT = undefined;
   });
 
   async function captureArgs(): Promise<string[]> {
