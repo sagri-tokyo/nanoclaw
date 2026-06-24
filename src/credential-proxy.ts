@@ -125,6 +125,15 @@ export function startCredentialProxy(
           // token for a temp api-key; if the token does NOT work directly on
           // the message path, this must become a proxy-side exchange+cache of
           // a temp key rather than a direct Bearer injection.
+          if (headers['authorization']) {
+            // The sentinel path expects no inbound Authorization; one arriving
+            // alongside it means a misconfigured chain. We still overwrite it,
+            // but surface the anomaly (header values never logged).
+            logger.warn(
+              { path: requestPath },
+              'Credential proxy: LiteLLM sentinel arrived with an unexpected Authorization header; overwriting it',
+            );
+          }
           delete headers['x-api-key'];
           headers['authorization'] = `Bearer ${oauthToken}`;
         } else {

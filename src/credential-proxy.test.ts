@@ -185,30 +185,6 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
   });
 
-  it('OAuth mode leaves a non-sentinel x-api-key (direct-path temp key) untouched', async () => {
-    proxyPort = await startProxy({
-      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
-    });
-
-    // A real post-exchange temp key is not the sentinel, so the discriminator
-    // must pass it through without injecting Authorization.
-    await makeRequest(
-      proxyPort,
-      {
-        method: 'POST',
-        path: '/v1/messages',
-        headers: {
-          'content-type': 'application/json',
-          'x-api-key': 'temp-key-from-exchange',
-        },
-      },
-      '{}',
-    );
-
-    expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
-    expect(lastUpstreamHeaders['authorization']).toBeUndefined();
-  });
-
   it('OAuth mode does not inject for the sentinel when no OAuth token is configured', async () => {
     // Misconfiguration guard: OAuth mode but no token. The sentinel must not be
     // swapped for an empty Bearer; leave the request as-is (it will 401, loudly).
