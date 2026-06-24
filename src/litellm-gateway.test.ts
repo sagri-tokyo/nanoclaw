@@ -158,4 +158,20 @@ describe('mintVirtualKey', () => {
       mintVirtualKey({ taskId: 'task-1', channel: 'chan' }),
     ).rejects.toThrow(/key/);
   });
+
+  it('rejects rather than crashing when the response stream fails mid-transfer', async () => {
+    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"key":');
+      // Abruptly destroy the socket mid-body. Without an 'error' listener on
+      // the client response stream this surfaces as an uncaught exception that
+      // would take down the host; mintVirtualKey must reject instead.
+      res.socket?.destroy();
+    };
+
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'chan' }),
+    ).rejects.toThrow();
+  });
 });

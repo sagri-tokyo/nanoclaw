@@ -617,36 +617,41 @@ async function buildContainerArgs(
 
   const githubToken = await resolveGitHubToken();
   let credDir: string | undefined;
-  // One cred dir per container holds every mounted secret; the existing cleanup
-  // reaps the whole dir on every terminal path.
   if (githubToken || virtualKey) {
-    credDir = createCredDir(containerName);
-  }
-  if (githubToken && credDir) {
-    // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the live
-    // token never appears in the host argv or `docker inspect`. The container
-    // entrypoint re-exports it from the mount. Repo scope is intentionally not
-    // narrowed at mint time (mintInstallationToken(..., [])): the container
-    // skills hit arbitrary repos at runtime, so scope is governed by the GitHub
-    // App installation's repo allowlist, not the token request.
-    writeCredFile(credDir, 'github_token', githubToken);
-    args.push(
-      ...readonlyMountArgs(
-        path.join(credDir, 'github_token'),
-        GITHUB_TOKEN_CONTAINER_PATH,
-      ),
-    );
-  }
-  if (virtualKey && credDir) {
-    // Deliver the per-task virtual key via a mounted file (same rationale as the
-    // GitHub token). The entrypoint re-exports it as ANTHROPIC_API_KEY.
-    writeCredFile(credDir, 'litellm_key', virtualKey);
-    args.push(
-      ...readonlyMountArgs(
-        path.join(credDir, 'litellm_key'),
-        LITELLM_KEY_CONTAINER_PATH,
-      ),
-    );
+    // One cred dir per container holds every mounted secret; the caller's
+    // cleanup reaps the whole dir once buildContainerArgs returns it. Until
+    // then, any write failure must remove the dir itself, so a partial secret
+    // is never orphaned on a throw the caller has no handle to clean up.
+    const dir = createCredDir(containerName);
+    credDir = dir;
+    const mountSecret = (
+      fileName: string,
+      value: string,
+      containerPath: string,
+    ): void => {
+      writeCredFile(dir, fileName, value);
+      args.push(...readonlyMountArgs(path.join(dir, fileName), containerPath));
+    };
+    try {
+      if (githubToken) {
+        // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the
+        // live token never appears in the host argv or `docker inspect`. The
+        // container entrypoint re-exports it from the mount. Repo scope is
+        // intentionally not narrowed at mint time (mintInstallationToken(...,
+        // [])): the container skills hit arbitrary repos at runtime, so scope
+        // is governed by the GitHub App installation's repo allowlist, not the
+        // token request.
+        mountSecret('github_token', githubToken, GITHUB_TOKEN_CONTAINER_PATH);
+      }
+      if (virtualKey) {
+        // Same mounted-file rationale as the GitHub token. The entrypoint
+        // re-exports it as ANTHROPIC_API_KEY.
+        mountSecret('litellm_key', virtualKey, LITELLM_KEY_CONTAINER_PATH);
+      }
+    } catch (error) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   if (useLitellm) {

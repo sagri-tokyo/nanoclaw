@@ -46,7 +46,7 @@ interface MintVirtualKeyRequest {
  * Neither the master key nor the minted key value is logged.
  */
 export async function mintVirtualKey(
-  req: MintVirtualKeyRequest,
+  mintRequest: MintVirtualKeyRequest,
 ): Promise<string> {
   const masterKey = readEnvFile(['LITELLM_MASTER_KEY']).LITELLM_MASTER_KEY;
   if (typeof masterKey !== 'string' || masterKey.length === 0) {
@@ -56,10 +56,10 @@ export async function mintVirtualKey(
   }
 
   const payload = JSON.stringify({
-    key_alias: `task-${req.taskId}`,
+    key_alias: `task-${mintRequest.taskId}`,
     max_budget: LITELLM_PER_TASK_BUDGET_USD,
     duration: '24h',
-    metadata: { task_id: req.taskId, channel: req.channel },
+    metadata: { task_id: mintRequest.taskId, channel: mintRequest.channel },
   });
 
   return new Promise<string>((resolve, reject) => {
@@ -78,12 +78,21 @@ export async function mintVirtualKey(
       (response) => {
         const chunks: Buffer[] = [];
         response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('error', (error) => {
+          // An 'error' on the response stream with no listener is an uncaught
+          // exception that would take down the host process; reject instead.
+          reject(
+            new Error(
+              `LiteLLM /key/generate response stream failed for task ${mintRequest.taskId}: ${error.message}`,
+            ),
+          );
+        });
         response.on('end', () => {
           const status = response.statusCode ?? 0;
           if (status !== 200) {
             reject(
               new Error(
-                `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${req.taskId}`,
+                `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}`,
               ),
             );
             return;
@@ -99,7 +108,7 @@ export async function mintVirtualKey(
             // of failing just this spawn.
             reject(
               new Error(
-                `LiteLLM /key/generate returned an unparseable response for task ${req.taskId}`,
+                `LiteLLM /key/generate returned an unparseable response for task ${mintRequest.taskId}`,
               ),
             );
             return;
@@ -113,7 +122,7 @@ export async function mintVirtualKey(
           if (typeof key !== 'string' || key.length === 0) {
             reject(
               new Error(
-                `LiteLLM /key/generate response carried no string "key" for task ${req.taskId}`,
+                `LiteLLM /key/generate response carried no string "key" for task ${mintRequest.taskId}`,
               ),
             );
             return;
@@ -126,7 +135,7 @@ export async function mintVirtualKey(
     request.on('error', (error) => {
       reject(
         new Error(
-          `LiteLLM /key/generate request failed for task ${req.taskId}: ${error.message}`,
+          `LiteLLM /key/generate request failed for task ${mintRequest.taskId}: ${error.message}`,
         ),
       );
     });
