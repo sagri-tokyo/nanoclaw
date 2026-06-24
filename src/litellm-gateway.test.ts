@@ -1,17 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { AddressInfo } from 'net';
-
-const mockEnv: Record<string, string> = {};
-vi.mock('./env.js', () => ({
-  readEnvFile: vi.fn((keys: string[]) => {
-    const result: Record<string, string> = {};
-    for (const key of keys) {
-      if (key in mockEnv) result[key] = mockEnv[key];
-    }
-    return result;
-  }),
-}));
 
 vi.mock('./logger.js', () => ({
   logger: {
@@ -38,15 +30,38 @@ vi.mock('./config.js', () => ({
 
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
 
-function clearMockEnv(): void {
-  for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+// readEnvFile reads LITELLM_MASTER_KEY from CREDENTIALS_DIRECTORY (one file per
+// key). Point it at a per-test temp dir and write the key file there so the real
+// env-source logic runs instead of a stub of our own module.
+const savedCredentialsDirectory = process.env.CREDENTIALS_DIRECTORY;
+let credentialsDirectory: string;
+
+beforeEach(() => {
+  credentialsDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'litellm-gateway-test-'),
+  );
+  process.env.CREDENTIALS_DIRECTORY = credentialsDirectory;
+});
+
+afterEach(() => {
+  if (savedCredentialsDirectory === undefined) {
+    delete process.env.CREDENTIALS_DIRECTORY;
+  } else {
+    process.env.CREDENTIALS_DIRECTORY = savedCredentialsDirectory;
+  }
+  fs.rmSync(credentialsDirectory, { recursive: true, force: true });
+});
+
+function setMasterKey(value: string): void {
+  fs.writeFileSync(
+    path.join(credentialsDirectory, 'LITELLM_MASTER_KEY'),
+    value,
+  );
 }
 
 describe('litellmEnabled', () => {
-  afterEach(clearMockEnv);
-
   it('is true when LITELLM_MASTER_KEY is a non-empty string', () => {
-    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    setMasterKey('sk-master-abc');
     expect(litellmEnabled()).toBe(true);
   });
 
@@ -55,7 +70,7 @@ describe('litellmEnabled', () => {
   });
 
   it('is false when LITELLM_MASTER_KEY is an empty string', () => {
-    mockEnv.LITELLM_MASTER_KEY = '';
+    setMasterKey('');
     expect(litellmEnabled()).toBe(false);
   });
 });
@@ -98,11 +113,10 @@ describe('mintVirtualKey', () => {
 
   afterEach(async () => {
     await new Promise<void>((resolve) => gateway.close(() => resolve()));
-    clearMockEnv();
   });
 
   it('POSTs to /key/generate with the Bearer master key and the budget body, and returns the key', async () => {
-    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    setMasterKey('sk-master-abc');
     config.LITELLM_PER_TASK_BUDGET_USD = 2.5;
 
     const key = await mintVirtualKey({
@@ -117,14 +131,16 @@ describe('mintVirtualKey', () => {
     expect(received.url).toBe('/key/generate');
     expect(received.headers['authorization']).toBe('Bearer sk-master-abc');
     expect(received.headers['content-type']).toBe('application/json');
-    expect(JSON.parse(received.body)).toEqual({
-      key_alias: 'task-nanoclaw-test-group-1700000000000',
-      max_budget: 2.5,
-      duration: '24h',
-      metadata: {
-        task_id: 'nanoclaw-test-group-1700000000000',
-        channel: 'test-group',
-      },
+    const body = JSON.parse(received.body);
+    // key_alias carries a random suffix for uniqueness; the rest is exact.
+    expect(body.key_alias).toMatch(
+      /^task-nanoclaw-test-group-1700000000000-[0-9a-f]{12}$/,
+    );
+    expect(body.max_budget).toBe(2.5);
+    expect(body.duration).toBe('24h');
+    expect(body.metadata).toEqual({
+      task_id: 'nanoclaw-test-group-1700000000000',
+      channel: 'test-group',
     });
   });
 
@@ -136,7 +152,7 @@ describe('mintVirtualKey', () => {
   });
 
   it('throws when the gateway returns a non-200 status', async () => {
-    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    setMasterKey('sk-master-abc');
     respond = (res) => {
       res.writeHead(403, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'forbidden' }));
@@ -148,7 +164,7 @@ describe('mintVirtualKey', () => {
   });
 
   it('throws when the response has no string key field', async () => {
-    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    setMasterKey('sk-master-abc');
     respond = (res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ not_a_key: true }));
@@ -160,7 +176,7 @@ describe('mintVirtualKey', () => {
   });
 
   it('rejects rather than crashing when the response stream fails mid-transfer', async () => {
-    mockEnv.LITELLM_MASTER_KEY = 'sk-master-abc';
+    setMasterKey('sk-master-abc');
     respond = (res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"key":');
@@ -170,8 +186,11 @@ describe('mintVirtualKey', () => {
       res.socket?.destroy();
     };
 
+    // A mid-body socket destroy surfaces as either a request-level "socket hang
+    // up" or a response-stream error depending on timing; both must reject with
+    // a descriptive LiteLLM /key/generate error rather than crash the host.
     await expect(
       mintVirtualKey({ taskId: 'task-1', channel: 'chan' }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/LiteLLM \/key\/generate .*failed for task task-1/);
   });
 });

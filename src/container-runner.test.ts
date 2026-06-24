@@ -200,6 +200,33 @@ function emitOutputMarker(
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
+function envFlagsFrom(args: string[]): string[] {
+  const envFlags: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === '-e') envFlags.push(args[index + 1]);
+  }
+  return envFlags;
+}
+
+function envValue(args: string[], key: string): string | null {
+  for (const flag of envFlagsFrom(args)) {
+    if (flag.startsWith(`${key}=`)) return flag.slice(key.length + 1);
+  }
+  return null;
+}
+
+function readonlyMountFor(
+  args: string[],
+  containerPath: string,
+): string | null {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] !== '-v') continue;
+    const spec = args[index + 1];
+    if (spec.split(':')[1] === containerPath) return spec;
+  }
+  return null;
+}
+
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -786,16 +813,6 @@ describe('container-runner OTel telemetry wiring (RFC 0001 Phase 1)', () => {
     return args;
   }
 
-  function envValue(args: string[], key: string): string | null {
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] !== '-e') continue;
-      if (args[i + 1].startsWith(`${key}=`)) {
-        return args[i + 1].slice(key.length + 1);
-      }
-    }
-    return null;
-  }
-
   it('injects telemetry env with per-user/per-task resource attributes when enabled and endpoint set', async () => {
     process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
@@ -1097,27 +1114,6 @@ describe('container-runner GitHub token mounted-file delivery', () => {
     return args;
   }
 
-  function readonlyMountFor(
-    args: string[],
-    containerPath: string,
-  ): string | null {
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] !== '-v') continue;
-      const spec = args[index + 1];
-      const parts = spec.split(':');
-      if (parts[1] === containerPath) return spec;
-    }
-    return null;
-  }
-
-  function envFlagsFrom(args: string[]): string[] {
-    const envFlags: string[] = [];
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] === '-e') envFlags.push(args[index + 1]);
-    }
-    return envFlags;
-  }
-
   it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
     process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
     const args = await captureArgs();
@@ -1155,7 +1151,7 @@ describe('container-runner GitHub token mounted-file delivery', () => {
         (call[0] as string).includes('nanoclaw-cred-'),
     );
     if (!credCall) {
-      throw new Error('writeGitHubTokenFile never created a credential dir');
+      throw new Error('createCredDir never created a credential dir');
     }
     return credCall[0] as string;
   }
@@ -1220,33 +1216,6 @@ describe('container-runner LiteLLM gateway routing', () => {
     await vi.advanceTimersByTimeAsync(10);
     await containerPromise;
     return args;
-  }
-
-  function envFlagsFrom(args: string[]): string[] {
-    const envFlags: string[] = [];
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] === '-e') envFlags.push(args[index + 1]);
-    }
-    return envFlags;
-  }
-
-  function readonlyMountFor(
-    args: string[],
-    containerPath: string,
-  ): string | null {
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] !== '-v') continue;
-      const spec = args[index + 1];
-      if (spec.split(':')[1] === containerPath) return spec;
-    }
-    return null;
-  }
-
-  function envValue(args: string[], key: string): string | null {
-    for (const flag of envFlagsFrom(args)) {
-      if (flag.startsWith(`${key}=`)) return flag.slice(key.length + 1);
-    }
-    return null;
   }
 
   it('routes ANTHROPIC_BASE_URL at the LiteLLM port when enabled', async () => {

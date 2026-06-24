@@ -12,22 +12,27 @@
  * minting one short-lived virtual key per task against the gateway's
  * /key/generate admin endpoint, authenticated with the master key.
  */
+import { randomBytes } from 'crypto';
 import { request as httpRequest } from 'http';
 
-import {
-  LITELLM_GATEWAY_PORT,
-  LITELLM_PER_TASK_BUDGET_USD,
-} from './config.js';
+import { LITELLM_GATEWAY_PORT, LITELLM_PER_TASK_BUDGET_USD } from './config.js';
 import { readEnvFile } from './env.js';
 
 /**
- * The gateway is enabled iff the host holds the master key. The master key is a
- * host-only secret read through the same env source as the credential proxy's
- * tokens; it is never exposed to containers.
+ * The master key is a host-only secret read through the same env source as the
+ * credential proxy's tokens; it is never exposed to containers. Returns
+ * undefined when absent or empty so callers can treat both as "no gateway".
  */
-export function litellmEnabled(): boolean {
+function readMasterKey(): string | undefined {
   const masterKey = readEnvFile(['LITELLM_MASTER_KEY']).LITELLM_MASTER_KEY;
-  return typeof masterKey === 'string' && masterKey.length > 0;
+  return typeof masterKey === 'string' && masterKey.length > 0
+    ? masterKey
+    : undefined;
+}
+
+/** The gateway is enabled iff the host holds a non-empty master key. */
+export function litellmEnabled(): boolean {
+  return readMasterKey() !== undefined;
 }
 
 interface MintVirtualKeyRequest {
@@ -48,15 +53,19 @@ interface MintVirtualKeyRequest {
 export async function mintVirtualKey(
   mintRequest: MintVirtualKeyRequest,
 ): Promise<string> {
-  const masterKey = readEnvFile(['LITELLM_MASTER_KEY']).LITELLM_MASTER_KEY;
-  if (typeof masterKey !== 'string' || masterKey.length === 0) {
+  const masterKey = readMasterKey();
+  if (masterKey === undefined) {
     throw new Error(
       'LITELLM_MASTER_KEY is absent; cannot mint a LiteLLM virtual key',
     );
   }
 
   const payload = JSON.stringify({
-    key_alias: `task-${mintRequest.taskId}`,
+    // taskId is the container name, whose Date.now() suffix can collide for two
+    // containers in the same group spawned within the same millisecond (see
+    // createCredDir in container-runner.ts). The random suffix guarantees a
+    // unique key_alias regardless, so LiteLLM never rejects a duplicate alias.
+    key_alias: `task-${mintRequest.taskId}-${randomBytes(6).toString('hex')}`,
     max_budget: LITELLM_PER_TASK_BUDGET_USD,
     duration: '24h',
     metadata: { task_id: mintRequest.taskId, channel: mintRequest.channel },
@@ -114,9 +123,7 @@ export async function mintVirtualKey(
             return;
           }
           const key =
-            typeof parsed === 'object' &&
-            parsed !== null &&
-            'key' in parsed
+            typeof parsed === 'object' && parsed !== null && 'key' in parsed
               ? (parsed as { key: unknown }).key
               : undefined;
           if (typeof key !== 'string' || key.length === 0) {
