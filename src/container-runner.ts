@@ -3,6 +3,7 @@
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, spawn } from 'child_process';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -524,22 +525,27 @@ async function resolveGitHubToken(): Promise<string | undefined> {
  * Write the resolved GitHub token to a per-container host file so it can be
  * mounted read-only instead of passed via `-e`. The directory is mode 0700 and
  * the file is mode 0600, both owned by the uid the container will run as (see
- * resolveContainerUid). Returns the directory path for later cleanup, or
- * undefined when no token was resolved.
+ * resolveContainerUid). Returns the directory path so the caller can remove it
+ * after the container exits.
  */
-function writeGitHubTokenFile(
-  containerName: string,
-  token: string,
-): string {
-  const credDir = path.join(os.tmpdir(), `nanoclaw-cred-${containerName}`);
+function writeGitHubTokenFile(containerName: string, token: string): string {
+  // Random suffix guarantees per-container isolation even if two containers for
+  // the same group spawn within the same millisecond (containerName carries
+  // only a Date.now() suffix), so one container's cleanup cannot delete a dir
+  // another container is still reading.
+  const credDir = path.join(
+    os.tmpdir(),
+    `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
+  );
   fs.mkdirSync(credDir, { recursive: true, mode: 0o700 });
   const tokenFile = path.join(credDir, 'github_token');
   fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 
+  // The file is owner-only (0600), so only the owning uid matters for the
+  // container read; the gid is irrelevant. Own both by the container uid.
   const containerUid = resolveContainerUid();
-  const containerGid = process.getgid?.() ?? containerUid;
-  fs.chownSync(credDir, containerUid, containerGid);
-  fs.chownSync(tokenFile, containerUid, containerGid);
+  fs.chownSync(credDir, containerUid, containerUid);
+  fs.chownSync(tokenFile, containerUid, containerUid);
   // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
   // (and 0700 on the dir) to guarantee the secret is owner-only regardless of
   // the runner's umask.

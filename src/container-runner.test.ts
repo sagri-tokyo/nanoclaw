@@ -1038,10 +1038,8 @@ describe('container-runner memory-gate hardening', () => {
   });
 });
 
-// Pins the mounted-file GitHub-token delivery (PR #57 rework). The live token
-// must never reach the host `docker run` argv via `-e GITHUB_TOKEN=...`; it is
-// written to a per-container host file and bind-mounted read-only at
-// /run/nanoclaw/github_token, which the container entrypoint re-exports.
+// Security pin: the live token must never reach the host `docker run` argv via
+// `-e GITHUB_TOKEN=...`; it is delivered by a read-only mount instead.
 describe('container-runner GitHub token mounted-file delivery', () => {
   const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
   let previousGithubToken: string | undefined;
@@ -1091,16 +1089,20 @@ describe('container-runner GitHub token mounted-file delivery', () => {
     return null;
   }
 
-  it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
-    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
-    const args = await captureArgs();
-
+  function envFlagsFrom(args: string[]): string[] {
     const envFlags: string[] = [];
     for (let index = 0; index < args.length - 1; index++) {
       if (args[index] === '-e') envFlags.push(args[index + 1]);
     }
+    return envFlags;
+  }
+
+  it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    const args = await captureArgs();
+
     expect(
-      envFlags.some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+      envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
     ).toBe(false);
     expect(args).not.toContain('GITHUB_TOKEN=ghs_livetoken1234567890');
   });
@@ -1120,12 +1122,8 @@ describe('container-runner GitHub token mounted-file delivery', () => {
 
     const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
     expect(mount).toBeNull();
-    const envFlags: string[] = [];
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] === '-e') envFlags.push(args[index + 1]);
-    }
     expect(
-      envFlags.some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+      envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
     ).toBe(false);
   });
 });
