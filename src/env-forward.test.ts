@@ -133,16 +133,19 @@ describe('getForwardedEnv', () => {
     'GOOGLE_APPLICATION_CREDENTIALS',
     'AWS_SECRET_ACCESS_KEY',
     'DATABASE_URL',
-  ])('throws when the forward-list contains the security-critical var %s', (name) => {
-    process.env[name] = 'a-secret-value';
-    mockReadFileSync.mockReturnValue(`${name}\n`);
+  ])(
+    'throws when the forward-list contains the security-critical var %s',
+    (name) => {
+      process.env[name] = 'a-secret-value';
+      mockReadFileSync.mockReturnValue(`${name}\n`);
 
-    expect(() => getForwardedEnv()).toThrow(
-      `env-forward: refusing to forward security-critical var "${name}" via -e`,
-    );
+      expect(() => getForwardedEnv()).toThrow(
+        `env-forward: refusing to forward security-critical var "${name}" via -e`,
+      );
 
-    delete process.env[name];
-  });
+      delete process.env[name];
+    },
+  );
 
   it('throws on a security-critical name even when it is absent from process.env', () => {
     delete process.env['GITHUB_TOKEN'];
