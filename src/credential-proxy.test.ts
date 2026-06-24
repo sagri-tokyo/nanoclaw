@@ -23,7 +23,11 @@ vi.mock('./logger.js', async (importOriginal) => {
 });
 
 import { logger } from './logger.js';
-import { redactUrlPath, startCredentialProxy } from './credential-proxy.js';
+import {
+  LITELLM_PROXY_SENTINEL,
+  redactUrlPath,
+  startCredentialProxy,
+} from './credential-proxy.js';
 
 function makeRequest(
   port: number,
@@ -153,6 +157,78 @@ describe('credential-proxy', () => {
 
     expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
     expect(lastUpstreamHeaders['authorization']).toBeUndefined();
+  });
+
+  it('OAuth mode swaps the LiteLLM sentinel x-api-key for the real OAuth Bearer token', async () => {
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    // LiteLLM-chained path: gateway forwards the sentinel as x-api-key.
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': LITELLM_PROXY_SENTINEL,
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBe(
+      'Bearer real-oauth-token',
+    );
+    // Sentinel must never reach upstream.
+    expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+  });
+
+  it('OAuth mode leaves a non-sentinel x-api-key (direct-path temp key) untouched', async () => {
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    // A real post-exchange temp key is not the sentinel, so the discriminator
+    // must pass it through without injecting Authorization.
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'temp-key-from-exchange',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
+    expect(lastUpstreamHeaders['authorization']).toBeUndefined();
+  });
+
+  it('OAuth mode does not inject for the sentinel when no OAuth token is configured', async () => {
+    // Misconfiguration guard: OAuth mode but no token. The sentinel must not be
+    // swapped for an empty Bearer; leave the request as-is (it will 401, loudly).
+    proxyPort = await startProxy({ CLAUDE_CODE_OAUTH_TOKEN: '' });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': LITELLM_PROXY_SENTINEL,
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBeUndefined();
+    expect(lastUpstreamHeaders['x-api-key']).toBe(LITELLM_PROXY_SENTINEL);
   });
 
   it('strips hop-by-hop headers', async () => {

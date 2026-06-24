@@ -41,6 +41,21 @@ export function redactUrlPath(rawUrl: string | undefined): string {
   }
 }
 
+/**
+ * Sentinel `x-api-key` the LiteLLM budget gateway (ADR-0003) sends downstream
+ * when chained in front of this proxy. LiteLLM holds no real credential: it
+ * authenticates the agent's per-task virtual key at its own ingress, then
+ * forwards to the proxy with this fixed placeholder as the provider `api_key`.
+ * In OAuth mode the proxy swaps it for the real OAuth token (see below).
+ *
+ * The infra LiteLLM `config.yaml` MUST set every model's `api_key` to exactly
+ * this value (sagri-tokyo/infrastructure, the LiteLLM block in
+ * `sagri-ai/ec2-runtime/module/main.tf`). It deliberately does not start with
+ * `sk-ant-oat`, which would make LiteLLM emit an `Authorization: Bearer` header
+ * instead of `x-api-key` and defeat the exact-match discriminator here.
+ */
+export const LITELLM_PROXY_SENTINEL = 'litellm-proxy-injects-oauth-credential';
+
 export interface ProxyConfig {
   authMode: AuthMode;
 }
@@ -94,11 +109,29 @@ export function startCredentialProxy(
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
+        } else if (
+          oauthToken &&
+          headers['x-api-key'] === LITELLM_PROXY_SENTINEL
+        ) {
+          // OAuth mode, LiteLLM-chained path: the gateway forwards the sentinel
+          // as x-api-key (it never holds a real credential). Swap it for the
+          // real OAuth token as a Bearer header and strip the sentinel so it
+          // never reaches Anthropic. Matched by exact value, so a real
+          // post-exchange temp key on the direct path is never disturbed.
+          //
+          // ASSUMPTION (needs live validation before enable, see PR / #305):
+          // the OAuth token authenticates directly as `Authorization: Bearer`
+          // on /v1/messages. The direct container path instead exchanges the
+          // token for a temp api-key; if the token does NOT work directly on
+          // the message path, this must become a proxy-side exchange+cache of
+          // a temp key rather than a direct Bearer injection.
+          delete headers['x-api-key'];
+          headers['authorization'] = `Bearer ${oauthToken}`;
         } else {
-          // OAuth mode: replace placeholder Bearer token with the real one
-          // only when the container actually sends an Authorization header
-          // (exchange request + auth probes). Post-exchange requests use
-          // x-api-key only, so they pass through without token injection.
+          // OAuth mode, direct container path: replace the placeholder Bearer
+          // token with the real one only when the container actually sends an
+          // Authorization header (exchange request + auth probes). Post-exchange
+          // requests use x-api-key only, so they pass through untouched.
           if (headers['authorization']) {
             delete headers['authorization'];
             if (oauthToken) {
