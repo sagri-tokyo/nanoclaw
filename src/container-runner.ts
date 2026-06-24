@@ -2,8 +2,14 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+  spawn,
+} from 'child_process';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -12,6 +18,10 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  GITHUB_APP_ID,
+  GITHUB_APP_INSTALLATION_ID,
+  GITHUB_APP_PRIVATE_KEY,
+  GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   READER_RPC_PORT,
@@ -37,6 +47,28 @@ import { RegisteredGroup } from './types.js';
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+// Container path the GitHub token file is mounted at, read-only. The container
+// entrypoint re-exports its contents as GITHUB_TOKEN before launching the
+// agent. Delivering the token via a mounted file keeps it off the host
+// `docker run` argv and out of `docker inspect` Config.Env — unlike `-e
+// GITHUB_TOKEN=...`, which exposes a live token to anyone who can read the
+// process table or inspect the container.
+const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+
+// The image's default user is `node` (uid 1000, set by `USER node` in
+// container/Dockerfile). buildContainerArgs only passes `--user ${hostUid}`
+// when hostUid is neither 0 nor 1000; in every other case the container runs
+// as uid 1000. The token file must be readable by whichever uid the container
+// process actually runs as, so it is chown'd to this uid and kept at mode 0600
+// (never world-readable — 0644 on a host secret is itself a leak).
+function resolveContainerUid(): number {
+  const hostUid = process.getuid?.();
+  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+    return hostUid;
+  }
+  return 1000;
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -475,15 +507,94 @@ function buildContainerPlan(
   return { mounts, extraEnv };
 }
 
-function buildContainerArgs(
+async function resolveGitHubToken(): Promise<string | undefined> {
+  if (GITHUB_FORCE_PAT) return GITHUB_FORCE_PAT;
+
+  if (GITHUB_APP_ID && GITHUB_APP_PRIVATE_KEY && GITHUB_APP_INSTALLATION_ID) {
+    const installationId = parseInt(GITHUB_APP_INSTALLATION_ID, 10);
+    const { mintInstallationToken } = await import('./github-app-auth.js');
+    const { token } = await mintInstallationToken(
+      GITHUB_APP_ID,
+      GITHUB_APP_PRIVATE_KEY,
+      installationId,
+      [],
+    );
+    return token;
+  }
+
+  return process.env.GITHUB_TOKEN;
+}
+
+/**
+ * Write the resolved GitHub token to a per-container host file so it can be
+ * mounted read-only instead of passed via `-e`. The directory is mode 0700 and
+ * the file is mode 0600, both owned by the uid the container will run as (see
+ * resolveContainerUid). Returns the directory path so the caller can remove it
+ * after the container exits.
+ */
+function writeGitHubTokenFile(containerName: string, token: string): string {
+  // Random suffix guarantees per-container isolation even if two containers for
+  // the same group spawn within the same millisecond (containerName carries
+  // only a Date.now() suffix), so one container's cleanup cannot delete a dir
+  // another container is still reading.
+  const credDir = path.join(
+    os.tmpdir(),
+    `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
+  );
+  fs.mkdirSync(credDir, { recursive: true, mode: 0o700 });
+  const tokenFile = path.join(credDir, 'github_token');
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+
+  // chown targets a *different* uid only in the root-runner case
+  // (resolveContainerUid returns 1000 while getuid is 0) — root has CAP_CHOWN,
+  // so it is permitted. Every non-root case is a chown-to-self that needs no
+  // capability. gid is set to containerUid too, but the file is 0600 owner-only
+  // so gid never gates the container read.
+  const containerUid = resolveContainerUid();
+  fs.chownSync(credDir, containerUid, containerUid);
+  fs.chownSync(tokenFile, containerUid, containerUid);
+  // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
+  // (and 0700 on the dir) to guarantee the secret is owner-only regardless of
+  // the runner's umask.
+  fs.chmodSync(credDir, 0o700);
+  fs.chmodSync(tokenFile, 0o600);
+
+  return credDir;
+}
+
+interface BuiltContainerArgs {
+  args: string[];
+  /** Per-container host directory holding the GitHub token file, if any. */
+  credDir?: string;
+}
+
+async function buildContainerArgs(
   plan: ContainerPlan,
   containerName: string,
-): string[] {
+): Promise<BuiltContainerArgs> {
   const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  const githubToken = await resolveGitHubToken();
+  let credDir: string | undefined;
+  if (githubToken) {
+    // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the live
+    // token never appears in the host argv or `docker inspect`. The container
+    // entrypoint re-exports it from the mount. Repo scope is intentionally not
+    // narrowed at mint time (mintInstallationToken(..., [])): the container
+    // skills hit arbitrary repos at runtime, so scope is governed by the GitHub
+    // App installation's repo allowlist, not the token request.
+    credDir = writeGitHubTokenFile(containerName, githubToken);
+    args.push(
+      ...readonlyMountArgs(
+        path.join(credDir, 'github_token'),
+        GITHUB_TOKEN_CONTAINER_PATH,
+      ),
+    );
+  }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
@@ -550,7 +661,7 @@ function buildContainerArgs(
 
   args.push(CONTAINER_IMAGE);
 
-  return args;
+  return { args, credDir };
 }
 
 export async function runContainerAgent(
@@ -568,7 +679,29 @@ export async function runContainerAgent(
   const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(plan, containerName);
+  const { args: containerArgs, credDir } = await buildContainerArgs(
+    plan,
+    containerName,
+  );
+
+  // Remove the per-container credential directory once the container exits.
+  // The container is `--rm`, so the only thing left to reap on the host is this
+  // secret file. cleanupCredDir is idempotent and must run on every terminal
+  // path (clean exit, error, timeout, spawn failure) so a live token never
+  // lingers on disk.
+  let credCleaned = false;
+  const cleanupCredDir = (): void => {
+    if (credCleaned || credDir === undefined) return;
+    credCleaned = true;
+    try {
+      fs.rmSync(credDir, { recursive: true, force: true });
+    } catch (err) {
+      logger.warn(
+        { credDir, err },
+        'Failed to remove container credential directory',
+      );
+    }
+  };
 
   logger.debug(
     {
@@ -594,22 +727,38 @@ export async function runContainerAgent(
   );
 
   const logsDir = path.join(groupDir, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+  } catch (err) {
+    cleanupCredDir();
+    throw err;
+  }
 
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    onProcess(container, containerName);
-
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
+    let container: ChildProcessWithoutNullStreams;
+    try {
+      container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      onProcess(container, containerName);
+
+      container.stdin.write(JSON.stringify(input));
+      container.stdin.end();
+    } catch (err) {
+      cleanupCredDir();
+      resolve({
+        status: 'error',
+        result: null,
+        error: `Container spawn error: ${(err as Error).message}`,
+      });
+      return;
+    }
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
@@ -738,6 +887,7 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      cleanupCredDir();
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -954,6 +1104,7 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      cleanupCredDir();
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',
