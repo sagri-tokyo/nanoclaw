@@ -47,6 +47,7 @@ afterEach(() => {
   delete process.env['TEST_VAR_A'];
   delete process.env['TEST_VAR_B'];
   delete process.env['TEST_VAR_C'];
+  vi.unstubAllEnvs();
 });
 
 describe('getForwardedEnv', () => {
@@ -133,17 +134,19 @@ describe('getForwardedEnv', () => {
     'GOOGLE_APPLICATION_CREDENTIALS',
     'AWS_SECRET_ACCESS_KEY',
     'DATABASE_URL',
+    'SIGNING_KEY',
+    'ENCRYPTION_KEY',
+    'MASTER_KEY',
+    'HMAC_KEY',
   ])(
     'throws when the forward-list contains the security-critical var %s',
     (name) => {
-      process.env[name] = 'a-secret-value';
+      vi.stubEnv(name, 'a-secret-value');
       mockReadFileSync.mockReturnValue(`${name}\n`);
 
       expect(() => getForwardedEnv()).toThrow(
         `env-forward: refusing to forward security-critical var "${name}" via -e`,
       );
-
-      delete process.env[name];
     },
   );
 
@@ -163,13 +166,15 @@ describe('getForwardedEnv', () => {
     'KEYBOARD_LAYOUT',
     'CREDENTIAL_PROXY_PORT',
     'CREDENTIAL_PROXY_HOST',
+    'PARTITION_KEY',
+    'SORT_KEY',
+    'ROUTING_KEY',
+    'CACHE_KEY',
   ])('does not treat the benign var %s as a secret', (name) => {
-    process.env[name] = 'benign';
+    vi.stubEnv(name, 'benign');
     mockReadFileSync.mockReturnValue(`${name}\n`);
 
     expect(getForwardedEnv()).toStrictEqual({ [name]: 'benign' });
-
-    delete process.env[name];
   });
 
   it('propagates unexpected read errors', () => {

@@ -17,11 +17,22 @@ const FORWARD_LIST_PATH = path.join(DATA_DIR, 'env', 'forward-list');
 // benign names (TOKENIZER_CONFIG, API_BASE_URL, PATCH_LEVEL) do not trip the
 // guard. `CREDENTIALS` (plural) is listed but bare `CREDENTIAL` is not, so the
 // benign CREDENTIAL_PROXY_PORT/HOST config vars pass while *_CREDENTIALS (e.g.
-// GOOGLE_APPLICATION_CREDENTIALS) is blocked. This denylist is best-effort
-// defense-in-depth, not a guarantee: it cannot enumerate every secret, so the
-// real contract remains "secrets never go on the forward-list".
+// GOOGLE_APPLICATION_CREDENTIALS) is blocked.
+//
+// This denylist is best-effort defense-in-depth, not a guarantee: it cannot
+// enumerate every secret, so the real contract remains "secrets never go on the
+// forward-list". Known boundaries, by design:
+//   - Secret `*_KEY` forms are listed explicitly rather than via a bare `KEY`
+//     segment, because `KEY` would over-block benign config (PARTITION_KEY,
+//     SORT_KEY, ROUTING_KEY, CACHE_KEY).
+//   - Connection-string URLs other than DATABASE_URL (DB_URL, REDIS_URL,
+//     MONGO_URL) are not caught; `*_URL` is too broad to block (API_BASE_URL is
+//     benign).
+//   - `PAT` is a short segment: it catches GITHUB_FORCE_PAT but may also reject
+//     a benign `*_PAT` name. The throw message names the var so the cause is
+//     clear.
 const SECRET_NAME_PATTERN =
-  /(^|_)(TOKEN|SECRET|SECRETS|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS|PRIVATE_KEY|API_KEY|ACCESS_KEY|ROLE_KEY|ANON_KEY|DATABASE_URL|DSN|PAT)(_|$)/i;
+  /(^|_)(TOKEN|SECRET|SECRETS|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS|PRIVATE_KEY|API_KEY|ACCESS_KEY|ROLE_KEY|ANON_KEY|SIGNING_KEY|ENCRYPTION_KEY|MASTER_KEY|HMAC_KEY|DATABASE_URL|DSN|PAT)(_|$)/i;
 
 /**
  * Read the env forward-list file and resolve each listed name against
