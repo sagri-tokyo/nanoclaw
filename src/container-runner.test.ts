@@ -687,18 +687,21 @@ describe('container-runner GitHub token injection', () => {
     return args;
   }
 
-  it('injects GITHUB_FORCE_PAT verbatim as GITHUB_TOKEN', async () => {
+  it('delivers GITHUB_FORCE_PAT via the mounted token file, not -e', async () => {
     githubConfig.GITHUB_FORCE_PAT = 'ghp_forcedpat';
 
     const args = await captureArgs();
 
-    const idx = args.indexOf('GITHUB_TOKEN=ghp_forcedpat');
-    expect(idx).toBeGreaterThan(0);
-    expect(args[idx - 1]).toBe('-e');
+    expect(args.join(' ')).not.toContain('ghp_forcedpat');
+    const tokenMount = args.find((a) =>
+      a.endsWith(':/run/nanoclaw/github_token:ro'),
+    );
+    expect(tokenMount).toBeDefined();
+    expect(args[args.indexOf(tokenMount!) - 1]).toBe('-v');
     expect(mockMintInstallationToken).not.toHaveBeenCalled();
   });
 
-  it('mints an installation token and injects it as GITHUB_TOKEN when the App vars are set', async () => {
+  it('mints an installation token and delivers it via the mounted token file', async () => {
     githubConfig.GITHUB_APP_ID = '123';
     githubConfig.GITHUB_APP_PRIVATE_KEY = 'fake-private-key';
     githubConfig.GITHUB_APP_INSTALLATION_ID = '456';
@@ -716,9 +719,12 @@ describe('container-runner GitHub token injection', () => {
       456,
       [],
     );
-    const idx = args.indexOf('GITHUB_TOKEN=ghs_mintedtoken');
-    expect(idx).toBeGreaterThan(0);
-    expect(args[idx - 1]).toBe('-e');
+    expect(args.join(' ')).not.toContain('ghs_mintedtoken');
+    const tokenMount = args.find((a) =>
+      a.endsWith(':/run/nanoclaw/github_token:ro'),
+    );
+    expect(tokenMount).toBeDefined();
+    expect(args[args.indexOf(tokenMount!) - 1]).toBe('-v');
   });
 });
 
