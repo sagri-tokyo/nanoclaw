@@ -578,6 +578,12 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Resolve forwarded env up front: getForwardedEnv throws on a misconfigured
+  // forward-list (a security-critical name), and that must happen before any
+  // per-container credential file is written, so a rejected spawn leaves no
+  // token file orphaned on disk.
+  const forwardedEnv = getForwardedEnv();
+
   const githubToken = await resolveGitHubToken();
   let credDir: string | undefined;
   if (githubToken) {
@@ -643,8 +649,8 @@ async function buildContainerArgs(
 
   // Opt-in host env forwarding: only vars listed in DATA_DIR/env/forward-list
   // are passed to the container. The /workspace/project/.env shadow is kept
-  // intact — this is an explicit, named-variable path only.
-  const forwardedEnv = getForwardedEnv();
+  // intact — this is an explicit, named-variable path only. Resolved above so a
+  // misconfigured list throws before any credential file is written.
   for (const [name, value] of Object.entries(forwardedEnv).sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
