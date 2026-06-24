@@ -162,6 +162,7 @@ import {
 import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
+import fs from 'fs';
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
@@ -1131,5 +1132,39 @@ describe('container-runner GitHub token mounted-file delivery', () => {
     expect(
       envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
     ).toBe(false);
+  });
+
+  function credDirFromMkdirSync(): string {
+    const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('nanoclaw-cred-'),
+    );
+    if (!credCall) {
+      throw new Error('writeGitHubTokenFile never created a credential dir');
+    }
+    return credCall[0] as string;
+  }
+
+  it('removes the credential dir when spawn throws synchronously before handlers register', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+    (fs.rmSync as ReturnType<typeof vi.fn>).mockClear();
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('spawn EACCES');
+    });
+
+    const result = await runContainerAgent(testGroup, testInput, () => {});
+
+    const credDir = credDirFromMkdirSync();
+    expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
+      recursive: true,
+      force: true,
+    });
+    expect(result).toEqual({
+      status: 'error',
+      result: null,
+      error: 'Container spawn error: spawn EACCES',
+    });
   });
 });

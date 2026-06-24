@@ -2,7 +2,11 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+  spawn,
+} from 'child_process';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -723,22 +727,38 @@ export async function runContainerAgent(
   );
 
   const logsDir = path.join(groupDir, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+  } catch (err) {
+    cleanupCredDir();
+    throw err;
+  }
 
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    onProcess(container, containerName);
-
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
+    let container: ChildProcessWithoutNullStreams;
+    try {
+      container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      onProcess(container, containerName);
+
+      container.stdin.write(JSON.stringify(input));
+      container.stdin.end();
+    } catch (err) {
+      cleanupCredDir();
+      resolve({
+        status: 'error',
+        result: null,
+        error: `Container spawn error: ${(err as Error).message}`,
+      });
+      return;
+    }
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
