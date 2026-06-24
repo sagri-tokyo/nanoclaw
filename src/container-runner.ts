@@ -541,8 +541,11 @@ function writeGitHubTokenFile(containerName: string, token: string): string {
   const tokenFile = path.join(credDir, 'github_token');
   fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 
-  // The file is owner-only (0600), so only the owning uid matters for the
-  // container read; the gid is irrelevant. Own both by the container uid.
+  // chown targets a *different* uid only in the root-runner case
+  // (resolveContainerUid returns 1000 while getuid is 0) — root has CAP_CHOWN,
+  // so it is permitted. Every non-root case is a chown-to-self that needs no
+  // capability. gid is set to containerUid too, but the file is 0600 owner-only
+  // so gid never gates the container read.
   const containerUid = resolveContainerUid();
   fs.chownSync(credDir, containerUid, containerUid);
   fs.chownSync(tokenFile, containerUid, containerUid);
