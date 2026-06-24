@@ -64,6 +64,13 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
   process.env.CREDENTIAL_PROXY_PORT || '3001',
   10,
 );
+export const LITELLM_GATEWAY_PORT = parseInt(
+  process.env.LITELLM_GATEWAY_PORT || '4000',
+  10,
+);
+export const LITELLM_PER_TASK_BUDGET_USD = parseFloat(
+  process.env.LITELLM_PER_TASK_BUDGET_USD || '1',
+);
 export const READER_RPC_PORT = parseInt(
   process.env.READER_RPC_PORT || '3002',
   10,

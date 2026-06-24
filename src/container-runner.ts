@@ -24,6 +24,7 @@ import {
   GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  LITELLM_GATEWAY_PORT,
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
@@ -40,6 +41,7 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
+import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
 import { RegisteredGroup } from './types.js';
@@ -55,6 +57,12 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // GITHUB_TOKEN=...`, which exposes a live token to anyone who can read the
 // process table or inspect the container.
 const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+
+// Container path the LiteLLM per-task virtual key is mounted at, read-only. The
+// container entrypoint re-exports its contents as ANTHROPIC_API_KEY before
+// launching the agent. Delivered via a mounted file for the same reason as the
+// GitHub token: never on the host `docker run` argv or in `docker inspect`.
+const LITELLM_KEY_CONTAINER_PATH = '/run/nanoclaw/litellm_key';
 
 // The image's default user is `node` (uid 1000, set by `USER node` in
 // container/Dockerfile). buildContainerArgs only passes `--user ${hostUid}`
@@ -526,51 +534,65 @@ async function resolveGitHubToken(): Promise<string | undefined> {
 }
 
 /**
- * Write the resolved GitHub token to a per-container host file so it can be
- * mounted read-only instead of passed via `-e`. The directory is mode 0700 and
- * the file is mode 0600, both owned by the uid the container will run as (see
- * resolveContainerUid). Returns the directory path so the caller can remove it
+ * Create a per-container host directory (mode 0700) to hold credential files
+ * mounted read-only into the container instead of passed via `-e`. Owned by the
+ * uid the container will run as (see resolveContainerUid). The caller removes it
  * after the container exits.
+ *
+ * Random suffix guarantees per-container isolation even if two containers for
+ * the same group spawn within the same millisecond (containerName carries only
+ * a Date.now() suffix), so one container's cleanup cannot delete a dir another
+ * container is still reading.
  */
-function writeGitHubTokenFile(containerName: string, token: string): string {
-  // Random suffix guarantees per-container isolation even if two containers for
-  // the same group spawn within the same millisecond (containerName carries
-  // only a Date.now() suffix), so one container's cleanup cannot delete a dir
-  // another container is still reading.
+function createCredDir(containerName: string): string {
   const credDir = path.join(
     os.tmpdir(),
     `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
   );
   fs.mkdirSync(credDir, { recursive: true, mode: 0o700 });
-  const tokenFile = path.join(credDir, 'github_token');
-  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 
   // chown targets a *different* uid only in the root-runner case
   // (resolveContainerUid returns 1000 while getuid is 0) — root has CAP_CHOWN,
   // so it is permitted. Every non-root case is a chown-to-self that needs no
-  // capability. gid is set to containerUid too, but the file is 0600 owner-only
-  // so gid never gates the container read.
+  // capability. gid is set to containerUid too, but each file is 0600
+  // owner-only so gid never gates the container read.
   const containerUid = resolveContainerUid();
   fs.chownSync(credDir, containerUid, containerUid);
-  fs.chownSync(tokenFile, containerUid, containerUid);
-  // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
-  // (and 0700 on the dir) to guarantee the secret is owner-only regardless of
-  // the runner's umask.
+  // chmod after chown: mkdir mode is masked by umask, so re-assert 0700 to
+  // guarantee the dir is owner-only regardless of the runner's umask.
   fs.chmodSync(credDir, 0o700);
-  fs.chmodSync(tokenFile, 0o600);
 
   return credDir;
 }
 
+/**
+ * Write a single secret into a per-container cred dir as a mode-0600 file owned
+ * by the container uid. Used for the GitHub token and the LiteLLM virtual key;
+ * both share one dir so the existing cleanup reaps every secret at once.
+ */
+function writeCredFile(credDir: string, name: string, value: string): void {
+  const filePath = path.join(credDir, name);
+  fs.writeFileSync(filePath, value, { mode: 0o600 });
+  const containerUid = resolveContainerUid();
+  fs.chownSync(filePath, containerUid, containerUid);
+  // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
+  // to guarantee the secret is owner-only regardless of the runner's umask.
+  fs.chmodSync(filePath, 0o600);
+}
+
 interface BuiltContainerArgs {
   args: string[];
-  /** Per-container host directory holding the GitHub token file, if any. */
+  /**
+   * Per-container host directory holding credential files (GitHub token and/or
+   * LiteLLM virtual key), if any were written.
+   */
   credDir?: string;
 }
 
 async function buildContainerArgs(
   plan: ContainerPlan,
   containerName: string,
+  channel: string,
 ): Promise<BuiltContainerArgs> {
   const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
@@ -584,16 +606,30 @@ async function buildContainerArgs(
   // token file orphaned on disk.
   const forwardedEnv = getForwardedEnv();
 
+  // LiteLLM routing is resolved before any credential file is written so that,
+  // when enabled, a mintVirtualKey failure aborts the spawn before the cred dir
+  // exists — there is nothing to orphan, and the spawn never falls back to the
+  // direct proxy path (a fail-open that would bypass budget enforcement).
+  const useLitellm = litellmEnabled();
+  const virtualKey = useLitellm
+    ? await mintVirtualKey({ taskId: containerName, channel })
+    : undefined;
+
   const githubToken = await resolveGitHubToken();
   let credDir: string | undefined;
-  if (githubToken) {
+  // One cred dir per container holds every mounted secret; the existing cleanup
+  // reaps the whole dir on every terminal path.
+  if (githubToken || virtualKey) {
+    credDir = createCredDir(containerName);
+  }
+  if (githubToken && credDir) {
     // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the live
     // token never appears in the host argv or `docker inspect`. The container
     // entrypoint re-exports it from the mount. Repo scope is intentionally not
     // narrowed at mint time (mintInstallationToken(..., [])): the container
     // skills hit arbitrary repos at runtime, so scope is governed by the GitHub
     // App installation's repo allowlist, not the token request.
-    credDir = writeGitHubTokenFile(containerName, githubToken);
+    writeCredFile(credDir, 'github_token', githubToken);
     args.push(
       ...readonlyMountArgs(
         path.join(credDir, 'github_token'),
@@ -601,12 +637,34 @@ async function buildContainerArgs(
       ),
     );
   }
+  if (virtualKey && credDir) {
+    // Deliver the per-task virtual key via a mounted file (same rationale as the
+    // GitHub token). The entrypoint re-exports it as ANTHROPIC_API_KEY.
+    writeCredFile(credDir, 'litellm_key', virtualKey);
+    args.push(
+      ...readonlyMountArgs(
+        path.join(credDir, 'litellm_key'),
+        LITELLM_KEY_CONTAINER_PATH,
+      ),
+    );
+  }
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  if (useLitellm) {
+    // Route API traffic through the LiteLLM budget gateway, which authenticates
+    // the per-task virtual key at its ingress (budget + attribution), then
+    // forwards to the credential proxy. The virtual key is delivered via the
+    // mounted file above, so no auth placeholder is set on this branch.
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${LITELLM_GATEWAY_PORT}`,
+    );
+  } else {
+    // Route API traffic through the credential proxy (containers never see real secrets)
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
+  }
 
   // Reader RPC: skills POST untrusted-content fetches here before using them
   args.push(
@@ -614,15 +672,17 @@ async function buildContainerArgs(
     `NANOCLAW_READER_RPC_URL=http://${CONTAINER_HOST_GATEWAY}:${READER_RPC_PORT}/rpc`,
   );
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+  if (!useLitellm) {
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -685,10 +745,27 @@ export async function runContainerAgent(
   const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const { args: containerArgs, credDir } = await buildContainerArgs(
-    plan,
-    containerName,
-  );
+  // buildContainerArgs mints the LiteLLM virtual key when the gateway is
+  // enabled. A mint failure must abort the spawn — never fall back to the
+  // direct-proxy path, which would silently bypass budget enforcement. The mint
+  // runs before any cred dir or process is created, so a failure here leaves
+  // nothing to reap; surface it as a structured error output rather than a
+  // rejection, matching the spawn-error contract below.
+  let built: BuiltContainerArgs;
+  try {
+    built = await buildContainerArgs(plan, containerName, group.folder);
+  } catch (err) {
+    logger.error(
+      { group: group.name, containerName, error: err },
+      'Failed to build container args (LiteLLM key mint or env resolution)',
+    );
+    return {
+      status: 'error',
+      result: null,
+      error: `Container spawn error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const { args: containerArgs, credDir } = built;
 
   // Remove the per-container credential directory once the container exits.
   // The container is `--rm`, so the only thing left to reap on the host is this
