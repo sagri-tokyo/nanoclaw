@@ -86,6 +86,9 @@ vi.mock('fs', async () => {
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
+      chownSync: vi.fn(),
+      chmodSync: vi.fn(),
+      rmSync: vi.fn(),
     },
   };
 });
@@ -1032,5 +1035,97 @@ describe('container-runner memory-gate hardening', () => {
       const parsed = JSON.parse(body);
       expect(parsed.autoMemoryEnabled).toBe(false);
     }
+  });
+});
+
+// Pins the mounted-file GitHub-token delivery (PR #57 rework). The live token
+// must never reach the host `docker run` argv via `-e GITHUB_TOKEN=...`; it is
+// written to a per-container host file and bind-mounted read-only at
+// /run/nanoclaw/github_token, which the container entrypoint re-exports.
+describe('container-runner GitHub token mounted-file delivery', () => {
+  const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    previousGithubToken = process.env.GITHUB_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  async function captureArgs(): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  function readonlyMountFor(
+    args: string[],
+    containerPath: string,
+  ): string | null {
+    for (let index = 0; index < args.length - 1; index++) {
+      if (args[index] !== '-v') continue;
+      const spec = args[index + 1];
+      const parts = spec.split(':');
+      if (parts[1] === containerPath) return spec;
+    }
+    return null;
+  }
+
+  it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    const args = await captureArgs();
+
+    const envFlags: string[] = [];
+    for (let index = 0; index < args.length - 1; index++) {
+      if (args[index] === '-e') envFlags.push(args[index + 1]);
+    }
+    expect(
+      envFlags.some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+    ).toBe(false);
+    expect(args).not.toContain('GITHUB_TOKEN=ghs_livetoken1234567890');
+  });
+
+  it('adds a read-only mount at the cred container path when a token is resolved', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    const args = await captureArgs();
+
+    const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('adds no cred mount when no token is resolved', async () => {
+    delete process.env.GITHUB_TOKEN;
+    const args = await captureArgs();
+
+    const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    expect(mount).toBeNull();
+    const envFlags: string[] = [];
+    for (let index = 0; index < args.length - 1; index++) {
+      if (args[index] === '-e') envFlags.push(args[index + 1]);
+    }
+    expect(
+      envFlags.some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+    ).toBe(false);
   });
 });
