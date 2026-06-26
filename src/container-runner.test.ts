@@ -6,17 +6,54 @@ import { PassThrough } from 'stream';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-// Mock config
+// Mock config. The GitHub App vars and NOTION_API_KEY are read through mutable
+// holders so individual tests can exercise credential delivery branches without
+// re-mocking the whole module.
+const githubConfig: {
+  GITHUB_APP_ID: string | undefined;
+  GITHUB_APP_INSTALLATION_ID: string | undefined;
+  GITHUB_APP_PRIVATE_KEY: string | undefined;
+  GITHUB_FORCE_PAT: string | undefined;
+} = {
+  GITHUB_APP_ID: undefined,
+  GITHUB_APP_INSTALLATION_ID: undefined,
+  GITHUB_APP_PRIVATE_KEY: undefined,
+  GITHUB_FORCE_PAT: undefined,
+};
+
+let mockNotionApiKey: string | undefined = undefined;
+
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  get GITHUB_APP_ID() {
+    return githubConfig.GITHUB_APP_ID;
+  },
+  get GITHUB_APP_INSTALLATION_ID() {
+    return githubConfig.GITHUB_APP_INSTALLATION_ID;
+  },
+  get GITHUB_APP_PRIVATE_KEY() {
+    return githubConfig.GITHUB_APP_PRIVATE_KEY;
+  },
+  get GITHUB_FORCE_PAT() {
+    return githubConfig.GITHUB_FORCE_PAT;
+  },
+  get NOTION_API_KEY() {
+    return mockNotionApiKey;
+  },
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   READER_RPC_PORT: 3002,
   TIMEZONE: 'America/Los_Angeles',
+}));
+
+const mockMintInstallationToken = vi.fn();
+vi.mock('./github-app-auth.js', () => ({
+  mintInstallationToken: (...args: unknown[]) =>
+    mockMintInstallationToken(...args),
 }));
 
 // Mock logger
@@ -54,6 +91,9 @@ vi.mock('fs', async () => {
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
+      chownSync: vi.fn(),
+      chmodSync: vi.fn(),
+      rmSync: vi.fn(),
     },
   };
 });
@@ -121,10 +161,13 @@ vi.mock('child_process', async () => {
 import {
   runContainerAgent,
   ContainerOutput,
+  ContainerInput,
   mapContainerOutputForUser,
 } from './container-runner.js';
+import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
+import fs from 'fs';
 
 const testGroup: RegisteredGroup = {
   name: 'Test Group',
@@ -249,6 +292,7 @@ describe('container-runner timeout behavior', () => {
   it('non-zero exit carries a required error string with result: null', async () => {
     const resultPromise = runContainerAgent(testGroup, testInput, () => {});
 
+    await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('close', 1);
     await vi.advanceTimersByTimeAsync(10);
 
@@ -263,6 +307,7 @@ describe('container-runner timeout behavior', () => {
   it('spawn error carries a required error string with result: null', async () => {
     const resultPromise = runContainerAgent(testGroup, testInput, () => {});
 
+    await vi.advanceTimersByTimeAsync(10);
     fakeProc.emit('error', new Error('ENOENT: docker not found'));
     await vi.advanceTimersByTimeAsync(10);
 
@@ -611,6 +656,190 @@ describe('container-runner env forwarding', () => {
   });
 });
 
+describe('container-runner GitHub token injection', () => {
+  function resetGithubConfig(): void {
+    githubConfig.GITHUB_APP_ID = undefined;
+    githubConfig.GITHUB_APP_INSTALLATION_ID = undefined;
+    githubConfig.GITHUB_APP_PRIVATE_KEY = undefined;
+    githubConfig.GITHUB_FORCE_PAT = undefined;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    resetGithubConfig();
+    mockMintInstallationToken.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetGithubConfig();
+  });
+
+  async function captureArgs(): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  it('delivers GITHUB_FORCE_PAT via the mounted token file, not -e', async () => {
+    githubConfig.GITHUB_FORCE_PAT = 'ghp_forcedpat';
+
+    const args = await captureArgs();
+
+    expect(args.join(' ')).not.toContain('ghp_forcedpat');
+    const tokenMount = args.find((a) =>
+      a.endsWith(':/run/nanoclaw/github_token:ro'),
+    );
+    expect(tokenMount).toBeDefined();
+    expect(args[args.indexOf(tokenMount!) - 1]).toBe('-v');
+    expect(mockMintInstallationToken).not.toHaveBeenCalled();
+  });
+
+  it('mints an installation token and delivers it via the mounted token file', async () => {
+    githubConfig.GITHUB_APP_ID = '123';
+    githubConfig.GITHUB_APP_PRIVATE_KEY = 'fake-private-key';
+    githubConfig.GITHUB_APP_INSTALLATION_ID = '456';
+    mockMintInstallationToken.mockResolvedValue({
+      token: 'ghs_mintedtoken',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    const args = await captureArgs();
+
+    expect(mockMintInstallationToken).toHaveBeenCalledTimes(1);
+    expect(mockMintInstallationToken).toHaveBeenCalledWith(
+      '123',
+      'fake-private-key',
+      456,
+      [],
+    );
+    expect(args.join(' ')).not.toContain('ghs_mintedtoken');
+    const tokenMount = args.find((a) =>
+      a.endsWith(':/run/nanoclaw/github_token:ro'),
+    );
+    expect(tokenMount).toBeDefined();
+    expect(args[args.indexOf(tokenMount!) - 1]).toBe('-v');
+  });
+});
+
+describe('container-runner OTel telemetry wiring (RFC 0001 Phase 1)', () => {
+  const TELEMETRY_KEYS = [
+    'CLAUDE_CODE_ENABLE_TELEMETRY',
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'OTEL_EXPORTER_OTLP_PROTOCOL',
+    'OTEL_EXPORTER_OTLP_HEADERS',
+    'OTEL_RESOURCE_ATTRIBUTES',
+  ] as const;
+
+  function clearTelemetryEnv(): void {
+    for (const key of TELEMETRY_KEYS) {
+      delete process.env[key];
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    clearTelemetryEnv();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearTelemetryEnv();
+  });
+
+  async function captureArgs(input: ContainerInput): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, input, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  function envValue(args: string[], key: string): string | null {
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] !== '-e') continue;
+      if (args[i + 1].startsWith(`${key}=`)) {
+        return args[i + 1].slice(key.length + 1);
+      }
+    }
+    return null;
+  }
+
+  it('injects telemetry env with per-user/per-task resource attributes when enabled and endpoint set', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
+
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBe('1');
+    expect(envValue(args, 'OTEL_EXPORTER_OTLP_ENDPOINT')).toBe(
+      'http://langfuse.internal:4318',
+    );
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBe(
+      'enduser.id=U07ABCDEF,tenant.id=test-group',
+    );
+  });
+
+  it('uses the namespaced unattributed placeholder when there is no triggering user (scheduled task)', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
+
+    const args = await captureArgs({ ...testInput, isScheduledTask: true });
+
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBe(
+      `enduser.id=${UNATTRIBUTED_ENDUSER_ID},tenant.id=test-group`,
+    );
+  });
+
+  it('adds no telemetry env vars when telemetry is disabled', async () => {
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBeNull();
+    expect(envValue(args, 'OTEL_EXPORTER_OTLP_ENDPOINT')).toBeNull();
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBeNull();
+  });
+
+  it('adds no telemetry env vars when enabled but the OTLP endpoint is absent', async () => {
+    process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
+
+    const args = await captureArgs({
+      ...testInput,
+      triggeringUserId: 'U07ABCDEF',
+    });
+
+    expect(envValue(args, 'CLAUDE_CODE_ENABLE_TELEMETRY')).toBeNull();
+    expect(envValue(args, 'OTEL_RESOURCE_ATTRIBUTES')).toBeNull();
+  });
+});
+
 // These tests pin the mitigations for issue #63 (memory-gate bypass via
 // settings.json rewrite). If any of these fail, the compromised-claude threat
 // model is no longer closed — see docs/SECURITY.md "Memory-gate integrity".
@@ -818,5 +1047,257 @@ describe('container-runner memory-gate hardening', () => {
       const parsed = JSON.parse(body);
       expect(parsed.autoMemoryEnabled).toBe(false);
     }
+  });
+});
+
+// Shared by both mounted-file delivery describe blocks below.
+async function captureSpawnArgs(): Promise<string[]> {
+  const argsPromise = new Promise<string[]>((resolve) => {
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (_bin: string, args: string[]) => {
+        resolve(args);
+        return fakeProc;
+      },
+    );
+  });
+  const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+  const args = await argsPromise;
+  fakeProc.emit('close', 0);
+  await vi.advanceTimersByTimeAsync(10);
+  await containerPromise;
+  return args;
+}
+
+function readonlyMountFor(
+  args: string[],
+  containerPath: string,
+): string | null {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] !== '-v') continue;
+    const spec = args[index + 1];
+    const parts = spec.split(':');
+    if (parts[1] === containerPath) return spec;
+  }
+  return null;
+}
+
+function envFlagsFrom(args: string[]): string[] {
+  const envFlags: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === '-e') envFlags.push(args[index + 1]);
+  }
+  return envFlags;
+}
+
+function credDirFromMkdirSync(): string {
+  const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
+    (call) =>
+      typeof call[0] === 'string' &&
+      (call[0] as string).includes('nanoclaw-cred-'),
+  );
+  if (!credCall) {
+    throw new Error('makeCredDir never created a credential dir');
+  }
+  return credCall[0] as string;
+}
+
+// Security pin: the live token must never reach the host `docker run` argv via
+// `-e GITHUB_TOKEN=...`; it is delivered by a read-only mount instead.
+describe('container-runner GitHub token mounted-file delivery', () => {
+  const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    previousGithubToken = process.env.GITHUB_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    const args = await captureSpawnArgs();
+
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+    ).toBe(false);
+    expect(args).not.toContain('GITHUB_TOKEN=ghs_livetoken1234567890');
+  });
+
+  it('adds a read-only mount at the cred container path when a token is resolved', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    const args = await captureSpawnArgs();
+
+    const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('adds no cred mount when no token is resolved', async () => {
+    delete process.env.GITHUB_TOKEN;
+    const args = await captureSpawnArgs();
+
+    const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    expect(mount).toBeNull();
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
+    ).toBe(false);
+  });
+
+  it('removes the credential dir when spawn throws synchronously before handlers register', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+    (fs.rmSync as ReturnType<typeof vi.fn>).mockClear();
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('spawn EACCES');
+    });
+
+    const result = await runContainerAgent(testGroup, testInput, () => {});
+
+    const credDir = credDirFromMkdirSync();
+    expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
+      recursive: true,
+      force: true,
+    });
+    expect(result).toEqual({
+      status: 'error',
+      result: null,
+      error: 'Container spawn error: spawn EACCES',
+    });
+  });
+});
+
+// Security pin: the live NOTION_API_KEY must never reach the host `docker run`
+// argv via `-e NOTION_API_KEY=...`; it is delivered by a read-only mount instead.
+describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
+  const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    mockNotionApiKey = undefined;
+    // Isolate the Notion-only path from a GITHUB_TOKEN in the ambient env so
+    // these tests exercise a cred dir holding only the notion key.
+    previousGithubToken = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockNotionApiKey = undefined;
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  it('does not pass the live key via -e NOTION_API_KEY when a key is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureSpawnArgs();
+
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
+    ).toBe(false);
+    expect(args).not.toContain('NOTION_API_KEY=secret-notion-key-123');
+  });
+
+  it('adds a read-only mount at the notion_api_key container path when a key is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureSpawnArgs();
+
+    const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('adds no notion mount when NOTION_API_KEY is not set', async () => {
+    mockNotionApiKey = undefined;
+    const args = await captureSpawnArgs();
+
+    const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(mount).toBeNull();
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
+    ).toBe(false);
+  });
+
+  it('removes the credential dir when spawn throws and only NOTION_API_KEY is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+    (fs.rmSync as ReturnType<typeof vi.fn>).mockClear();
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('spawn EACCES');
+    });
+
+    const result = await runContainerAgent(testGroup, testInput, () => {});
+
+    const credDir = credDirFromMkdirSync();
+    expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
+      recursive: true,
+      force: true,
+    });
+    expect(result).toEqual({
+      status: 'error',
+      result: null,
+      error: 'Container spawn error: spawn EACCES',
+    });
+  });
+});
+
+// Refactor pin: every secret for one container lands in a single cred dir
+// created once, not one dir per secret. Regressing makeCredDir to run per
+// secret (the pre-refactor accumulator) would create two dirs but mount from
+// one, which this catches.
+describe('container-runner shared cred dir for multiple secrets', () => {
+  const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+  const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    previousGithubToken = process.env.GITHUB_TOKEN;
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockNotionApiKey = undefined;
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  it('creates one cred dir and mounts both secret files from it', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureSpawnArgs();
+
+    const credDirCreations = (
+      fs.mkdirSync as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('nanoclaw-cred-'),
+    );
+    expect(credDirCreations).toHaveLength(1);
+
+    const credDir = credDirCreations[0][0] as string;
+    const githubMount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    const notionMount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(githubMount!.split(':')[0]).toBe(`${credDir}/github_token`);
+    expect(notionMount!.split(':')[0]).toBe(`${credDir}/notion_api_key`);
   });
 });

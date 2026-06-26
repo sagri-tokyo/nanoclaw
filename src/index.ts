@@ -54,7 +54,7 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue, abortMessage } from './group-queue.js';
+import { GroupQueue, abortActionRecord, abortMessage } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { handleInboundMessage } from './inbound.js';
 import { startIpcWatcher } from './ipc.js';
@@ -454,6 +454,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     basePrompt,
   );
 
+  // OTel enduser.id (RFC 0001 Phase 1): the human who triggered this run — the
+  // most recent non-bot sender in the prompt batch. Undefined when the batch
+  // carries no human message; for an interactive run the telemetry layer then
+  // disables telemetry for that spawn (no trace reaches Langfuse) rather than
+  // fabricating identity. The namespaced unattributed placeholder applies only
+  // to scheduled tasks.
+  const triggeringUserId = [...promptMessages]
+    .reverse()
+    .find((message) => !message.is_bot_message)?.sender;
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -491,43 +501,51 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   activeThreadByChatJid.set(chatJid, targetThreadId);
   try {
-    const output = await runAgent(group, prompt, chatJid, async (result) => {
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.debug(
-          { group: group.name },
-          `Agent output: ${raw.length} chars`,
-        );
-        aggregatedOutput += raw;
-        if (text) {
-          await channel.sendMessage(
-            chatJid,
-            formatErrorWrap(text, {
-              runId: interactiveRunId,
-              now: new Date(),
-            }),
-            targetThreadId ? { threadId: targetThreadId } : undefined,
+    const output = await runAgent(
+      group,
+      prompt,
+      chatJid,
+      triggeringUserId,
+      async (result) => {
+        // Streaming output callback — called for each agent result
+        if (result.result) {
+          const raw =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          const text = raw
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          logger.debug(
+            { group: group.name },
+            `Agent output: ${raw.length} chars`,
           );
-          outputSentToUser = true;
+          aggregatedOutput += raw;
+          if (text) {
+            await channel.sendMessage(
+              chatJid,
+              formatErrorWrap(text, {
+                runId: interactiveRunId,
+                now: new Date(),
+              }),
+              targetThreadId ? { threadId: targetThreadId } : undefined,
+            );
+            outputSentToUser = true;
+          }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
         }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
-      }
 
-      if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
-      }
+        if (result.status === 'success') {
+          queue.notifyIdle(chatJid);
+        }
 
-      if (result.status === 'error') {
-        hadError = true;
-      }
-    });
+        if (result.status === 'error') {
+          hadError = true;
+        }
+      },
+    );
 
     const sessionId = sessions[group.folder] || group.folder;
     const failed = output === 'error' || hadError;
@@ -578,6 +596,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  triggeringUserId: string | undefined,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -630,6 +649,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        triggeringUserId,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -917,12 +937,15 @@ async function main(): Promise<void> {
   // docker-stop the active container for the channel and posts a single
   // confirmation back through the channel that delivered the trigger.
   async function handleAbort(chatJid: string, _msg: NewMessage): Promise<void> {
+    const startedAt = Date.now();
     const channel = findChannel(channels, chatJid);
     if (!channel) {
       logger.warn({ chatJid }, 'Abort intent: no channel owns JID');
       return;
     }
-    await channel.sendMessage(chatJid, abortMessage(queue.abort(chatJid)));
+    const result = queue.abort(chatJid);
+    await channel.sendMessage(chatJid, abortMessage(result));
+    logger.action(abortActionRecord(chatJid, result, Date.now() - startedAt));
   }
 
   // Org-action approval gate (D2.4). Dependencies are re-read per call so an

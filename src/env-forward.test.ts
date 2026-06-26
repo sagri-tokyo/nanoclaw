@@ -47,6 +47,7 @@ afterEach(() => {
   delete process.env['TEST_VAR_A'];
   delete process.env['TEST_VAR_B'];
   delete process.env['TEST_VAR_C'];
+  vi.unstubAllEnvs();
 });
 
 describe('getForwardedEnv', () => {
@@ -117,6 +118,63 @@ describe('getForwardedEnv', () => {
     getForwardedEnv();
 
     expect(mockReadFileSync).toHaveBeenCalledWith(FORWARD_LIST_PATH, 'utf-8');
+  });
+
+  it.each([
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'GITHUB_FORCE_PAT',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'GITHUB_APP_PRIVATE_KEY',
+    'SERVICE_ROLE_KEY',
+    'ANON_KEY',
+    'JWT_SECRET',
+    'DB_PASSWORD',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'AWS_SECRET_ACCESS_KEY',
+    'DATABASE_URL',
+    'SIGNING_KEY',
+    'ENCRYPTION_KEY',
+    'MASTER_KEY',
+    'HMAC_KEY',
+  ])(
+    'throws when the forward-list contains the security-critical var %s',
+    (name) => {
+      vi.stubEnv(name, 'a-secret-value');
+      mockReadFileSync.mockReturnValue(`${name}\n`);
+
+      expect(() => getForwardedEnv()).toThrow(
+        `env-forward: refusing to forward security-critical var "${name}" via -e`,
+      );
+    },
+  );
+
+  it('throws on a security-critical name even when it is absent from process.env', () => {
+    delete process.env['GITHUB_TOKEN'];
+    mockReadFileSync.mockReturnValue('GITHUB_TOKEN\n');
+
+    expect(() => getForwardedEnv()).toThrow(
+      'refusing to forward security-critical var "GITHUB_TOKEN"',
+    );
+  });
+
+  it.each([
+    'TOKENIZER_CONFIG',
+    'API_BASE_URL',
+    'PATCH_LEVEL',
+    'KEYBOARD_LAYOUT',
+    'CREDENTIAL_PROXY_PORT',
+    'CREDENTIAL_PROXY_HOST',
+    'PARTITION_KEY',
+    'SORT_KEY',
+    'ROUTING_KEY',
+    'CACHE_KEY',
+  ])('does not treat the benign var %s as a secret', (name) => {
+    vi.stubEnv(name, 'benign');
+    mockReadFileSync.mockReturnValue(`${name}\n`);
+
+    expect(getForwardedEnv()).toStrictEqual({ [name]: 'benign' });
   });
 
   it('propagates unexpected read errors', () => {
