@@ -11,9 +11,10 @@ import { STORE_DIR } from '../src/config.ts';
 import { initDatabase, setRegisteredGroup } from '../src/db.ts';
 import { isValidGroupFolder } from '../src/group-folder.ts';
 import { logger } from '../src/logger.ts';
+import type { ContainerConfig } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
-interface RegisterArgs {
+export interface RegisterArgs {
   jid: string;
   name: string;
   trigger: string;
@@ -22,9 +23,31 @@ interface RegisterArgs {
   requiresTrigger: boolean;
   isMain: boolean;
   assistantName: string;
+  containerConfigJson?: string;
+  containerConfigMissing?: boolean;
 }
 
-function parseArgs(args: string[]): RegisterArgs {
+export class InvalidContainerConfigError extends Error {
+  constructor(reason: string) {
+    super(`invalid_container_config: ${reason}`);
+    this.name = 'InvalidContainerConfigError';
+  }
+}
+
+export function parseContainerConfig(json: string): ContainerConfig {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new InvalidContainerConfigError('not valid JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InvalidContainerConfigError('not a JSON object');
+  }
+  return parsed as ContainerConfig;
+}
+
+export function parseArgs(args: string[]): RegisterArgs {
   const result: RegisterArgs = {
     jid: '',
     name: '',
@@ -62,10 +85,31 @@ function parseArgs(args: string[]): RegisterArgs {
       case '--assistant-name':
         result.assistantName = args[++i] || 'Andy';
         break;
+      case '--container-config': {
+        const next = args[i + 1];
+        // Treat a missing value or the next flag as a user error — container-config
+        // values are always JSON objects, never '--'-prefixed strings.
+        if (next === undefined || next.startsWith('--')) {
+          result.containerConfigMissing = true;
+        } else {
+          i++;
+          result.containerConfigJson = next;
+        }
+        break;
+      }
     }
   }
 
   return result;
+}
+
+function failRegistration(error: string): never {
+  emitStatus('REGISTER_CHANNEL', {
+    STATUS: 'failed',
+    ERROR: error,
+    LOG: 'logs/setup.log',
+  });
+  process.exit(4);
 }
 
 export async function run(args: string[]): Promise<void> {
@@ -73,21 +117,27 @@ export async function run(args: string[]): Promise<void> {
   const parsed = parseArgs(args);
 
   if (!parsed.jid || !parsed.name || !parsed.trigger || !parsed.folder) {
-    emitStatus('REGISTER_CHANNEL', {
-      STATUS: 'failed',
-      ERROR: 'missing_required_args',
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failRegistration('missing_required_args');
   }
 
   if (!isValidGroupFolder(parsed.folder)) {
-    emitStatus('REGISTER_CHANNEL', {
-      STATUS: 'failed',
-      ERROR: 'invalid_folder',
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
+    failRegistration('invalid_folder');
+  }
+
+  if (parsed.containerConfigMissing) {
+    failRegistration('invalid_container_config');
+  }
+
+  let containerConfig: ContainerConfig | undefined;
+  if (parsed.containerConfigJson !== undefined) {
+    try {
+      containerConfig = parseContainerConfig(parsed.containerConfigJson);
+    } catch (error) {
+      if (!(error instanceof InvalidContainerConfigError)) {
+        throw error;
+      }
+      failRegistration('invalid_container_config');
+    }
   }
 
   logger.info(parsed, 'Registering channel');
@@ -107,6 +157,7 @@ export async function run(args: string[]): Promise<void> {
     added_at: new Date().toISOString(),
     requiresTrigger: parsed.requiresTrigger,
     isMain: parsed.isMain,
+    containerConfig,
   });
 
   logger.info('Wrote registration to SQLite');

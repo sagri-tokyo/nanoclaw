@@ -1,9 +1,31 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 
 import Database from 'better-sqlite3';
+
+import {
+  _closeDatabase,
+  _initTestDatabase,
+  getRegisteredGroup,
+  setRegisteredGroup,
+} from '../src/db.ts';
+import type { ContainerConfig } from '../src/types.ts';
+
+const { emitStatusMock } = vi.hoisted(() => ({ emitStatusMock: vi.fn() }));
+vi.mock('./status.ts', () => ({ emitStatus: emitStatusMock }));
+
+afterEach(() => {
+  emitStatusMock.mockClear();
+});
+
+import {
+  InvalidContainerConfigError,
+  parseArgs,
+  parseContainerConfig,
+  run,
+} from './register.ts';
 
 /**
  * Tests for the register step.
@@ -212,6 +234,211 @@ describe('parameterized SQL registration', () => {
     expect(row.name).toBe('Updated');
     expect(row.trigger_pattern).toBe('@Bot');
     expect(row.requires_trigger).toBe(0);
+  });
+});
+
+describe('container-config flag', () => {
+  const contractJson =
+    '{"additionalMounts":[{"hostPath":"/opt/sagri-ai/wiki","containerPath":"wiki","readonly":true}]}';
+
+  const expectedConfig: ContainerConfig = {
+    additionalMounts: [
+      {
+        hostPath: '/opt/sagri-ai/wiki',
+        containerPath: 'wiki',
+        readonly: true,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('stores the raw container-config JSON string from the flag', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--is-main',
+      '--container-config',
+      contractJson,
+    ]);
+
+    expect(parsed.containerConfigJson).toEqual(contractJson);
+  });
+
+  it('round-trips the wiki-mount contract through the database unchanged', () => {
+    const config = parseContainerConfig(contractJson);
+
+    setRegisteredGroup('123@g.us', {
+      name: 'Main',
+      folder: 'slack_main',
+      trigger: '@Andy',
+      added_at: '2026-06-15T00:00:00.000Z',
+      requiresTrigger: false,
+      isMain: true,
+      containerConfig: config,
+    });
+
+    const group = getRegisteredGroup('123@g.us');
+    expect(group?.containerConfig).toEqual(expectedConfig);
+  });
+
+  it('leaves containerConfigJson undefined when the flag is absent', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+    ]);
+
+    expect(parsed.containerConfigJson).toBeUndefined();
+  });
+});
+
+describe('parseContainerConfig validation', () => {
+  it('rejects the JSON null literal', () => {
+    expect(() => parseContainerConfig('null')).toThrow(
+      InvalidContainerConfigError,
+    );
+  });
+
+  it('throws InvalidContainerConfigError on malformed JSON', () => {
+    expect(() => parseContainerConfig('{not valid json')).toThrow(
+      InvalidContainerConfigError,
+    );
+  });
+
+  it('rejects an empty string as invalid JSON', () => {
+    expect(() => parseContainerConfig('')).toThrow(InvalidContainerConfigError);
+  });
+
+  it('rejects JSON that is not an object', () => {
+    expect(() => parseContainerConfig('"null"')).toThrow(
+      InvalidContainerConfigError,
+    );
+    expect(() => parseContainerConfig('42')).toThrow(
+      InvalidContainerConfigError,
+    );
+    expect(() => parseContainerConfig('[]')).toThrow(
+      InvalidContainerConfigError,
+    );
+  });
+});
+
+describe('parseArgs container-config missing value', () => {
+  it('sets containerConfigMissing when --container-config has no following value', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--container-config',
+    ]);
+
+    expect(parsed.containerConfigMissing).toBe(true);
+    expect(parsed.containerConfigJson).toBeUndefined();
+  });
+
+  it('sets containerConfigMissing when --container-config is followed by another flag', () => {
+    const parsed = parseArgs([
+      '--jid',
+      '123@g.us',
+      '--name',
+      'Main',
+      '--trigger',
+      '@Andy',
+      '--folder',
+      'slack_main',
+      '--container-config',
+      '--is-main',
+    ]);
+
+    expect(parsed.containerConfigMissing).toBe(true);
+    expect(parsed.containerConfigJson).toBeUndefined();
+    expect(parsed.isMain).toBe(true);
+  });
+});
+
+describe('run() with invalid --container-config', () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((_code?: number | string | null) => {
+        throw new Error('process.exit called');
+      });
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  it('exits with code 4 when --container-config value is not valid JSON', async () => {
+    await expect(
+      run([
+        '--jid',
+        '123@g.us',
+        '--name',
+        'Main',
+        '--trigger',
+        '@Andy',
+        '--folder',
+        'slack_main',
+        '--container-config',
+        '{not valid json',
+      ]),
+    ).rejects.toThrow('process.exit called');
+
+    expect(exitSpy).toHaveBeenCalledWith(4);
+  });
+
+  it('emits a failed status with the invalid_container_config error and exits with code 4 for malformed JSON', async () => {
+    await expect(
+      run([
+        '--jid',
+        '123@g.us',
+        '--name',
+        'Main',
+        '--trigger',
+        '@Andy',
+        '--folder',
+        'slack_main',
+        '--container-config',
+        '{bad}',
+      ]),
+    ).rejects.toThrow('process.exit called');
+
+    expect(emitStatusMock.mock.calls).toStrictEqual([
+      [
+        'REGISTER_CHANNEL',
+        {
+          STATUS: 'failed',
+          ERROR: 'invalid_container_config',
+          LOG: 'logs/setup.log',
+        },
+      ],
+    ]);
+    expect(exitSpy).toHaveBeenCalledWith(4);
   });
 });
 

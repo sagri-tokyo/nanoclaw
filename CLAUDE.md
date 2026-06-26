@@ -25,6 +25,8 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 
 API keys, secret keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway — which handles secret injection into containers at request time, so no keys or tokens are ever passed to containers directly. Run `onecli --help`.
 
+Carve-out: the host mints a short-lived (1h) GitHub App installation token per session and delivers it to the container as a read-only mounted file (`/run/nanoclaw/github_token`), which the entrypoint re-exports as `GITHUB_TOKEN`. The App private key stays host-side and never enters the container. Delivery is by mounted file rather than `-e GITHUB_TOKEN=<value>` so the live token never appears in the host `docker run` argv, `docker inspect`, or process table; it does still live in the container's own environment, which in-container skills read. The token carries the App installation's full repo access, governed by the installation's repo allowlist on GitHub, not the mint call. OneCLI holds static vault secrets, not per-request minted tokens.
+
 ## Skills
 
 Four types of skills exist in NanoClaw. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy and guidelines.
