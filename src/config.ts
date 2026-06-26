@@ -5,9 +5,12 @@ import path from 'path';
 import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
-// Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
+// Read non-secret config values from .env (falls back to process.env). This
+// list carries no secrets. The Anthropic credentials are held by the credential
+// proxy (credential-proxy.ts); the GitHub App credentials, GitHub token, and
+// NOTION_API_KEY are loaded lower in this file from CREDENTIALS_DIRECTORY
+// (systemd LoadCredential=) and delivered to containers as read-only mounted
+// files (see container-runner.ts), never via `-e`.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
