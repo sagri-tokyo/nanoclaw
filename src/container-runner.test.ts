@@ -1089,6 +1089,18 @@ function envFlagsFrom(args: string[]): string[] {
   return envFlags;
 }
 
+function credDirFromMkdirSync(): string {
+  const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
+    (call) =>
+      typeof call[0] === 'string' &&
+      (call[0] as string).includes('nanoclaw-cred-'),
+  );
+  if (!credCall) {
+    throw new Error('makeCredDir never created a credential dir');
+  }
+  return credCall[0] as string;
+}
+
 // Security pin: the live token must never reach the host `docker run` argv via
 // `-e GITHUB_TOKEN=...`; it is delivered by a read-only mount instead.
 describe('container-runner GitHub token mounted-file delivery', () => {
@@ -1140,18 +1152,6 @@ describe('container-runner GitHub token mounted-file delivery', () => {
     ).toBe(false);
   });
 
-  function credDirFromMkdirSync(): string {
-    const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
-      (call) =>
-        typeof call[0] === 'string' &&
-        (call[0] as string).includes('nanoclaw-cred-'),
-    );
-    if (!credCall) {
-      throw new Error('makeCredDir never created a credential dir');
-    }
-    return credCall[0] as string;
-  }
-
   it('removes the credential dir when spawn throws synchronously before handlers register', async () => {
     process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
     (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
@@ -1179,16 +1179,26 @@ describe('container-runner GitHub token mounted-file delivery', () => {
 // argv via `-e NOTION_API_KEY=...`; it is delivered by a read-only mount instead.
 describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
   const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+  let previousGithubToken: string | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
     mockNotionApiKey = undefined;
+    // Isolate the Notion-only path from a GITHUB_TOKEN in the ambient env so
+    // these tests exercise a cred dir holding only the notion key.
+    previousGithubToken = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     mockNotionApiKey = undefined;
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
   });
 
   it('does not pass the live key via -e NOTION_API_KEY when a key is set', async () => {
@@ -1219,6 +1229,28 @@ describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
     expect(
       envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
     ).toBe(false);
+  });
+
+  it('removes the credential dir when spawn throws and only NOTION_API_KEY is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+    (fs.rmSync as ReturnType<typeof vi.fn>).mockClear();
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('spawn EACCES');
+    });
+
+    const result = await runContainerAgent(testGroup, testInput, () => {});
+
+    const credDir = credDirFromMkdirSync();
+    expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
+      recursive: true,
+      force: true,
+    });
+    expect(result).toEqual({
+      status: 'error',
+      result: null,
+      error: 'Container spawn error: spawn EACCES',
+    });
   });
 });
 
