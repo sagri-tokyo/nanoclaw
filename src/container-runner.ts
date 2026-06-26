@@ -24,6 +24,7 @@ import {
   GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  NOTION_API_KEY,
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
@@ -55,6 +56,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // GITHUB_TOKEN=...`, which exposes a live token to anyone who can read the
 // process table or inspect the container.
 const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
 
 // The image's default user is `node` (uid 1000, set by `USER node` in
 // container/Dockerfile). buildContainerArgs only passes `--user ${hostUid}`
@@ -562,6 +564,38 @@ function writeGitHubTokenFile(containerName: string, token: string): string {
   return credDir;
 }
 
+/**
+ * Write an arbitrary credential value to the per-container cred dir, mirroring
+ * the GitHub-token mounted-file delivery. Creates the dir when none exists yet
+ * (e.g. no GitHub token), otherwise reuses the GitHub dir so a single mount dir
+ * holds every per-container secret. Keeps secrets off the host `docker run`
+ * argv and out of `docker inspect`.
+ */
+function writeContainerCredFile(
+  containerName: string,
+  existingCredDir: string | undefined,
+  fileName: string,
+  value: string,
+): string {
+  const credDir =
+    existingCredDir ??
+    path.join(
+      os.tmpdir(),
+      `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
+    );
+  if (!existingCredDir) {
+    fs.mkdirSync(credDir, { recursive: true, mode: 0o700 });
+  }
+  const filePath = path.join(credDir, fileName);
+  fs.writeFileSync(filePath, value, { mode: 0o600 });
+  const containerUid = resolveContainerUid();
+  fs.chownSync(credDir, containerUid, containerUid);
+  fs.chownSync(filePath, containerUid, containerUid);
+  fs.chmodSync(credDir, 0o700);
+  fs.chmodSync(filePath, 0o600);
+  return credDir;
+}
+
 interface BuiltContainerArgs {
   args: string[];
   /** Per-container host directory holding the GitHub token file, if any. */
@@ -598,6 +632,25 @@ async function buildContainerArgs(
       ...readonlyMountArgs(
         path.join(credDir, 'github_token'),
         GITHUB_TOKEN_CONTAINER_PATH,
+      ),
+    );
+  }
+
+  const notionApiKey = NOTION_API_KEY;
+  if (notionApiKey) {
+    // Deliver NOTION_API_KEY via a mounted file, mirroring the GitHub token,
+    // so the live key never reaches the host argv or `docker inspect`. The
+    // container entrypoint re-exports it from the mount.
+    credDir = writeContainerCredFile(
+      containerName,
+      credDir,
+      'notion_api_key',
+      notionApiKey,
+    );
+    args.push(
+      ...readonlyMountArgs(
+        path.join(credDir, 'notion_api_key'),
+        NOTION_API_KEY_CONTAINER_PATH,
       ),
     );
   }

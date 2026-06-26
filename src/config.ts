@@ -193,3 +193,5 @@ export const GITHUB_APP_PRIVATE_KEY =
 export const GITHUB_APP_INSTALLATION_ID =
   process.env.GITHUB_APP_INSTALLATION_ID ||
   loadCredentialsDirectory('GITHUB_APP_INSTALLATION_ID');
+export const NOTION_API_KEY =
+  process.env.NOTION_API_KEY || loadCredentialsDirectory('NOTION_API_KEY');

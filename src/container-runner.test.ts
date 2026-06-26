@@ -6,8 +6,8 @@ import { PassThrough } from 'stream';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-// Mock config. The GitHub App vars are read through mutable holders so
-// individual tests can exercise the resolveGitHubToken branches without
+// Mock config. The GitHub App vars and NOTION_API_KEY are read through mutable
+// holders so individual tests can exercise credential delivery branches without
 // re-mocking the whole module.
 const githubConfig: {
   GITHUB_APP_ID: string | undefined;
@@ -20,6 +20,8 @@ const githubConfig: {
   GITHUB_APP_PRIVATE_KEY: undefined,
   GITHUB_FORCE_PAT: undefined,
 };
+
+let mockNotionApiKey: string | undefined = undefined;
 
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
@@ -38,6 +40,9 @@ vi.mock('./config.js', () => ({
   },
   get GITHUB_FORCE_PAT() {
     return githubConfig.GITHUB_FORCE_PAT;
+  },
+  get NOTION_API_KEY() {
+    return mockNotionApiKey;
   },
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
@@ -1166,5 +1171,90 @@ describe('container-runner GitHub token mounted-file delivery', () => {
       result: null,
       error: 'Container spawn error: spawn EACCES',
     });
+  });
+});
+
+// Security pin: the live NOTION_API_KEY must never reach the host `docker run`
+// argv via `-e NOTION_API_KEY=...`; it is delivered by a read-only mount instead.
+describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
+  const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    mockNotionApiKey = undefined;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockNotionApiKey = undefined;
+  });
+
+  async function captureArgs(): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  function readonlyMountFor(
+    args: string[],
+    containerPath: string,
+  ): string | null {
+    for (let index = 0; index < args.length - 1; index++) {
+      if (args[index] !== '-v') continue;
+      const spec = args[index + 1];
+      const parts = spec.split(':');
+      if (parts[1] === containerPath) return spec;
+    }
+    return null;
+  }
+
+  function envFlagsFrom(args: string[]): string[] {
+    const envFlags: string[] = [];
+    for (let index = 0; index < args.length - 1; index++) {
+      if (args[index] === '-e') envFlags.push(args[index + 1]);
+    }
+    return envFlags;
+  }
+
+  it('does not pass the live key via -e NOTION_API_KEY when a key is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureArgs();
+
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
+    ).toBe(false);
+    expect(args).not.toContain('NOTION_API_KEY=secret-notion-key-123');
+  });
+
+  it('adds a read-only mount at the notion_api_key container path when a key is set', async () => {
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureArgs();
+
+    const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('adds no notion mount when NOTION_API_KEY is not set', async () => {
+    mockNotionApiKey = undefined;
+    const args = await captureArgs();
+
+    const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(mount).toBeNull();
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
+    ).toBe(false);
   });
 });
