@@ -24,6 +24,7 @@ import {
   GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  NOTION_API_KEY,
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
@@ -55,6 +56,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // GITHUB_TOKEN=...`, which exposes a live token to anyone who can read the
 // process table or inspect the container.
 const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
 
 // The image's default user is `node` (uid 1000, set by `USER node` in
 // container/Dockerfile). buildContainerArgs only passes `--user ${hostUid}`
@@ -526,13 +528,12 @@ async function resolveGitHubToken(): Promise<string | undefined> {
 }
 
 /**
- * Write the resolved GitHub token to a per-container host file so it can be
- * mounted read-only instead of passed via `-e`. The directory is mode 0700 and
- * the file is mode 0600, both owned by the uid the container will run as (see
- * resolveContainerUid). Returns the directory path so the caller can remove it
- * after the container exits.
+ * Create the per-container host directory that holds mounted-file secrets, owned
+ * by the uid the container runs as and mode 0700. A single dir holds every
+ * secret for one container so cleanup is one rmSync. Returns the directory path
+ * so the caller can remove it after the container exits.
  */
-function writeGitHubTokenFile(containerName: string, token: string): string {
+function makeCredDir(containerName: string, containerUid: number): string {
   // Random suffix guarantees per-container isolation even if two containers for
   // the same group spawn within the same millisecond (containerName carries
   // only a Date.now() suffix), so one container's cleanup cannot delete a dir
@@ -542,29 +543,50 @@ function writeGitHubTokenFile(containerName: string, token: string): string {
     `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
   );
   fs.mkdirSync(credDir, { recursive: true, mode: 0o700 });
-  const tokenFile = path.join(credDir, 'github_token');
-  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 
   // chown targets a *different* uid only in the root-runner case
   // (resolveContainerUid returns 1000 while getuid is 0) — root has CAP_CHOWN,
   // so it is permitted. Every non-root case is a chown-to-self that needs no
-  // capability. gid is set to containerUid too, but the file is 0600 owner-only
-  // so gid never gates the container read.
-  const containerUid = resolveContainerUid();
+  // capability. chmod after chown re-asserts 0700 in case mkdirSync's mode was
+  // masked by the runner's umask.
   fs.chownSync(credDir, containerUid, containerUid);
-  fs.chownSync(tokenFile, containerUid, containerUid);
-  // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
-  // (and 0700 on the dir) to guarantee the secret is owner-only regardless of
-  // the runner's umask.
   fs.chmodSync(credDir, 0o700);
-  fs.chmodSync(tokenFile, 0o600);
-
   return credDir;
+}
+
+/**
+ * Write one secret into an existing cred dir as a mode-0600 file owned by the
+ * uid the container runs as, so it can be mounted read-only instead of passed
+ * via `-e` (which would expose the live value on the host argv and in
+ * `docker inspect`).
+ */
+function writeCredFile(
+  credDir: string,
+  fileName: string,
+  value: string,
+  containerUid: number,
+): void {
+  const filePath = path.join(credDir, fileName);
+  fs.writeFileSync(filePath, value, { mode: 0o600 });
+
+  // gid is set to containerUid too, but the file is 0600 owner-only so gid never
+  // gates the container read. chmod after chown re-asserts 0600 in case
+  // writeFileSync's mode was masked by the runner's umask.
+  fs.chownSync(filePath, containerUid, containerUid);
+  fs.chmodSync(filePath, 0o600);
+}
+
+interface MountedSecret {
+  /** File name inside the cred dir (and basename of the read-only mount). */
+  fileName: string;
+  value: string;
+  /** Absolute path the file is mounted at inside the container. */
+  containerPath: string;
 }
 
 interface BuiltContainerArgs {
   args: string[];
-  /** Per-container host directory holding the GitHub token file, if any. */
+  /** Per-container host directory holding the mounted-file secrets, if any. */
   credDir?: string;
 }
 
@@ -584,22 +606,43 @@ async function buildContainerArgs(
   // token file orphaned on disk.
   const forwardedEnv = getForwardedEnv();
 
+  // Secrets go in via read-only mounted files, never `-e NAME=...` (see
+  // writeCredFile for the why).
   const githubToken = await resolveGitHubToken();
-  let credDir: string | undefined;
+  const notionApiKey = NOTION_API_KEY;
+  const mountedSecrets: MountedSecret[] = [];
   if (githubToken) {
-    // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the live
-    // token never appears in the host argv or `docker inspect`. The container
-    // entrypoint re-exports it from the mount. Repo scope is intentionally not
-    // narrowed at mint time (mintInstallationToken(..., [])): the container
-    // skills hit arbitrary repos at runtime, so scope is governed by the GitHub
-    // App installation's repo allowlist, not the token request.
-    credDir = writeGitHubTokenFile(containerName, githubToken);
-    args.push(
-      ...readonlyMountArgs(
-        path.join(credDir, 'github_token'),
-        GITHUB_TOKEN_CONTAINER_PATH,
-      ),
-    );
+    // GitHub repo scope is intentionally not narrowed at mint time
+    // (mintInstallationToken(..., [])): the container skills hit arbitrary repos
+    // at runtime, so scope is governed by the GitHub App installation's repo
+    // allowlist, not the token request.
+    mountedSecrets.push({
+      fileName: 'github_token',
+      value: githubToken,
+      containerPath: GITHUB_TOKEN_CONTAINER_PATH,
+    });
+  }
+  if (notionApiKey) {
+    mountedSecrets.push({
+      fileName: 'notion_api_key',
+      value: notionApiKey,
+      containerPath: NOTION_API_KEY_CONTAINER_PATH,
+    });
+  }
+
+  let credDir: string | undefined;
+  if (mountedSecrets.length > 0) {
+    const containerUid = resolveContainerUid();
+    credDir = makeCredDir(containerName, containerUid);
+    for (const secret of mountedSecrets) {
+      writeCredFile(credDir, secret.fileName, secret.value, containerUid);
+      args.push(
+        ...readonlyMountArgs(
+          path.join(credDir, secret.fileName),
+          secret.containerPath,
+        ),
+      );
+    }
   }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
