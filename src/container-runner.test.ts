@@ -1050,6 +1050,45 @@ describe('container-runner memory-gate hardening', () => {
   });
 });
 
+// Shared by both mounted-file delivery describe blocks below.
+async function captureSpawnArgs(): Promise<string[]> {
+  const argsPromise = new Promise<string[]>((resolve) => {
+    (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (_bin: string, args: string[]) => {
+        resolve(args);
+        return fakeProc;
+      },
+    );
+  });
+  const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+  const args = await argsPromise;
+  fakeProc.emit('close', 0);
+  await vi.advanceTimersByTimeAsync(10);
+  await containerPromise;
+  return args;
+}
+
+function readonlyMountFor(
+  args: string[],
+  containerPath: string,
+): string | null {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] !== '-v') continue;
+    const spec = args[index + 1];
+    const parts = spec.split(':');
+    if (parts[1] === containerPath) return spec;
+  }
+  return null;
+}
+
+function envFlagsFrom(args: string[]): string[] {
+  const envFlags: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === '-e') envFlags.push(args[index + 1]);
+  }
+  return envFlags;
+}
+
 // Security pin: the live token must never reach the host `docker run` argv via
 // `-e GITHUB_TOKEN=...`; it is delivered by a read-only mount instead.
 describe('container-runner GitHub token mounted-file delivery', () => {
@@ -1071,47 +1110,9 @@ describe('container-runner GitHub token mounted-file delivery', () => {
     }
   });
 
-  async function captureArgs(): Promise<string[]> {
-    const argsPromise = new Promise<string[]>((resolve) => {
-      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        (_bin: string, args: string[]) => {
-          resolve(args);
-          return fakeProc;
-        },
-      );
-    });
-    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
-    const args = await argsPromise;
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-    await containerPromise;
-    return args;
-  }
-
-  function readonlyMountFor(
-    args: string[],
-    containerPath: string,
-  ): string | null {
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] !== '-v') continue;
-      const spec = args[index + 1];
-      const parts = spec.split(':');
-      if (parts[1] === containerPath) return spec;
-    }
-    return null;
-  }
-
-  function envFlagsFrom(args: string[]): string[] {
-    const envFlags: string[] = [];
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] === '-e') envFlags.push(args[index + 1]);
-    }
-    return envFlags;
-  }
-
   it('does not pass the live token via -e GITHUB_TOKEN when a token is resolved', async () => {
     process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     expect(
       envFlagsFrom(args).some((flag) => flag.startsWith('GITHUB_TOKEN=')),
@@ -1121,7 +1122,7 @@ describe('container-runner GitHub token mounted-file delivery', () => {
 
   it('adds a read-only mount at the cred container path when a token is resolved', async () => {
     process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
     expect(mount).not.toBeNull();
@@ -1130,7 +1131,7 @@ describe('container-runner GitHub token mounted-file delivery', () => {
 
   it('adds no cred mount when no token is resolved', async () => {
     delete process.env.GITHUB_TOKEN;
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     const mount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
     expect(mount).toBeNull();
@@ -1146,7 +1147,7 @@ describe('container-runner GitHub token mounted-file delivery', () => {
         (call[0] as string).includes('nanoclaw-cred-'),
     );
     if (!credCall) {
-      throw new Error('writeGitHubTokenFile never created a credential dir');
+      throw new Error('makeCredDir never created a credential dir');
     }
     return credCall[0] as string;
   }
@@ -1190,47 +1191,9 @@ describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
     mockNotionApiKey = undefined;
   });
 
-  async function captureArgs(): Promise<string[]> {
-    const argsPromise = new Promise<string[]>((resolve) => {
-      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        (_bin: string, args: string[]) => {
-          resolve(args);
-          return fakeProc;
-        },
-      );
-    });
-    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
-    const args = await argsPromise;
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-    await containerPromise;
-    return args;
-  }
-
-  function readonlyMountFor(
-    args: string[],
-    containerPath: string,
-  ): string | null {
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] !== '-v') continue;
-      const spec = args[index + 1];
-      const parts = spec.split(':');
-      if (parts[1] === containerPath) return spec;
-    }
-    return null;
-  }
-
-  function envFlagsFrom(args: string[]): string[] {
-    const envFlags: string[] = [];
-    for (let index = 0; index < args.length - 1; index++) {
-      if (args[index] === '-e') envFlags.push(args[index + 1]);
-    }
-    return envFlags;
-  }
-
   it('does not pass the live key via -e NOTION_API_KEY when a key is set', async () => {
     mockNotionApiKey = 'secret-notion-key-123';
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     expect(
       envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
@@ -1240,7 +1203,7 @@ describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
 
   it('adds a read-only mount at the notion_api_key container path when a key is set', async () => {
     mockNotionApiKey = 'secret-notion-key-123';
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
     expect(mount).not.toBeNull();
@@ -1249,12 +1212,60 @@ describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
 
   it('adds no notion mount when NOTION_API_KEY is not set', async () => {
     mockNotionApiKey = undefined;
-    const args = await captureArgs();
+    const args = await captureSpawnArgs();
 
     const mount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
     expect(mount).toBeNull();
     expect(
       envFlagsFrom(args).some((flag) => flag.startsWith('NOTION_API_KEY=')),
     ).toBe(false);
+  });
+});
+
+// Refactor pin: every secret for one container lands in a single cred dir
+// created once, not one dir per secret. Regressing makeCredDir to run per
+// secret (the pre-refactor accumulator) would create two dirs but mount from
+// one, which this catches.
+describe('container-runner shared cred dir for multiple secrets', () => {
+  const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+  const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    previousGithubToken = process.env.GITHUB_TOKEN;
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockNotionApiKey = undefined;
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  it('creates one cred dir and mounts both secret files from it', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    mockNotionApiKey = 'secret-notion-key-123';
+    const args = await captureSpawnArgs();
+
+    const credDirCreations = (
+      fs.mkdirSync as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('nanoclaw-cred-'),
+    );
+    expect(credDirCreations).toHaveLength(1);
+
+    const credDir = credDirCreations[0][0] as string;
+    const githubMount = readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH);
+    const notionMount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
+    expect(githubMount!.split(':')[0]).toBe(`${credDir}/github_token`);
+    expect(notionMount!.split(':')[0]).toBe(`${credDir}/notion_api_key`);
   });
 });
