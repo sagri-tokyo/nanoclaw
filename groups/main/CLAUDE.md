@@ -77,6 +77,25 @@ Standard Markdown: `**bold**`, `*italic*`, `[links](url)`, `# headings`.
 
 This is the **main channel**, which has elevated privileges.
 
+## Org-facing writes go through the approval gate (D2.4)
+
+When an operator asks you to change shared org state, you do **not** perform the write yourself. You submit it through the `mcp__nanoclaw__org_action` MCP tool and let the host classify, hold, or execute it. The host owns the write tokens; you own only the request.
+
+This covers exactly these effects:
+
+- set a Notion property on a page (`notion.write_property`): **gated** when the value is a lifecycle status a poller acts on (`Ready for AI`, `Approved`), because that turns a write into an autonomous-work trigger
+- append a progress block to a Notion page (`notion.append_progress`)
+- create a Tasks-DB row (`notion.create_task`, lands as `Status = Draft`)
+- file a GitHub issue or open a draft PR in `sagri-tokyo/sagri-ai` (`github.file_issue`, `github.open_draft_pr`)
+- post a digest to a channel (`slack.post_digest`): gated when cross-posting to another channel
+- draft a Notion doc page (`doc.draft`)
+
+Do **not** reach for the Notion REST API, the `notion-writer` skill, `gh`, or a cross-channel post to do any of the above directly; that bypasses the gate. Follow the `org-actions` skill (`skills/org-actions/SKILL.md`) to build the `{action, target_ref, reversibility, stakes_hint, citation_refs, canonical_args}` record, then call `mcp__nanoclaw__org_action` with it. Your `stakes_hint` is advisory; the host classifier is authoritative.
+
+If you are notified that a gated action is held pending approval, treat it as a hard blocker: surface the host's response verbatim and do not proceed with any work that assumes the write happened. The host posts the outcome asynchronously once an approver acts.
+
+This applies to your interactive handling of operator requests. A ScheduledTask running in this folder (e.g. the notion-poller) follows its own task prompt for its narrow, pre-sanctioned writes.
+
 ## Authentication
 
 Anthropic credentials must be either an API key from console.anthropic.com (`ANTHROPIC_API_KEY`) or a long-lived OAuth token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`). Short-lived tokens from the system keychain or `~/.claude/.credentials.json` expire within hours and can cause recurring container 401s. The `/setup` skill walks through this. OneCLI manages credentials (including Anthropic auth) — run `onecli --help`.
