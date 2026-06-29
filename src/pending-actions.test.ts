@@ -95,7 +95,11 @@ describe('terminal deny', () => {
     expect(denyPendingAction('tok-deny')).toBe(true);
     expect(getPendingAction('tok-deny')?.state).toBe('denied');
     expect(
-      approvePendingAction('tok-deny', 'U_APPROVER', '2026-06-22T01:00:00.000Z'),
+      approvePendingAction(
+        'tok-deny',
+        'U_APPROVER',
+        '2026-06-22T01:00:00.000Z',
+      ),
     ).toBe(false);
     expect(getPendingAction('tok-deny')?.state).toBe('denied');
   });
@@ -150,7 +154,11 @@ describe('expiry sweep', () => {
     // No expirePendingActions sweep: the row is still `pending` in the DB but
     // its TTL has elapsed. Approval arriving in this window must be rejected.
     expect(
-      approvePendingAction('tok-late', 'U_APPROVER', '2026-06-22T00:00:01.000Z'),
+      approvePendingAction(
+        'tok-late',
+        'U_APPROVER',
+        '2026-06-22T00:00:01.000Z',
+      ),
     ).toBe(false);
     expect(getPendingAction('tok-late')?.state).toBe('pending');
     expect(getPendingAction('tok-late')?.approved_by).toBeNull();
@@ -161,7 +169,11 @@ describe('expiry sweep', () => {
       row({ token: 'tok-edge', expires_at: '2026-06-22T00:00:00.000Z' }),
     );
     expect(
-      approvePendingAction('tok-edge', 'U_APPROVER', '2026-06-22T00:00:00.000Z'),
+      approvePendingAction(
+        'tok-edge',
+        'U_APPROVER',
+        '2026-06-22T00:00:00.000Z',
+      ),
     ).toBe(true);
     expect(getPendingAction('tok-edge')?.state).toBe('approved');
   });
