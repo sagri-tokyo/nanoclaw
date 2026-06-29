@@ -49,6 +49,15 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
+// Approver allowlist (D2.4). Fail-CLOSED: missing/invalid => deny-all. Stored
+// OUTSIDE project root, never mounted into containers (tamper-proof from
+// agents, like the mount/sender allowlists).
+export const APPROVER_ALLOWLIST_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'approver-allowlist.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');

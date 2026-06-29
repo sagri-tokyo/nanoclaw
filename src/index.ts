@@ -69,6 +69,17 @@ import {
   stopRemoteControl,
 } from './remote-control.js';
 import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
+import { loadApproverAllowlist } from './approver-allowlist.js';
+import { parseApprovalIntent } from './approval-trigger.js';
+import { executeOrgAction } from './org-action-clients.js';
+import { requireEnv } from './fetch-untrusted.js';
+import { expirePendingActions } from './db.js';
+import {
+  driveOrgActionRequest,
+  handleApprovalReply,
+  reDriveApprovedActions,
+  type OrgActionGateDeps,
+} from './org-action-handler.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -937,6 +948,47 @@ async function main(): Promise<void> {
     logger.action(abortActionRecord(chatJid, result, Date.now() - startedAt));
   }
 
+  // Org-action approval gate (D2.4). Dependencies are re-read per call so an
+  // operator edit to the approver allowlist takes effect without a restart. The
+  // host owns NOTION_API_KEY / GITHUB_TOKEN in its own process.env (the same
+  // accessor the read fetchers use); the container never holds the write client.
+  const orgActionDeps: OrgActionGateDeps = {
+    approvers: () => loadApproverAllowlist(),
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'org-action: no channel owns JID for prompt');
+        return;
+      }
+      await channel.sendMessage(jid, text);
+    },
+    executeAction: async (request) =>
+      executeOrgAction(request, {
+        notionApiKey: requireEnv('NOTION_API_KEY'),
+        githubToken: requireEnv('GITHUB_TOKEN'),
+        sendDigest: async (channelId, text) => {
+          const jid = `slack:${channelId}`;
+          const channel = findChannel(channels, jid);
+          if (!channel) {
+            throw new Error(`org-action digest: no channel owns ${jid}`);
+          }
+          await channel.sendMessage(jid, text);
+        },
+      }),
+    now: () => new Date().toISOString(),
+    ttlMs: 24 * 60 * 60 * 1000,
+  };
+
+  // Synchronous classify (skip storeMessage) + fire-and-forget execution.
+  function handleApproval(chatJid: string, msg: NewMessage): boolean {
+    if (!parseApprovalIntent(msg.content)) return false;
+    Promise.resolve(handleApprovalReply(chatJid, msg, orgActionDeps)).catch(
+      (err) =>
+        logger.error({ err, chatJid }, 'org-action approval handler error'),
+    );
+    return true;
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -945,6 +997,7 @@ async function main(): Promise<void> {
         storeMessage,
         handleAbort,
         handleRemoteControl,
+        handleApproval,
         loadSenderAllowlist,
       });
     },
@@ -1030,7 +1083,47 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
+    onOrgAction: async (record, sourceGroup, chatJid) => {
+      // ipc.ts hard-rejects every malformed field (reversibility/stakes_hint
+      // outside their enums, non-object canonical_args, non-string[]
+      // citation_refs) before this handler is called, so the record arrives
+      // fully typed. No coercion: a coerced value would pass the gate, consume
+      // the approval, then drop or mis-tier the write silently (the footgun
+      // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
+      // see the separation-of-duty scope note in org-action-handler.ts;
+      // user-level dual control is not enforced.
+      await driveOrgActionRequest(
+        {
+          action: record.action,
+          target_ref: record.target_ref,
+          reversibility: record.reversibility,
+          stakes_hint: record.stakes_hint,
+          citation_refs: record.citation_refs,
+          canonical_args: record.canonical_args,
+        },
+        { sourceGroup, chatJid, requesterGroup: sourceGroup },
+        orgActionDeps,
+      );
+    },
   });
+
+  // Boot re-drive of approved-but-unconsumed org-actions, then a periodic TTL
+  // sweep marking expired pending rows. Exactly-once is preserved by the atomic
+  // consume inside reDriveApprovedActions. A failure here is fail-fast: it
+  // propagates to the top-level startup crash handler so the abandoned rows are
+  // retried on restart rather than silently skipped.
+  await reDriveApprovedActions(orgActionDeps);
+  expirePendingActions(new Date().toISOString());
+  setInterval(
+    () => {
+      const expired = expirePendingActions(new Date().toISOString());
+      if (expired > 0) {
+        logger.info({ expired }, 'org-action TTL sweep marked rows expired');
+      }
+    },
+    5 * 60 * 1000,
+  ).unref();
+
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
