@@ -452,6 +452,42 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     expect(getPendingAction(TOKEN)?.consumed_at).toBeNull();
     expect(getApprovedUnconsumed().map((r) => r.token)).toEqual([TOKEN]);
   });
+
+  it('leaves rows behind a failed execute approved for the next restart', async () => {
+    const firstToken = 'F'.repeat(43);
+    const secondToken = 'S'.repeat(43);
+    const { deps } = makeDeps({
+      executeAction: async (req) => {
+        if (req.action === 'notion.write_property' && req.target_ref === HEX32) {
+          // Fail the first row only; the second uses a distinct target_ref.
+          throw new Error('write failed');
+        }
+      },
+    });
+    createPendingAction(
+      pendingActionRow({
+        token: firstToken,
+        state: 'approved',
+        approved_by: 'U_APPROVER',
+      }),
+    );
+    createPendingAction(
+      pendingActionRow({
+        token: secondToken,
+        target_ref: 'b'.repeat(32),
+        state: 'approved',
+        approved_by: 'U_APPROVER',
+      }),
+    );
+
+    await expect(reDriveApprovedActions(deps)).rejects.toThrow(/write failed/);
+    // First row re-armed; second never reached, both still approved-unconsumed.
+    expect(getPendingAction(firstToken)?.state).toBe('approved');
+    expect(getPendingAction(secondToken)?.state).toBe('approved');
+    expect(getApprovedUnconsumed().map((r) => r.token).sort()).toEqual(
+      [firstToken, secondToken].sort(),
+    );
+  });
 });
 
 describe('handleApprovalReply — failed execution does not silently drop', () => {

@@ -385,10 +385,12 @@ async function executeApproved(
   try {
     await deps.executeAction(parsed.execRequest);
   } catch (err) {
-    reArmConsumedAction(token);
+    const rearmed = reArmConsumedAction(token);
     logger.error(
-      { token, action: row.action, target_ref: row.target_ref, err },
-      'org-action execution failed after consume — re-armed for boot re-drive',
+      { token, action: row.action, target_ref: row.target_ref, rearmed, err },
+      rearmed
+        ? 'org-action execution failed after consume — re-armed for boot re-drive'
+        : 'org-action execution failed after consume — re-arm FAILED, row stranded in consumed',
     );
     throw err;
   }
@@ -410,9 +412,10 @@ export async function reDriveApprovedActions(
   const rows = getApprovedUnconsumed();
   for (const row of rows) {
     // A corrupt persisted row can never succeed on retry, so it must not strand
-    // the healthy rows behind it in the loop (and must not crash the boot). The
-    // catch is scoped to the parse only: a write-client failure below is left to
-    // propagate (fail-fast) so the abandoned row is retried on the next restart.
+    // the healthy rows behind it in the loop (and must not crash the boot). This
+    // catch is scoped to the parse only: a write-client failure below is re-armed
+    // (consumed -> approved) and then propagated (fail-fast), so the abandoned row
+    // is retried on the next restart; rows behind it stay approved for that pass.
     let parsed: ParsedPendingRow;
     try {
       parsed = parsePendingRow(row);
@@ -436,10 +439,12 @@ export async function reDriveApprovedActions(
     try {
       await deps.executeAction(parsed.execRequest);
     } catch (err) {
-      reArmConsumedAction(row.token);
+      const rearmed = reArmConsumedAction(row.token);
       logger.error(
-        { token: row.token, action: row.action, err },
-        'org-action boot re-drive execution failed — re-armed for next restart',
+        { token: row.token, action: row.action, rearmed, err },
+        rearmed
+          ? 'org-action boot re-drive execution failed — re-armed for next restart'
+          : 'org-action boot re-drive execution failed — re-arm FAILED, row stranded in consumed',
       );
       throw err;
     }
