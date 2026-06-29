@@ -192,6 +192,23 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 
+  it('rejects an approval whose token belongs to a different channel', async () => {
+    const { deps, rec } = makeDeps();
+    // Row is held in slack:C0AAA1111 (pendingActionRow default chat_jid).
+    createPendingAction(pendingActionRow());
+    // The same token, leaked, is replied to from a different channel.
+    const handled = await handleApprovalReply(
+      'slack:C0BBB2222',
+      approval(),
+      deps,
+    );
+    expect(handled).toBe(true);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    // Fail-closed: nothing is posted to the wrong channel.
+    expect(rec.posted).toHaveLength(0);
+  });
+
   it('rejects a bot-sourced approval message', async () => {
     const { deps, rec } = makeDeps();
     await seedGated(deps);

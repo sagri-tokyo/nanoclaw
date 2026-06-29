@@ -298,6 +298,22 @@ export async function handleApprovalReply(
     return true;
   }
 
+  // Bind the approval to the channel that holds the row. A token leaked into
+  // another channel must not be approvable there, and the status reply must
+  // never post to a channel other than the one the action was raised in.
+  if (row.chat_jid !== chatJid) {
+    logger.warn(
+      {
+        chatJid,
+        rowChatJid: row.chat_jid,
+        sender: msg.sender,
+        token: intent.token,
+      },
+      'org-action approval rejected: token does not belong to this channel',
+    );
+    return true;
+  }
+
   // Group-level guard only: row.requester is the requesting group folder, never
   // a user id, so this excludes the degenerate case where the approver allowlist
   // names a group-folder string. It is NOT user-level self-approval prevention.
