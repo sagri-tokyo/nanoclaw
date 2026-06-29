@@ -458,17 +458,23 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     const secondToken = 'S'.repeat(43);
     const { deps } = makeDeps({
       executeAction: async (req) => {
-        if (req.action === 'notion.write_property' && req.target_ref === HEX32) {
-          // Fail the first row only; the second uses a distinct target_ref.
+        if (
+          req.action === 'notion.write_property' &&
+          req.target_ref === HEX32
+        ) {
           throw new Error('write failed');
         }
       },
     });
+    // created_at orders the re-drive (getApprovedUnconsumed ORDER BY created_at),
+    // so the failing row is processed first and the loop rethrows before the
+    // second is reached.
     createPendingAction(
       pendingActionRow({
         token: firstToken,
         state: 'approved',
         approved_by: 'U_APPROVER',
+        created_at: '2026-06-22T00:00:00.000Z',
       }),
     );
     createPendingAction(
@@ -477,16 +483,20 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
         target_ref: 'b'.repeat(32),
         state: 'approved',
         approved_by: 'U_APPROVER',
+        created_at: '2026-06-22T00:00:01.000Z',
       }),
     );
 
     await expect(reDriveApprovedActions(deps)).rejects.toThrow(/write failed/);
-    // First row re-armed; second never reached, both still approved-unconsumed.
+    // Both end approved via different paths: the first failed and was re-armed,
+    // the second was never reached. Both stay visible to the next re-drive.
     expect(getPendingAction(firstToken)?.state).toBe('approved');
     expect(getPendingAction(secondToken)?.state).toBe('approved');
-    expect(getApprovedUnconsumed().map((r) => r.token).sort()).toEqual(
-      [firstToken, secondToken].sort(),
-    );
+    expect(
+      getApprovedUnconsumed()
+        .map((r) => r.token)
+        .sort(),
+    ).toEqual([firstToken, secondToken].sort());
   });
 });
 
