@@ -962,19 +962,30 @@ async function main(): Promise<void> {
       }
       await channel.sendMessage(jid, text);
     },
-    executeAction: async (request) =>
-      executeOrgAction(request, {
-        notionApiKey: requireEnv('NOTION_API_KEY'),
-        githubToken: requireEnv('GITHUB_TOKEN'),
-        sendDigest: async (channelId, text) => {
-          const jid = `slack:${channelId}`;
-          const channel = findChannel(channels, jid);
-          if (!channel) {
-            throw new Error(`org-action digest: no channel owns ${jid}`);
+    executeAction:
+      process.env.NANOCLAW_STUB_ORG_WRITES === '1'
+        ? async (request) => {
+            logger.warn(
+              { request },
+              'org-action STUB: external write suppressed (NANOCLAW_STUB_ORG_WRITES=1)',
+            );
+            console.log(
+              `\n  [STUB ORG-WRITE FIRED] ${request.action} target=${request.target_ref} args=${JSON.stringify(request.canonical_args)}\n`,
+            );
           }
-          await channel.sendMessage(jid, text);
-        },
-      }),
+        : async (request) =>
+            executeOrgAction(request, {
+              notionApiKey: requireEnv('NOTION_API_KEY'),
+              githubToken: requireEnv('GITHUB_TOKEN'),
+              sendDigest: async (channelId, text) => {
+                const jid = `slack:${channelId}`;
+                const channel = findChannel(channels, jid);
+                if (!channel) {
+                  throw new Error(`org-action digest: no channel owns ${jid}`);
+                }
+                await channel.sendMessage(jid, text);
+              },
+            }),
     now: () => new Date().toISOString(),
     ttlMs: 24 * 60 * 60 * 1000,
   };
