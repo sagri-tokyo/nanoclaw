@@ -205,8 +205,22 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     expect(handled).toBe(true);
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)?.state).toBe('pending');
-    // Fail-closed: nothing is posted to the wrong channel.
+    // Fail-closed.
     expect(rec.posted).toHaveLength(0);
+  });
+
+  it('rejects a cross-channel reject, leaving the row pending not denied', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(pendingActionRow());
+    const handled = await handleApprovalReply(
+      'slack:C0BBB2222',
+      approval({ content: `reject ${TOKEN}` }),
+      deps,
+    );
+    expect(handled).toBe(true);
+    expect(rec.posted).toHaveLength(0);
+    // The guard precedes the reject branch, so denyPendingAction never runs.
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 
   it('rejects a bot-sourced approval message', async () => {

@@ -921,13 +921,10 @@ export function getPendingAction(token: string): PendingActionRow | undefined {
 
 /**
  * Transition a row from `pending` to `approved`, recording the approver. Returns
- * true only when exactly one `pending` row changed — a denied/expired/consumed
- * row cannot be re-approved (the WHERE state='pending' guard is terminal). The
- * `expires_at >= now` guard rejects a row whose TTL has elapsed but which the
- * sweep has not yet flipped to `expired`, closing the window where an approval
- * landing between expiry and the next `expirePendingActions` pass could still
- * execute. The boundary matches the sweep (`expires_at < now` expires), so a
- * row is approvable up to and including its `expires_at`.
+ * true only when exactly one `pending` row changed. The `expires_at >= now`
+ * guard rejects a row whose TTL elapsed before the sweep flipped it to
+ * `expired`, closing the window where a late approval could still execute. The
+ * boundary matches the sweep (`expires_at < now` expires).
  */
 export function approvePendingAction(
   token: string,
@@ -963,11 +960,10 @@ export function consumePendingAction(
 
 /**
  * Reverse a consume after the host write failed: flip `consumed` back to
- * `approved` and clear `consumed_at` so the row is re-driven on the next boot.
- * Without this a thrown `executeAction` would strand the row in `consumed`,
- * where `getApprovedUnconsumed` never sees it again — a silently dropped action
- * that was approved but never executed. Returns true only on the one statement
- * that re-arms a `consumed` row.
+ * `approved` and clear `consumed_at` so boot re-drive retries it. Without this a
+ * thrown `executeAction` strands the row in `consumed`, where
+ * `getApprovedUnconsumed` never sees it again — approved but never executed.
+ * Returns true only on the statement that re-arms a `consumed` row.
  */
 export function reArmConsumedAction(token: string): boolean {
   const result = db
