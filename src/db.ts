@@ -922,18 +922,24 @@ export function getPendingAction(token: string): PendingActionRow | undefined {
 /**
  * Transition a row from `pending` to `approved`, recording the approver. Returns
  * true only when exactly one `pending` row changed — a denied/expired/consumed
- * row cannot be re-approved (the WHERE state='pending' guard is terminal).
+ * row cannot be re-approved (the WHERE state='pending' guard is terminal). The
+ * `expires_at >= now` guard rejects a row whose TTL has elapsed but which the
+ * sweep has not yet flipped to `expired`, closing the window where an approval
+ * landing between expiry and the next `expirePendingActions` pass could still
+ * execute. The boundary matches the sweep (`expires_at < now` expires), so a
+ * row is approvable up to and including its `expires_at`.
  */
 export function approvePendingAction(
   token: string,
   approverId: string,
+  now: string,
 ): boolean {
   const result = db
     .prepare(
       `UPDATE pending_actions SET state = 'approved', approved_by = ?
-       WHERE token = ? AND state = 'pending'`,
+       WHERE token = ? AND state = 'pending' AND expires_at >= ?`,
     )
-    .run(approverId, token);
+    .run(approverId, token, now);
   return result.changes === 1;
 }
 
@@ -952,6 +958,24 @@ export function consumePendingAction(
        WHERE token = ? AND state = 'approved'`,
     )
     .run(consumedAt, token);
+  return result.changes === 1;
+}
+
+/**
+ * Reverse a consume after the host write failed: flip `consumed` back to
+ * `approved` and clear `consumed_at` so the row is re-driven on the next boot.
+ * Without this a thrown `executeAction` would strand the row in `consumed`,
+ * where `getApprovedUnconsumed` never sees it again — a silently dropped action
+ * that was approved but never executed. Returns true only on the one statement
+ * that re-arms a `consumed` row.
+ */
+export function reArmConsumedAction(token: string): boolean {
+  const result = db
+    .prepare(
+      `UPDATE pending_actions SET state = 'approved', consumed_at = NULL
+       WHERE token = ? AND state = 'consumed'`,
+    )
+    .run(token);
   return result.changes === 1;
 }
 

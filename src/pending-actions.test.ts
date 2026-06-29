@@ -9,6 +9,7 @@ import {
   expirePendingActions,
   getApprovedUnconsumed,
   getPendingAction,
+  reArmConsumedAction,
 } from './db.js';
 import type { PendingActionRow } from './types.js';
 
@@ -53,7 +54,11 @@ describe('pending_actions persistence', () => {
 describe('approve + atomic single-use consume', () => {
   it('approve transitions pending -> approved and records approver', () => {
     createPendingAction(row({ token: 'tok-app' }));
-    const approved = approvePendingAction('tok-app', 'U_APPROVER');
+    const approved = approvePendingAction(
+      'tok-app',
+      'U_APPROVER',
+      '2026-06-22T01:00:00.000Z',
+    );
     expect(approved).toBe(true);
     const got = getPendingAction('tok-app');
     expect(got?.state).toBe('approved');
@@ -62,7 +67,7 @@ describe('approve + atomic single-use consume', () => {
 
   it('consume returns true exactly once then false on every retry', () => {
     createPendingAction(row({ token: 'tok-once' }));
-    approvePendingAction('tok-once', 'U_APPROVER');
+    approvePendingAction('tok-once', 'U_APPROVER', '2026-06-22T01:00:00.000Z');
     expect(consumePendingAction('tok-once', '2026-06-22T01:00:00.000Z')).toBe(
       true,
     );
@@ -89,7 +94,9 @@ describe('terminal deny', () => {
     createPendingAction(row({ token: 'tok-deny' }));
     expect(denyPendingAction('tok-deny')).toBe(true);
     expect(getPendingAction('tok-deny')?.state).toBe('denied');
-    expect(approvePendingAction('tok-deny', 'U_APPROVER')).toBe(false);
+    expect(
+      approvePendingAction('tok-deny', 'U_APPROVER', '2026-06-22T01:00:00.000Z'),
+    ).toBe(false);
     expect(getPendingAction('tok-deny')?.state).toBe('denied');
   });
 
@@ -130,8 +137,55 @@ describe('expiry sweep', () => {
       row({ token: 'tok-exp', expires_at: '2026-06-22T00:00:00.000Z' }),
     );
     expirePendingActions('2026-06-22T12:00:00.000Z');
-    expect(approvePendingAction('tok-exp', 'U_APPROVER')).toBe(false);
+    expect(
+      approvePendingAction('tok-exp', 'U_APPROVER', '2026-06-22T12:00:01.000Z'),
+    ).toBe(false);
     expect(getPendingAction('tok-exp')?.state).toBe('expired');
+  });
+
+  it('a still-pending row whose TTL has passed cannot be approved before the sweep', () => {
+    createPendingAction(
+      row({ token: 'tok-late', expires_at: '2026-06-22T00:00:00.000Z' }),
+    );
+    // No expirePendingActions sweep: the row is still `pending` in the DB but
+    // its TTL has elapsed. Approval arriving in this window must be rejected.
+    expect(
+      approvePendingAction('tok-late', 'U_APPROVER', '2026-06-22T00:00:01.000Z'),
+    ).toBe(false);
+    expect(getPendingAction('tok-late')?.state).toBe('pending');
+    expect(getPendingAction('tok-late')?.approved_by).toBeNull();
+  });
+
+  it('approval is allowed at exactly expires_at (boundary matches the sweep)', () => {
+    createPendingAction(
+      row({ token: 'tok-edge', expires_at: '2026-06-22T00:00:00.000Z' }),
+    );
+    expect(
+      approvePendingAction('tok-edge', 'U_APPROVER', '2026-06-22T00:00:00.000Z'),
+    ).toBe(true);
+    expect(getPendingAction('tok-edge')?.state).toBe('approved');
+  });
+});
+
+describe('re-arm a consumed row after a failed execution', () => {
+  it('flips consumed -> approved and clears consumed_at so re-drive retries', () => {
+    createPendingAction(row({ token: 'tok-rearm', state: 'approved' }));
+    expect(consumePendingAction('tok-rearm', '2026-06-22T01:00:00.000Z')).toBe(
+      true,
+    );
+    expect(getPendingAction('tok-rearm')?.state).toBe('consumed');
+
+    expect(reArmConsumedAction('tok-rearm')).toBe(true);
+    const got = getPendingAction('tok-rearm');
+    expect(got?.state).toBe('approved');
+    expect(got?.consumed_at).toBeNull();
+    expect(getApprovedUnconsumed().map((r) => r.token)).toEqual(['tok-rearm']);
+  });
+
+  it('is a no-op returning false on a row that is not consumed', () => {
+    createPendingAction(row({ token: 'tok-appr', state: 'approved' }));
+    expect(reArmConsumedAction('tok-appr')).toBe(false);
+    expect(getPendingAction('tok-appr')?.state).toBe('approved');
   });
 });
 

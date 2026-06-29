@@ -42,6 +42,7 @@ import {
   denyPendingAction,
   getApprovedUnconsumed,
   getPendingAction,
+  reArmConsumedAction,
 } from './db.js';
 import { logger } from './logger.js';
 import { parseApprovalIntent } from './approval-trigger.js';
@@ -319,7 +320,7 @@ export async function handleApprovalReply(
     return true;
   }
 
-  const approved = approvePendingAction(intent.token, msg.sender);
+  const approved = approvePendingAction(intent.token, msg.sender, deps.now());
   if (!approved) {
     await deps.sendMessage(
       chatJid,
@@ -378,7 +379,19 @@ async function executeApproved(
     return;
   }
 
-  await deps.executeAction(parsed.execRequest);
+  // Consume-before-execute is the exactly-once gate, but a thrown executeAction
+  // would otherwise strand the row in `consumed` where boot re-drive never sees
+  // it. Re-arm to `approved` so the next restart retries, then propagate.
+  try {
+    await deps.executeAction(parsed.execRequest);
+  } catch (err) {
+    reArmConsumedAction(token);
+    logger.error(
+      { token, action: row.action, target_ref: row.target_ref, err },
+      'org-action execution failed after consume — re-armed for boot re-drive',
+    );
+    throw err;
+  }
   logger.info(
     { token, action: row.action, target_ref: row.target_ref },
     'org-action executed after approval (exactly-once)',
@@ -420,7 +433,16 @@ export async function reDriveApprovedActions(
     }
     const consumed = consumePendingAction(row.token, deps.now());
     if (!consumed) continue;
-    await deps.executeAction(parsed.execRequest);
+    try {
+      await deps.executeAction(parsed.execRequest);
+    } catch (err) {
+      reArmConsumedAction(row.token);
+      logger.error(
+        { token: row.token, action: row.action, err },
+        'org-action boot re-drive execution failed — re-armed for next restart',
+      );
+      throw err;
+    }
     logger.info(
       { token: row.token, action: row.action },
       'org-action boot re-drive executed (exactly-once)',

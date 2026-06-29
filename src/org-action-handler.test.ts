@@ -433,4 +433,62 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     expect(getPendingAction('C'.repeat(43))?.state).toBe('approved');
     expect(getPendingAction('H'.repeat(43))?.state).toBe('consumed');
   });
+
+  it('re-arms a row to approved when the write fails so the next restart retries', async () => {
+    const { deps } = makeDeps({
+      executeAction: async () => {
+        throw new Error('gh exited non-zero');
+      },
+    });
+    createPendingAction(
+      pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
+    );
+
+    await expect(reDriveApprovedActions(deps)).rejects.toThrow(
+      /gh exited non-zero/,
+    );
+    // Not stranded in `consumed`: still visible to the next boot re-drive.
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
+    expect(getPendingAction(TOKEN)?.consumed_at).toBeNull();
+    expect(getApprovedUnconsumed().map((r) => r.token)).toEqual([TOKEN]);
+  });
+});
+
+describe('handleApprovalReply — failed execution does not silently drop', () => {
+  it('re-arms the row to approved when executeAction throws on the live path', async () => {
+    const { deps } = makeDeps({
+      executeAction: async () => {
+        throw new Error('notion 500');
+      },
+    });
+    createPendingAction(pendingActionRow());
+
+    await expect(
+      handleApprovalReply('slack:C0AAA1111', approval(), deps),
+    ).rejects.toThrow(/notion 500/);
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
+    expect(getPendingAction(TOKEN)?.consumed_at).toBeNull();
+    expect(getApprovedUnconsumed().map((r) => r.token)).toEqual([TOKEN]);
+  });
+
+  it('rejects an approval whose held row has passed its TTL before the sweep', async () => {
+    const { deps, rec } = makeDeps({ now: () => '2026-06-24T00:00:00.000Z' });
+    createPendingAction(
+      pendingActionRow({
+        created_at: '2026-06-22T00:00:00.000Z',
+        expires_at: '2026-06-23T00:00:00.000Z',
+      }),
+    );
+
+    await handleApprovalReply('slack:C0AAA1111', approval(), deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    expect(rec.posted).toEqual([
+      {
+        jid: 'slack:C0AAA1111',
+        text: `Cannot approve ${TOKEN}: already resolved, denied, or expired.`,
+      },
+    ]);
+  });
 });
