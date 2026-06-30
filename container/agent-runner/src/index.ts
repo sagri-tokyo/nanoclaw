@@ -36,6 +36,17 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  // Per-task capability profile (sagri-ai#312). Forwarded by the host via the
+  // stdin-serialized ContainerInput. The load-bearing enforcement is host-side:
+  // an `operator` container is never handed the Notion/GitHub write tokens, so
+  // the notion-writer skill and any Bash `gh`/curl write are inert and the only
+  // working write path is the host-executed `org_action` gate.
+  // TODO(sagri-ai#312): drop the notion-writer skill and tighten allowedTools
+  // for the operator profile as defense-in-depth. Skipped here because the
+  // image bakes one shared skills dir and the org-actions skill needs Bash plus
+  // the mcp__nanoclaw__* tools, so per-profile skill filtering is not cheap in
+  // the current image layout. Token removal already makes notion-writer inert.
+  capabilityProfile?: 'operator' | 'trusted-writer';
 }
 
 type ContainerOutput =

@@ -116,6 +116,12 @@ export interface PendingActionRow {
   consumed_at: string | null;
 }
 
+// Per-task capability profile (sagri-ai#312). Fail-closed: an absent value
+// resolves to `operator`, which denies the container the Notion/GitHub write
+// tokens and forces writes through the host-executed `org_action` gate. Only
+// the poller ScheduledTasks opt in to `trusted-writer`.
+export type CapabilityProfile = 'operator' | 'trusted-writer';
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;
@@ -132,6 +138,7 @@ export interface ScheduledTask {
   created_at: string;
   runbook_url?: string | null;
   failure_post_threshold?: number;
+  capability_profile?: CapabilityProfile;
 }
 
 export interface TaskRunLog {

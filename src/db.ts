@@ -55,7 +55,8 @@ function createSchema(database: Database.Database): void {
       status TEXT DEFAULT 'active',
       created_at TEXT NOT NULL,
       runbook_url TEXT,
-      failure_post_threshold INTEGER NOT NULL DEFAULT 2
+      failure_post_threshold INTEGER NOT NULL DEFAULT 2,
+      capability_profile TEXT NOT NULL DEFAULT 'operator'
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -222,6 +223,25 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Add capability_profile column if it doesn't exist (migration for existing
+  // DBs). Fail-closed: existing rows and new rows default to 'operator', which
+  // denies the container the org-write tokens. Poller tasks are re-registered
+  // as 'trusted-writer' out of band. See sagri-tokyo/sagri-ai#312.
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN capability_profile TEXT NOT NULL DEFAULT 'operator'`,
+    );
+  } catch (error) {
+    if (
+      !(
+        error instanceof Error &&
+        error.message.includes('duplicate column name')
+      )
+    ) {
+      throw error;
+    }
   }
 }
 
@@ -575,8 +595,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url, failure_post_threshold)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url, failure_post_threshold, capability_profile)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -592,6 +612,7 @@ export function createTask(
     task.created_at,
     task.runbook_url ?? null,
     task.failure_post_threshold ?? 2,
+    task.capability_profile ?? 'operator',
   );
 }
 
@@ -628,6 +649,7 @@ export function updateTask(
       | 'status'
       | 'runbook_url'
       | 'failure_post_threshold'
+      | 'capability_profile'
     >
   >,
 ): void {
@@ -665,6 +687,10 @@ export function updateTask(
   if (updates.failure_post_threshold !== undefined) {
     fields.push('failure_post_threshold = ?');
     values.push(updates.failure_post_threshold);
+  }
+  if (updates.capability_profile !== undefined) {
+    fields.push('capability_profile = ?');
+    values.push(updates.capability_profile);
   }
 
   if (fields.length === 0) return;

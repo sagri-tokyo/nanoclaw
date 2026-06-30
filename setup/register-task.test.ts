@@ -294,13 +294,20 @@ describe('register-task runbook_url handling', () => {
 
 describe('parseArgs (strict --runbook-url semantics)', () => {
   const baseArgs = [
-    '--id', 't1',
-    '--group-folder', 'slack_main',
-    '--chat-jid', 'C123@slack',
-    '--prompt-file', '/tmp/prompt.md',
-    '--schedule-type', 'cron',
-    '--schedule-value', '*/15 * * * *',
-    '--context-mode', 'isolated',
+    '--id',
+    't1',
+    '--group-folder',
+    'slack_main',
+    '--chat-jid',
+    'C123@slack',
+    '--prompt-file',
+    '/tmp/prompt.md',
+    '--schedule-type',
+    'cron',
+    '--schedule-value',
+    '*/15 * * * *',
+    '--context-mode',
+    'isolated',
   ];
 
   it('leaves runbookUrl undefined when the flag is omitted', () => {
@@ -311,18 +318,19 @@ describe('parseArgs (strict --runbook-url semantics)', () => {
   it('captures a non-empty runbook url', () => {
     const parsed = _parseArgs([
       ...baseArgs,
-      '--runbook-url', 'https://www.notion.so/Runbook-x',
+      '--runbook-url',
+      'https://www.notion.so/Runbook-x',
     ]);
     expect(parsed.runbookUrl).toBe('https://www.notion.so/Runbook-x');
   });
 
   it('rejects an empty --runbook-url with RegisterTaskArgError', () => {
-    expect(() =>
-      _parseArgs([...baseArgs, '--runbook-url', '']),
-    ).toThrow(RegisterTaskArgError);
-    expect(() =>
-      _parseArgs([...baseArgs, '--runbook-url', '']),
-    ).toThrow('--runbook-url requires a non-empty value');
+    expect(() => _parseArgs([...baseArgs, '--runbook-url', ''])).toThrow(
+      RegisterTaskArgError,
+    );
+    expect(() => _parseArgs([...baseArgs, '--runbook-url', ''])).toThrow(
+      '--runbook-url requires a non-empty value',
+    );
   });
 
   it('rejects a trailing --runbook-url with no value', () => {
@@ -334,13 +342,20 @@ describe('parseArgs (strict --runbook-url semantics)', () => {
 
 describe('parseArgs (strict --post-after-fails semantics)', () => {
   const baseArgs = [
-    '--id', 't1',
-    '--group-folder', 'slack_main',
-    '--chat-jid', 'C123@slack',
-    '--prompt-file', '/tmp/prompt.md',
-    '--schedule-type', 'cron',
-    '--schedule-value', '*/15 * * * *',
-    '--context-mode', 'isolated',
+    '--id',
+    't1',
+    '--group-folder',
+    'slack_main',
+    '--chat-jid',
+    'C123@slack',
+    '--prompt-file',
+    '/tmp/prompt.md',
+    '--schedule-type',
+    'cron',
+    '--schedule-value',
+    '*/15 * * * *',
+    '--context-mode',
+    'isolated',
   ];
 
   it('leaves postAfterFails undefined when the flag is omitted', () => {
@@ -368,9 +383,9 @@ describe('parseArgs (strict --post-after-fails semantics)', () => {
   });
 
   it('rejects a negative --post-after-fails value', () => {
-    expect(() =>
-      _parseArgs([...baseArgs, '--post-after-fails', '-3']),
-    ).toThrow(RegisterTaskArgError);
+    expect(() => _parseArgs([...baseArgs, '--post-after-fails', '-3'])).toThrow(
+      RegisterTaskArgError,
+    );
   });
 
   it('rejects a non-numeric --post-after-fails value', () => {
@@ -478,6 +493,136 @@ describe('register-task failure_post_threshold handling', () => {
     });
     const stored = getTaskById('thr-overwrite');
     expect(stored!.failure_post_threshold).toBe(3);
+  });
+});
+
+describe('parseArgs (strict --capability-profile semantics)', () => {
+  const baseArgs = [
+    '--id',
+    't1',
+    '--group-folder',
+    'slack_main',
+    '--chat-jid',
+    'C123@slack',
+    '--prompt-file',
+    '/tmp/prompt.md',
+    '--schedule-type',
+    'cron',
+    '--schedule-value',
+    '*/15 * * * *',
+    '--context-mode',
+    'isolated',
+  ];
+
+  it('defaults to operator when the flag is omitted (fail-closed)', () => {
+    const parsed = _parseArgs(baseArgs);
+    expect(parsed.capabilityProfile).toBe('operator');
+  });
+
+  it('captures --capability-profile trusted-writer', () => {
+    const parsed = _parseArgs([
+      ...baseArgs,
+      '--capability-profile',
+      'trusted-writer',
+    ]);
+    expect(parsed.capabilityProfile).toBe('trusted-writer');
+  });
+
+  it('captures --capability-profile operator', () => {
+    const parsed = _parseArgs([
+      ...baseArgs,
+      '--capability-profile',
+      'operator',
+    ]);
+    expect(parsed.capabilityProfile).toBe('operator');
+  });
+
+  it('rejects an unknown --capability-profile value', () => {
+    expect(() =>
+      _parseArgs([...baseArgs, '--capability-profile', 'root']),
+    ).toThrow(RegisterTaskArgError);
+    expect(() =>
+      _parseArgs([...baseArgs, '--capability-profile', 'root']),
+    ).toThrow(
+      '--capability-profile must be one of operator, trusted-writer (got root)',
+    );
+  });
+
+  it('rejects an empty --capability-profile value', () => {
+    expect(() => _parseArgs([...baseArgs, '--capability-profile', ''])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+
+  it('rejects a trailing --capability-profile with no value', () => {
+    expect(() => _parseArgs([...baseArgs, '--capability-profile'])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+});
+
+describe('register-task capability_profile handling', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('defaults capability_profile to operator on create when omitted', () => {
+    upsertTask({
+      id: 'cap-default',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('cap-default')!.capability_profile).toBe('operator');
+  });
+
+  it('persists capability_profile trusted-writer on create', () => {
+    upsertTask({
+      id: 'cap-trusted',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Poll Notion.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    expect(getTaskById('cap-trusted')!.capability_profile).toBe(
+      'trusted-writer',
+    );
+  });
+
+  it('overwrites the profile when a new value is provided on update', () => {
+    upsertTask({
+      id: 'cap-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'operator',
+    });
+    upsertTask({
+      id: 'cap-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    expect(getTaskById('cap-overwrite')!.capability_profile).toBe(
+      'trusted-writer',
+    );
   });
 });
 

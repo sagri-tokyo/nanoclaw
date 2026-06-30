@@ -144,4 +144,104 @@ describe('database migrations', () => {
       process.chdir(repoRoot);
     }
   });
+
+  it("adds capability_profile defaulting to 'operator' on existing scheduled_tasks rows", async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nanoclaw-db-cap-test-'),
+    );
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Legacy schema: scheduled_tasks WITHOUT capability_profile.
+      legacyDb.exec(`
+        CREATE TABLE scheduled_tasks (
+          id TEXT PRIMARY KEY,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO scheduled_tasks
+           (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'legacy-cap',
+          'slack_main',
+          'C123@slack',
+          'legacy work',
+          'cron',
+          '*/15 * * * *',
+          '2026-05-15T00:00:00.000Z',
+          'active',
+          '2026-05-15T00:00:00.000Z',
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getTaskById, createTask, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      const migrated = getTaskById('legacy-cap');
+      expect(migrated).toBeDefined();
+      expect(migrated!.capability_profile).toBe('operator');
+
+      // A row created post-migration with no profile also fails closed to operator.
+      createTask({
+        id: 'post-cap-default',
+        group_folder: 'slack_main',
+        chat_jid: 'C123@slack',
+        prompt: 'new work',
+        script: null,
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        context_mode: 'isolated',
+        next_run: '2026-05-15T01:00:00.000Z',
+        status: 'active',
+        created_at: '2026-05-15T01:00:00.000Z',
+      });
+      expect(getTaskById('post-cap-default')!.capability_profile).toBe(
+        'operator',
+      );
+
+      // An explicit trusted-writer survives the round-trip.
+      createTask({
+        id: 'post-cap-trusted',
+        group_folder: 'slack_main',
+        chat_jid: 'C123@slack',
+        prompt: 'poller work',
+        script: null,
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        context_mode: 'isolated',
+        next_run: '2026-05-15T01:00:00.000Z',
+        status: 'active',
+        created_at: '2026-05-15T01:00:00.000Z',
+        capability_profile: 'trusted-writer',
+      });
+      expect(getTaskById('post-cap-trusted')!.capability_profile).toBe(
+        'trusted-writer',
+      );
+
+      _closeDatabase();
+    } finally {
+      process.chdir(repoRoot);
+    }
+  });
 });

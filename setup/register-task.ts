@@ -10,9 +10,14 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 import { STORE_DIR } from '../src/config.ts';
-import { createTask, getTaskById, initDatabase, updateTask } from '../src/db.ts';
+import {
+  createTask,
+  getTaskById,
+  initDatabase,
+  updateTask,
+} from '../src/db.ts';
 import { logger } from '../src/logger.ts';
-import { ScheduledTask } from '../src/types.ts';
+import { CapabilityProfile, ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
 const EXIT_BAD_ARGS = 4;
@@ -25,9 +30,15 @@ interface RegisterTaskArgs {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  capabilityProfile: CapabilityProfile;
   runbookUrl?: string;
   postAfterFails?: number;
 }
+
+const CAPABILITY_PROFILES: ReadonlyArray<CapabilityProfile> = [
+  'operator',
+  'trusted-writer',
+];
 
 export interface UpsertTaskInput {
   id: string;
@@ -37,6 +48,12 @@ export interface UpsertTaskInput {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  /**
+   * Per-task capability profile (sagri-ai#312). Fail-closed: `undefined`
+   * stores `operator` on create, which denies the container the org-write
+   * tokens. A defined value overwrites the row's profile on update.
+   */
+  capabilityProfile?: CapabilityProfile;
   /**
    * `undefined` leaves the existing row's `runbook_url` untouched on update
    * and stores `null` on create. A non-empty string is persisted as-is.
@@ -70,6 +87,7 @@ function parseArgs(args: string[]): RegisterTaskArgs {
     scheduleType: 'cron',
     scheduleValue: '',
     contextMode: 'isolated',
+    capabilityProfile: 'operator',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -99,6 +117,19 @@ function parseArgs(args: string[]): RegisterTaskArgs {
         result.contextMode = raw;
         break;
       }
+      case '--capability-profile': {
+        const raw = args[++i];
+        if (
+          raw === undefined ||
+          !CAPABILITY_PROFILES.includes(raw as CapabilityProfile)
+        ) {
+          throw new RegisterTaskArgError(
+            `--capability-profile must be one of ${CAPABILITY_PROFILES.join(', ')} (got ${raw ?? '<missing>'})`,
+          );
+        }
+        result.capabilityProfile = raw as CapabilityProfile;
+        break;
+      }
       case '--runbook-url': {
         const raw = args[++i];
         if (raw === undefined || raw === '') {
@@ -112,9 +143,7 @@ function parseArgs(args: string[]): RegisterTaskArgs {
       case '--post-after-fails': {
         const raw = args[++i];
         if (raw === undefined || raw === '') {
-          throw new RegisterTaskArgError(
-            '--post-after-fails requires a value',
-          );
+          throw new RegisterTaskArgError('--post-after-fails requires a value');
         }
         const parsed = Number(raw);
         if (!Number.isInteger(parsed) || parsed < 1) {
@@ -192,7 +221,10 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
       'upsertTask: runbookUrl must be a non-empty string or undefined',
     );
   }
-  const nextRun = computeInitialNextRun(input.scheduleType, input.scheduleValue);
+  const nextRun = computeInitialNextRun(
+    input.scheduleType,
+    input.scheduleValue,
+  );
   const existing = getTaskById(input.id);
 
   if (existing) {
@@ -208,6 +240,9 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     }
     if (input.postAfterFails !== undefined) {
       taskUpdates.failure_post_threshold = input.postAfterFails;
+    }
+    if (input.capabilityProfile !== undefined) {
+      taskUpdates.capability_profile = input.capabilityProfile;
     }
     updateTask(input.id, taskUpdates);
     return 'updated';
@@ -227,6 +262,7 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     created_at: new Date().toISOString(),
     runbook_url: input.runbookUrl ?? null,
     failure_post_threshold: input.postAfterFails,
+    capability_profile: input.capabilityProfile ?? 'operator',
   });
   return 'created';
 }
@@ -299,6 +335,7 @@ export async function run(args: string[]): Promise<void> {
     scheduleType: parsed.scheduleType,
     scheduleValue: parsed.scheduleValue,
     contextMode: parsed.contextMode,
+    capabilityProfile: parsed.capabilityProfile,
     runbookUrl: parsed.runbookUrl,
     postAfterFails: parsed.postAfterFails,
   });
@@ -317,6 +354,7 @@ export async function run(args: string[]): Promise<void> {
     SCHEDULE_TYPE: parsed.scheduleType,
     SCHEDULE_VALUE: parsed.scheduleValue,
     CONTEXT_MODE: parsed.contextMode,
+    CAPABILITY_PROFILE: parsed.capabilityProfile,
     ACTION: action,
     STATUS: 'success',
     LOG: 'logs/setup.log',
