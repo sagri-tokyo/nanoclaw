@@ -179,10 +179,10 @@ describe('driveOrgActionRequest — host-side Notion target resolution', () => {
 
   function resolverReturning(
     result: NotionTargetResolution,
-    rec: Recorder,
+    recorder: Recorder,
   ): OrgActionGateDeps['resolveNotionTarget'] {
     return async (query) => {
-      rec.resolveQueries.push(query);
+      recorder.resolveQueries.push(query);
       return result;
     };
   }
@@ -211,9 +211,30 @@ describe('driveOrgActionRequest — host-side Notion target resolution', () => {
     const row = getPendingAction(TOKEN);
     expect(row?.state).toBe('pending');
     expect(row?.target_ref).toBe(RESOLVED_ID);
-    expect(rec.posted).toHaveLength(1);
-    expect(rec.posted[0].text).toContain('Soil Model Task');
-    expect(rec.posted[0].text).toContain(RESOLVED_ID);
+    // Build the expected summary literally (NOT via renderApprovalSummary) so
+    // this pins the resolved id and the title in the exact
+    // `target: "<title>" (<id>)` form independently of the renderer under test.
+    const expectedSummary = [
+      'action: notion.write_property',
+      `target: "Soil Model Task" (${RESOLVED_ID})`,
+      'reversibility: reversible',
+      'args: property=Status, value=Approved',
+      'citations: (none)',
+    ].join('\n');
+    expect(row?.summary).toBe(expectedSummary);
+    expect(rec.posted).toEqual([
+      {
+        jid: 'slack:C0AAA1111',
+        text: [
+          'Approval required for a held internal action.',
+          '',
+          expectedSummary,
+          '',
+          `Reply \`approve ${TOKEN}\` to authorize or \`reject ${TOKEN}\` to drop it.`,
+          'An allow-listed approver must authorize this.',
+        ].join('\n'),
+      },
+    ]);
   });
 
   it('refuses (no hold, no execute) when the name resolves to zero matches', async () => {

@@ -466,4 +466,20 @@ describe('resolveNotionTarget — host-side name resolution', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it('throws on a single match whose id is not a valid 32-hex page id', async () => {
+    server.setResponse(
+      200,
+      JSON.stringify({
+        object: 'list',
+        results: [{ object: 'page', id: 'not-a-real-id', properties: {} }],
+      }),
+    );
+    await expect(
+      resolveNotionTarget('Soil Model Task', {
+        notionApiKey: 'notion-secret',
+        fetchDeps: loopbackDeps(server.port),
+      }),
+    ).rejects.toThrow(/malformed page id/);
+  });
 });

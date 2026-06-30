@@ -56,6 +56,7 @@ import {
   isStringArray,
   renderApprovalSummary,
   stringContainsRedLine,
+  usesNotionTarget,
   type OrgActionRecord,
   type Reversibility,
   type StakesHint,
@@ -126,10 +127,6 @@ function toClassifierRecord(
   };
 }
 
-function actionUsesNotionTarget(action: string): boolean {
-  return action.startsWith('notion.') || action === 'doc.draft';
-}
-
 interface ResolvedTarget {
   input: OrgActionRequestInput;
   targetTitle?: string;
@@ -150,7 +147,7 @@ async function resolveTargetIfNeeded(
   ctx: OrgActionRequestContext,
   deps: OrgActionGateDeps,
 ): Promise<ResolvedTarget | null> {
-  if (!actionUsesNotionTarget(input.action)) return { input };
+  if (!usesNotionTarget(input.action)) return { input };
   if (isNotionPageId(input.target_ref)) return { input };
 
   const query = input.target_query;

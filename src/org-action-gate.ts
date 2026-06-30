@@ -105,6 +105,13 @@ export function isNotionPageId(value: string): boolean {
   return NOTION_PAGE_ID.test(value);
 }
 
+// The single rule for "this action targets a Notion page id". Shared by the
+// classifier (which validates the id shape) and the host-side name resolver
+// (which decides whether to resolve a name at all), so the two can never drift.
+export function usesNotionTarget(action: string): boolean {
+  return action.startsWith('notion.') || action === 'doc.draft';
+}
+
 function isRedLine(record: OrgActionRecord): boolean {
   if (stringContainsRedLine(record.target_ref)) return true;
   // A red-line marker in a body/value field (e.g. a digest body about MRV or a
@@ -136,7 +143,7 @@ export function classifyOrgAction(record: OrgActionRecord): OrgActionVerdict {
     return 'execute';
   }
 
-  if (record.action.startsWith('notion.') || record.action === 'doc.draft') {
+  if (usesNotionTarget(record.action)) {
     if (!NOTION_PAGE_ID.test(record.target_ref)) return 'refuse';
     if (record.action === 'notion.write_property') {
       const property = record.canonical_args.property;

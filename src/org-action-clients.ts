@@ -19,7 +19,11 @@ import {
   resolveDeps,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
-import { GITHUB_REPO_ALLOWLIST, isPlainObject } from './org-action-gate.js';
+import {
+  GITHUB_REPO_ALLOWLIST,
+  isNotionPageId,
+  isPlainObject,
+} from './org-action-gate.js';
 
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -358,6 +362,14 @@ export async function resolveNotionTarget(
     throw new Error('org-action: Notion search result has no page id');
   }
   const id = page.id.replace(/-/g, '').toLowerCase();
+  // Throw a specific diagnostic rather than letting the classifier refuse the
+  // resolved id with a generic shape-refuse log line. The handler turns this
+  // throw into a refuse.
+  if (!isNotionPageId(id)) {
+    throw new Error(
+      `org-action: Notion search returned a malformed page id "${page.id}"`,
+    );
+  }
   return { kind: 'resolved', id, title: extractTitle(page) };
 }
 
