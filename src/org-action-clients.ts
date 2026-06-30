@@ -344,30 +344,47 @@ export async function resolveNotionTarget(
     url: `${NOTION_API_BASE}/search`,
     method: 'POST',
     headers: notionHeaders(deps.notionApiKey),
+    // page_size 10 bounds the response under the 256KB fetch cap (the default
+    // returns up to 100 full page objects, which overflows it). /v1/search is
+    // relevance-ranked, not a title-exact lookup: it returns pages even when no
+    // title equals the query, so the exact-title filter below is what makes
+    // resolution precise. 10 candidates lets a distinctive title surface while
+    // staying well under the body cap.
     body: JSON.stringify({
       query,
       filter: { property: 'object', value: 'page' },
+      page_size: 10,
     }),
     deps: fetchDeps,
   });
   const results = response.results;
-  if (!Array.isArray(results) || results.length === 0) {
+  if (!Array.isArray(results)) {
     return { kind: 'unresolved', reason: 'no_match' };
   }
-  if (results.length > 1) {
+  // Keep only exact (trimmed, case-insensitive) title matches, then apply
+  // one-match-or-abort over that filtered set. A relevance hit whose title does
+  // not equal the query is not the page the operator named.
+  const wanted = query.trim().toLowerCase();
+  const matches = results.filter((page): page is Record<string, unknown> => {
+    if (!isPlainObject(page) || typeof page.id !== 'string') return false;
+    const title = extractTitle(page);
+    return title !== null && title.trim().toLowerCase() === wanted;
+  });
+  if (matches.length === 0) {
+    return { kind: 'unresolved', reason: 'no_match' };
+  }
+  if (matches.length > 1) {
     return { kind: 'unresolved', reason: 'multiple_matches' };
   }
-  const page = results[0];
-  if (!isPlainObject(page) || typeof page.id !== 'string') {
-    throw new Error('org-action: Notion search result has no page id');
-  }
-  const id = page.id.replace(/-/g, '').toLowerCase();
+  const page = matches[0];
+  const rawId = page.id as string;
+  const id = rawId.replace(/-/g, '').toLowerCase();
   // Throw a specific diagnostic rather than letting the classifier refuse the
   // resolved id with a generic shape-refuse log line. The handler turns this
   // throw into a refuse.
   if (!isNotionPageId(id)) {
     throw new Error(
-      `org-action: Notion search returned a malformed page id "${page.id}"`,
+      `org-action: Notion search returned a malformed page id "${rawId}"`,
     );
   }
   return { kind: 'resolved', id, title: extractTitle(page) };

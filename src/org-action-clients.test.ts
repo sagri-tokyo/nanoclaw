@@ -389,6 +389,7 @@ describe('resolveNotionTarget — host-side name resolution', () => {
     expect(JSON.parse(req.body)).toEqual({
       query: 'Soil Model Task',
       filter: { property: 'object', value: 'page' },
+      page_size: 10,
     });
   });
 
@@ -417,18 +418,18 @@ describe('resolveNotionTarget — host-side name resolution', () => {
     expect(resolution).toEqual({ kind: 'unresolved', reason: 'no_match' });
   });
 
-  it('returns an unresolved multiple_matches sentinel on more than one result', async () => {
+  it('returns an unresolved multiple_matches sentinel when more than one page has the exact title', async () => {
     server.setResponse(
       200,
       searchResult([
         { id: DASHED_ID, title: 'Soil Model Task' },
         {
           id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
-          title: 'Soil Model Task 2',
+          title: 'Soil Model Task',
         },
       ]),
     );
-    const resolution = await resolveNotionTarget('Soil', {
+    const resolution = await resolveNotionTarget('Soil Model Task', {
       notionApiKey: 'notion-secret',
       fetchDeps: loopbackDeps(server.port),
     });
@@ -438,22 +439,33 @@ describe('resolveNotionTarget — host-side name resolution', () => {
     });
   });
 
-  it('resolves with a null title when the single match has no title text', async () => {
+  it('filters out a relevance-only hit whose title does not equal the query (no_match)', async () => {
+    // /v1/search is relevance-ranked, not title-exact: it returns pages whose
+    // title does not equal the query. Those must not resolve.
     server.setResponse(
       200,
-      JSON.stringify({
-        object: 'list',
-        results: [{ object: 'page', id: DASHED_ID, properties: {} }],
-      }),
+      searchResult([{ id: DASHED_ID, title: 'A Different Page' }]),
     );
     const resolution = await resolveNotionTarget('Soil Model Task', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({ kind: 'unresolved', reason: 'no_match' });
+  });
+
+  it('matches the exact title case-insensitively after trimming', async () => {
+    server.setResponse(
+      200,
+      searchResult([{ id: DASHED_ID, title: 'Soil Model Task' }]),
+    );
+    const resolution = await resolveNotionTarget('  soil model task  ', {
       notionApiKey: 'notion-secret',
       fetchDeps: loopbackDeps(server.port),
     });
     expect(resolution).toEqual({
       kind: 'resolved',
       id: HEX32,
-      title: null,
+      title: 'Soil Model Task',
     });
   });
 
@@ -472,7 +484,19 @@ describe('resolveNotionTarget — host-side name resolution', () => {
       200,
       JSON.stringify({
         object: 'list',
-        results: [{ object: 'page', id: 'not-a-real-id', properties: {} }],
+        results: [
+          {
+            object: 'page',
+            id: 'not-a-real-id',
+            properties: {
+              Title: {
+                id: 'title',
+                type: 'title',
+                title: [{ type: 'text', plain_text: 'Soil Model Task' }],
+              },
+            },
+          },
+        ],
       }),
     );
     await expect(
