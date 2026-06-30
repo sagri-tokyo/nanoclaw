@@ -119,6 +119,8 @@ class HarnessChannel implements Channel {
 }
 
 if (process.env.NANOCLAW_HARNESS === '1') {
-  logger.warn('HARNESS channel active (NANOCLAW_HARNESS=1) — not for production');
+  logger.warn(
+    'HARNESS channel active (NANOCLAW_HARNESS=1) — not for production',
+  );
   registerChannel('harness', (opts: ChannelOpts) => new HarnessChannel(opts));
 }

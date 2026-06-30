@@ -28,6 +28,8 @@ vi.mock('./config.js', () => ({
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
+  LITELLM_GATEWAY_PORT: 4000,
+  LITELLM_PER_TASK_BUDGET_USD: 1,
   DATA_DIR: '/tmp/nanoclaw-test-data',
   get GITHUB_APP_ID() {
     return githubConfig.GITHUB_APP_ID;
@@ -117,6 +119,18 @@ vi.mock('./credential-proxy.js', () => ({
   detectAuthMode: vi.fn(() => 'api-key'),
 }));
 
+// Mock litellm-gateway. Default: gateway disabled, so the existing
+// proxy+placeholder path is exercised unless a test opts in.
+const mockLitellmEnabled = vi.fn<() => boolean>(() => false);
+const mockMintVirtualKey = vi.fn<
+  (req: { taskId: string; channel: string }) => Promise<string>
+>(async () => 'sk-virtual-default');
+vi.mock('./litellm-gateway.js', () => ({
+  litellmEnabled: () => mockLitellmEnabled(),
+  mintVirtualKey: (req: { taskId: string; channel: string }) =>
+    mockMintVirtualKey(req),
+}));
+
 // Mock env-forward — default to no forwarded vars
 const mockGetForwardedEnv = vi.fn(() => ({}) as Record<string, string>);
 vi.mock('./env-forward.js', () => ({
@@ -189,6 +203,33 @@ function emitOutputMarker(
 ) {
   const json = JSON.stringify(output);
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
+}
+
+function envFlagsFrom(args: string[]): string[] {
+  const envFlags: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === '-e') envFlags.push(args[index + 1]);
+  }
+  return envFlags;
+}
+
+function envValue(args: string[], key: string): string | null {
+  for (const flag of envFlagsFrom(args)) {
+    if (flag.startsWith(`${key}=`)) return flag.slice(key.length + 1);
+  }
+  return null;
+}
+
+function readonlyMountFor(
+  args: string[],
+  containerPath: string,
+): string | null {
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] !== '-v') continue;
+    const spec = args[index + 1];
+    if (spec.split(':')[1] === containerPath) return spec;
+  }
+  return null;
 }
 
 describe('container-runner timeout behavior', () => {
@@ -777,16 +818,6 @@ describe('container-runner OTel telemetry wiring (RFC 0001 Phase 1)', () => {
     return args;
   }
 
-  function envValue(args: string[], key: string): string | null {
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] !== '-e') continue;
-      if (args[i + 1].startsWith(`${key}=`)) {
-        return args[i + 1].slice(key.length + 1);
-      }
-    }
-    return null;
-  }
-
   it('injects telemetry env with per-user/per-task resource attributes when enabled and endpoint set', async () => {
     process.env.CLAUDE_CODE_ENABLE_TELEMETRY = '1';
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://langfuse.internal:4318';
@@ -1068,27 +1099,6 @@ async function captureSpawnArgs(): Promise<string[]> {
   return args;
 }
 
-function readonlyMountFor(
-  args: string[],
-  containerPath: string,
-): string | null {
-  for (let index = 0; index < args.length - 1; index++) {
-    if (args[index] !== '-v') continue;
-    const spec = args[index + 1];
-    const parts = spec.split(':');
-    if (parts[1] === containerPath) return spec;
-  }
-  return null;
-}
-
-function envFlagsFrom(args: string[]): string[] {
-  const envFlags: string[] = [];
-  for (let index = 0; index < args.length - 1; index++) {
-    if (args[index] === '-e') envFlags.push(args[index + 1]);
-  }
-  return envFlags;
-}
-
 function credDirFromMkdirSync(): string {
   const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
     (call) =>
@@ -1171,6 +1181,141 @@ describe('container-runner GitHub token mounted-file delivery', () => {
       status: 'error',
       result: null,
       error: 'Container spawn error: spawn EACCES',
+    });
+  });
+});
+
+// LiteLLM budget-gateway routing (ADR-0003). When the gateway is enabled, the
+// container must point ANTHROPIC_BASE_URL at the LiteLLM port (not the proxy),
+// receive its per-task virtual key via a read-only mount (never via -e), and
+// see no OAuth/api-key placeholder. When disabled, the legacy proxy+placeholder
+// path is byte-for-byte unchanged.
+describe('container-runner LiteLLM gateway routing', () => {
+  const LITELLM_KEY_CONTAINER_PATH = '/run/nanoclaw/litellm_key';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    mockLitellmEnabled.mockReturnValue(false);
+    mockMintVirtualKey.mockReset();
+    mockMintVirtualKey.mockResolvedValue('sk-virtual-task-key');
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockLitellmEnabled.mockReturnValue(false);
+  });
+
+  async function captureArgs(): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  it('routes ANTHROPIC_BASE_URL at the LiteLLM port when enabled', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    const args = await captureArgs();
+
+    expect(envValue(args, 'ANTHROPIC_BASE_URL')).toBe(
+      'http://host.docker.internal:4000',
+    );
+  });
+
+  it('routes ANTHROPIC_BASE_URL at the credential proxy port when disabled', async () => {
+    mockLitellmEnabled.mockReturnValue(false);
+    const args = await captureArgs();
+
+    expect(envValue(args, 'ANTHROPIC_BASE_URL')).toBe(
+      'http://host.docker.internal:3001',
+    );
+  });
+
+  it('mints the virtual key with the container name as task id and group folder as channel', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    await captureArgs();
+
+    expect(mockMintVirtualKey).toHaveBeenCalledTimes(1);
+    const call = mockMintVirtualKey.mock.calls[0][0] as {
+      taskId: string;
+      channel: string;
+    };
+    expect(call.taskId).toMatch(/^nanoclaw-test-group-\d+$/);
+    expect(call.channel).toBe('test-group');
+  });
+
+  it('delivers the virtual key via a read-only mount, never via -e', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    const args = await captureArgs();
+
+    const mount = readonlyMountFor(args, LITELLM_KEY_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+
+    expect(args.join(' ')).not.toContain('sk-virtual-task-key');
+    expect(
+      envFlagsFrom(args).some((flag) => flag.startsWith('ANTHROPIC_API_KEY=')),
+    ).toBe(false);
+  });
+
+  it('sets no OAuth/api-key placeholder when enabled', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    const args = await captureArgs();
+
+    expect(envValue(args, 'ANTHROPIC_API_KEY')).toBeNull();
+    expect(envValue(args, 'CLAUDE_CODE_OAUTH_TOKEN')).toBeNull();
+  });
+
+  it('sets the api-key placeholder and no litellm mount when disabled', async () => {
+    mockLitellmEnabled.mockReturnValue(false);
+    const args = await captureArgs();
+
+    expect(envValue(args, 'ANTHROPIC_API_KEY')).toBe('placeholder');
+    expect(readonlyMountFor(args, LITELLM_KEY_CONTAINER_PATH)).toBeNull();
+    expect(mockMintVirtualKey).not.toHaveBeenCalled();
+  });
+
+  it('fails the spawn when mintVirtualKey throws, never falling back to the proxy path', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    mockMintVirtualKey.mockRejectedValue(new Error('gateway 503'));
+    (spawn as ReturnType<typeof vi.fn>).mockClear();
+
+    const result = await runContainerAgent(testGroup, testInput, () => {});
+
+    expect(result.status).toBe('error');
+    if (result.status !== 'error') throw new Error('expected error status');
+    expect(result.error).toContain('gateway 503');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('removes the credential dir holding the litellm key when the container exits', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    (fs.mkdirSync as ReturnType<typeof vi.fn>).mockClear();
+    (fs.rmSync as ReturnType<typeof vi.fn>).mockClear();
+
+    await captureArgs();
+
+    const credCall = (fs.mkdirSync as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) =>
+        typeof call[0] === 'string' &&
+        (call[0] as string).includes('nanoclaw-cred-'),
+    );
+    expect(credCall).toBeDefined();
+    const credDir = credCall![0] as string;
+    expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
+      recursive: true,
+      force: true,
     });
   });
 });

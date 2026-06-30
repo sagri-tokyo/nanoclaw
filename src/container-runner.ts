@@ -24,6 +24,7 @@ import {
   GITHUB_FORCE_PAT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  LITELLM_GATEWAY_PORT,
   NOTION_API_KEY,
   READER_RPC_PORT,
   TIMEZONE,
@@ -41,6 +42,7 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
+import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
 import { RegisteredGroup } from './types.js';
@@ -57,6 +59,12 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // process table or inspect the container.
 const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
 const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+
+// Container path the LiteLLM per-task virtual key is mounted at, read-only. The
+// container entrypoint re-exports its contents as ANTHROPIC_API_KEY before
+// launching the agent. Delivered via a mounted file for the same reason as the
+// GitHub token: never on the host `docker run` argv or in `docker inspect`.
+const LITELLM_KEY_CONTAINER_PATH = '/run/nanoclaw/litellm_key';
 
 // The image's default user is `node` (uid 1000, set by `USER node` in
 // container/Dockerfile). buildContainerArgs only passes `--user ${hostUid}`
@@ -593,6 +601,7 @@ interface BuiltContainerArgs {
 async function buildContainerArgs(
   plan: ContainerPlan,
   containerName: string,
+  channel: string,
 ): Promise<BuiltContainerArgs> {
   const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
@@ -605,6 +614,15 @@ async function buildContainerArgs(
   // per-container credential file is written, so a rejected spawn leaves no
   // token file orphaned on disk.
   const forwardedEnv = getForwardedEnv();
+
+  // LiteLLM routing is resolved before any credential file is written so that,
+  // when enabled, a mintVirtualKey failure aborts the spawn before the cred dir
+  // exists — there is nothing to orphan, and the spawn never falls back to the
+  // direct proxy path (a fail-open that would bypass budget enforcement).
+  const useLitellm = litellmEnabled();
+  const virtualKey = useLitellm
+    ? await mintVirtualKey({ taskId: containerName, channel })
+    : undefined;
 
   // Secrets go in via read-only mounted files, never `-e NAME=...` (see
   // writeCredFile for the why).
@@ -629,6 +647,15 @@ async function buildContainerArgs(
       containerPath: NOTION_API_KEY_CONTAINER_PATH,
     });
   }
+  if (virtualKey) {
+    // Entrypoint re-exports this as ANTHROPIC_API_KEY. Same mounted-file
+    // rationale as the other secrets.
+    mountedSecrets.push({
+      fileName: 'litellm_key',
+      value: virtualKey,
+      containerPath: LITELLM_KEY_CONTAINER_PATH,
+    });
+  }
 
   let credDir: string | undefined;
   if (mountedSecrets.length > 0) {
@@ -645,11 +672,22 @@ async function buildContainerArgs(
     }
   }
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  if (useLitellm) {
+    // Route API traffic through the LiteLLM budget gateway, which authenticates
+    // the per-task virtual key at its ingress (budget + attribution), then
+    // forwards to the credential proxy. The virtual key is delivered via the
+    // mounted file above, so no auth placeholder is set on this branch.
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${LITELLM_GATEWAY_PORT}`,
+    );
+  } else {
+    // Route API traffic through the credential proxy (containers never see real secrets)
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
+  }
 
   // Reader RPC: skills POST untrusted-content fetches here before using them
   args.push(
@@ -657,15 +695,17 @@ async function buildContainerArgs(
     `NANOCLAW_READER_RPC_URL=http://${CONTAINER_HOST_GATEWAY}:${READER_RPC_PORT}/rpc`,
   );
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+  if (!useLitellm) {
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -728,10 +768,27 @@ export async function runContainerAgent(
   const { mounts } = plan;
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const { args: containerArgs, credDir } = await buildContainerArgs(
-    plan,
-    containerName,
-  );
+  // buildContainerArgs mints the LiteLLM virtual key when the gateway is
+  // enabled. A mint failure must abort the spawn — never fall back to the
+  // direct-proxy path, which would silently bypass budget enforcement. The mint
+  // runs before any cred dir or process is created, so a failure here leaves
+  // nothing to reap; surface it as a structured error output rather than a
+  // rejection, matching the spawn-error contract below.
+  let built: BuiltContainerArgs;
+  try {
+    built = await buildContainerArgs(plan, containerName, group.folder);
+  } catch (err) {
+    logger.error(
+      { group: group.name, containerName, error: err },
+      'Failed to build container args (LiteLLM key mint or env resolution)',
+    );
+    return {
+      status: 'error',
+      result: null,
+      error: `Container spawn error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const { args: containerArgs, credDir } = built;
 
   // Remove the per-container credential directory once the container exits.
   // The container is `--rm`, so the only thing left to reap on the host is this
