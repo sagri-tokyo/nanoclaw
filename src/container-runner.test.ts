@@ -197,6 +197,16 @@ const testInput = {
   isMain: false,
 };
 
+// The write tokens (GitHub, Notion) are only mounted for the trusted-writer
+// capability profile (sagri-ai#312). The secret-delivery mechanism pins below
+// (mounted file not -e, shared cred dir, cleanup on spawn failure) are
+// profile-independent, so they run under this input to exercise a container
+// that actually receives both tokens.
+const trustedWriterInput: ContainerInput = {
+  ...testInput,
+  capabilityProfile: 'trusted-writer',
+};
+
 function emitOutputMarker(
   proc: ReturnType<typeof createFakeProcess>,
   output: ContainerOutput,
@@ -726,7 +736,11 @@ describe('container-runner GitHub token injection', () => {
         },
       );
     });
-    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const containerPromise = runContainerAgent(
+      testGroup,
+      trustedWriterInput,
+      () => {},
+    );
     const args = await argsPromise;
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
@@ -1091,7 +1105,11 @@ async function captureSpawnArgs(): Promise<string[]> {
       },
     );
   });
-  const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+  const containerPromise = runContainerAgent(
+    testGroup,
+    trustedWriterInput,
+    () => {},
+  );
   const args = await argsPromise;
   fakeProc.emit('close', 0);
   await vi.advanceTimersByTimeAsync(10);
@@ -1170,7 +1188,11 @@ describe('container-runner GitHub token mounted-file delivery', () => {
       throw new Error('spawn EACCES');
     });
 
-    const result = await runContainerAgent(testGroup, testInput, () => {});
+    const result = await runContainerAgent(
+      testGroup,
+      trustedWriterInput,
+      () => {},
+    );
 
     const credDir = credDirFromMkdirSync();
     expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
@@ -1216,7 +1238,11 @@ describe('container-runner LiteLLM gateway routing', () => {
         },
       );
     });
-    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const containerPromise = runContainerAgent(
+      testGroup,
+      trustedWriterInput,
+      () => {},
+    );
     const args = await argsPromise;
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
@@ -1384,7 +1410,11 @@ describe('container-runner NOTION_API_KEY mounted-file delivery', () => {
       throw new Error('spawn EACCES');
     });
 
-    const result = await runContainerAgent(testGroup, testInput, () => {});
+    const result = await runContainerAgent(
+      testGroup,
+      trustedWriterInput,
+      () => {},
+    );
 
     const credDir = credDirFromMkdirSync();
     expect(fs.rmSync).toHaveBeenCalledWith(credDir, {
@@ -1444,5 +1474,108 @@ describe('container-runner shared cred dir for multiple secrets', () => {
     const notionMount = readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH);
     expect(githubMount!.split(':')[0]).toBe(`${credDir}/github_token`);
     expect(notionMount!.split(':')[0]).toBe(`${credDir}/notion_api_key`);
+  });
+});
+
+// Enforcement pin (sagri-ai#312): the per-task capability profile gates the two
+// write tokens. `operator` (the fail-closed default) mounts neither the GitHub
+// nor the Notion token, so the only working write path is the host-executed
+// `org_action` gate. `trusted-writer` keeps both, exactly as before.
+describe('container-runner capability profile write-token gating', () => {
+  const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+  const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
+  const LITELLM_KEY_CONTAINER_PATH = '/run/nanoclaw/litellm_key';
+  let previousGithubToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    previousGithubToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = 'ghs_livetoken1234567890';
+    mockNotionApiKey = 'secret-notion-key-123';
+    mockLitellmEnabled.mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    mockNotionApiKey = undefined;
+    mockLitellmEnabled.mockReturnValue(false);
+    if (previousGithubToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = previousGithubToken;
+    }
+  });
+
+  async function captureArgsForInput(
+    input: ContainerInput,
+  ): Promise<string[]> {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, input, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+    return args;
+  }
+
+  const operatorInput: ContainerInput = {
+    prompt: 'Hello',
+    groupFolder: 'test-group',
+    chatJid: 'test@g.us',
+    isMain: false,
+    capabilityProfile: 'operator',
+  };
+
+  const trustedWriterInput: ContainerInput = {
+    prompt: 'Hello',
+    groupFolder: 'test-group',
+    chatJid: 'test@g.us',
+    isMain: false,
+    capabilityProfile: 'trusted-writer',
+  };
+
+  it('mounts no GitHub token for the operator profile', async () => {
+    const args = await captureArgsForInput(operatorInput);
+    expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).toBeNull();
+  });
+
+  it('mounts no Notion token for the operator profile', async () => {
+    const args = await captureArgsForInput(operatorInput);
+    expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).toBeNull();
+  });
+
+  it('still mounts the LiteLLM key for the operator profile when the gateway is enabled', async () => {
+    mockLitellmEnabled.mockReturnValue(true);
+    const args = await captureArgsForInput(operatorInput);
+    const mount = readonlyMountFor(args, LITELLM_KEY_CONTAINER_PATH);
+    expect(mount).not.toBeNull();
+    expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  it('mounts both write tokens for the trusted-writer profile', async () => {
+    const args = await captureArgsForInput(trustedWriterInput);
+    expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).not.toBeNull();
+    expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).not.toBeNull();
+  });
+
+  it('resolves an undefined profile on the interactive path to operator (fail-closed)', async () => {
+    const interactiveInput: ContainerInput = {
+      prompt: 'Hello',
+      groupFolder: 'test-group',
+      chatJid: 'test@g.us',
+      isMain: false,
+      isScheduledTask: false,
+    };
+    const args = await captureArgsForInput(interactiveInput);
+    expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).toBeNull();
+    expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).toBeNull();
   });
 });

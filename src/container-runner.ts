@@ -90,6 +90,14 @@ export interface ContainerInput {
   assistantName?: string;
   script?: string;
   /**
+   * Per-task capability profile (sagri-ai#312). Fail-closed: an absent value is
+   * resolved to `operator` by `buildContainerPlan`. `operator` mounts neither
+   * the GitHub nor the Notion write token, forcing every org write through the
+   * host-executed `org_action` gate. `trusted-writer` keeps both tokens mounted
+   * and is opt-in for the poller ScheduledTasks that write directly.
+   */
+  capabilityProfile?: 'operator' | 'trusted-writer';
+  /**
    * Triggering Slack user id (NewMessage.sender), used as OTel enduser.id when
    * telemetry is enabled (RFC 0001 Phase 1). Absent for scheduled tasks and
    * any spawn with no human trigger — the telemetry layer substitutes a
@@ -169,6 +177,12 @@ interface ContainerPlan {
   mounts: VolumeMount[];
   /** Env vars this group needs injected via `-e` (not settings.json). */
   extraEnv: Record<string, string>;
+  /**
+   * Resolved per-task capability profile (sagri-ai#312). Fail-closed: an absent
+   * `input.capabilityProfile` resolves to `operator` here, so a misdeclared or
+   * un-migrated task never receives the write tokens.
+   */
+  capabilityProfile: 'operator' | 'trusted-writer';
 }
 
 function buildContainerPlan(
@@ -178,6 +192,7 @@ function buildContainerPlan(
   const isMain = input.isMain;
   const mounts: VolumeMount[] = [];
   const extraEnv: Record<string, string> = {};
+  const capabilityProfile = input.capabilityProfile ?? 'operator';
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
 
@@ -514,7 +529,7 @@ function buildContainerPlan(
     );
   }
 
-  return { mounts, extraEnv };
+  return { mounts, extraEnv, capabilityProfile };
 }
 
 async function resolveGitHubToken(): Promise<string | undefined> {
@@ -625,9 +640,14 @@ async function buildContainerArgs(
     : undefined;
 
   // Secrets go in via read-only mounted files, never `-e NAME=...` (see
-  // writeCredFile for the why).
-  const githubToken = await resolveGitHubToken();
-  const notionApiKey = NOTION_API_KEY;
+  // writeCredFile for the why). The two org-write tokens are gated on the
+  // capability profile (sagri-ai#312): only `trusted-writer` tasks receive
+  // them. An `operator` container has no write credential, so the only working
+  // write path is the host-executed `org_action` gate. The LiteLLM key below is
+  // unaffected — every profile keeps its budget-gateway key.
+  const trustedWriter = plan.capabilityProfile === 'trusted-writer';
+  const githubToken = trustedWriter ? await resolveGitHubToken() : undefined;
+  const notionApiKey = trustedWriter ? NOTION_API_KEY : undefined;
   const mountedSecrets: MountedSecret[] = [];
   if (githubToken) {
     // GitHub repo scope is intentionally not narrowed at mint time

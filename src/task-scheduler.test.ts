@@ -766,3 +766,89 @@ describe('runTask consecutive-failure suppression', () => {
     expect(statuses).toEqual(['error']);
   });
 });
+
+describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+    const base = {
+      id: 'cap-fwd',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-05-15T00:00:00.000Z',
+      ...overrides,
+    };
+    createTask(base);
+    return getTaskById(base.id) as ScheduledTask;
+  }
+
+  function makeGroup(folder: string): RegisteredGroup {
+    return {
+      name: folder,
+      folder,
+      trigger: '@bot',
+      added_at: '2026-05-15T00:00:00.000Z',
+    };
+  }
+
+  const successOutput: ContainerOutput = {
+    status: 'success',
+    result: 'done',
+  };
+
+  async function capturedProfileFor(
+    task: ScheduledTask,
+  ): Promise<unknown> {
+    let captured: unknown;
+    const capturingRunner = async (
+      _group: RegisteredGroup,
+      input: { capabilityProfile?: unknown },
+      _onProcess: unknown,
+      onOutput?: (output: ContainerOutput) => Promise<void>,
+    ): Promise<ContainerOutput> => {
+      captured = input.capabilityProfile;
+      if (onOutput) await onOutput(successOutput);
+      return successOutput;
+    };
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      },
+      capturingRunner as never,
+    );
+    return captured;
+  }
+
+  it('forwards a trusted-writer task profile to the container input', async () => {
+    const task = makeTask({
+      id: 'cap-trusted',
+      capability_profile: 'trusted-writer',
+    });
+    expect(await capturedProfileFor(task)).toBe('trusted-writer');
+  });
+
+  it('resolves a task with no capability_profile to operator (fail-closed)', async () => {
+    const task = makeTask({ id: 'cap-none' });
+    delete (task as { capability_profile?: unknown }).capability_profile;
+    expect(await capturedProfileFor(task)).toBe('operator');
+  });
+});

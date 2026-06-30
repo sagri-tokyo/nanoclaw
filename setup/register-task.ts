@@ -25,9 +25,14 @@ interface RegisterTaskArgs {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  capabilityProfile: NonNullable<ScheduledTask['capability_profile']>;
   runbookUrl?: string;
   postAfterFails?: number;
 }
+
+const CAPABILITY_PROFILES: ReadonlyArray<
+  NonNullable<ScheduledTask['capability_profile']>
+> = ['operator', 'trusted-writer'];
 
 export interface UpsertTaskInput {
   id: string;
@@ -37,6 +42,12 @@ export interface UpsertTaskInput {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
+  /**
+   * Per-task capability profile (sagri-ai#312). Fail-closed: `undefined`
+   * stores `operator` on create, which denies the container the org-write
+   * tokens. A defined value overwrites the row's profile on update.
+   */
+  capabilityProfile?: NonNullable<ScheduledTask['capability_profile']>;
   /**
    * `undefined` leaves the existing row's `runbook_url` untouched on update
    * and stores `null` on create. A non-empty string is persisted as-is.
@@ -70,6 +81,7 @@ function parseArgs(args: string[]): RegisterTaskArgs {
     scheduleType: 'cron',
     scheduleValue: '',
     contextMode: 'isolated',
+    capabilityProfile: 'operator',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -97,6 +109,22 @@ function parseArgs(args: string[]): RegisterTaskArgs {
       case '--context-mode': {
         const raw = (args[++i] || '') as ScheduledTask['context_mode'];
         result.contextMode = raw;
+        break;
+      }
+      case '--capability-profile': {
+        const raw = args[++i];
+        if (
+          raw === undefined ||
+          !CAPABILITY_PROFILES.includes(
+            raw as NonNullable<ScheduledTask['capability_profile']>,
+          )
+        ) {
+          throw new RegisterTaskArgError(
+            `--capability-profile must be one of ${CAPABILITY_PROFILES.join(', ')} (got ${raw ?? '<missing>'})`,
+          );
+        }
+        result.capabilityProfile =
+          raw as NonNullable<ScheduledTask['capability_profile']>;
         break;
       }
       case '--runbook-url': {
@@ -209,6 +237,9 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     if (input.postAfterFails !== undefined) {
       taskUpdates.failure_post_threshold = input.postAfterFails;
     }
+    if (input.capabilityProfile !== undefined) {
+      taskUpdates.capability_profile = input.capabilityProfile;
+    }
     updateTask(input.id, taskUpdates);
     return 'updated';
   }
@@ -227,6 +258,7 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     created_at: new Date().toISOString(),
     runbook_url: input.runbookUrl ?? null,
     failure_post_threshold: input.postAfterFails,
+    capability_profile: input.capabilityProfile ?? 'operator',
   });
   return 'created';
 }
@@ -299,6 +331,7 @@ export async function run(args: string[]): Promise<void> {
     scheduleType: parsed.scheduleType,
     scheduleValue: parsed.scheduleValue,
     contextMode: parsed.contextMode,
+    capabilityProfile: parsed.capabilityProfile,
     runbookUrl: parsed.runbookUrl,
     postAfterFails: parsed.postAfterFails,
   });
@@ -317,6 +350,7 @@ export async function run(args: string[]): Promise<void> {
     SCHEDULE_TYPE: parsed.scheduleType,
     SCHEDULE_VALUE: parsed.scheduleValue,
     CONTEXT_MODE: parsed.contextMode,
+    CAPABILITY_PROFILE: parsed.capabilityProfile,
     ACTION: action,
     STATUS: 'success',
     LOG: 'logs/setup.log',

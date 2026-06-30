@@ -329,6 +329,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        capabilityProfile: task.capability_profile ?? 'operator',
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

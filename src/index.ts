@@ -650,6 +650,10 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         triggeringUserId,
+        // Interactive (operator-triggered) messages never get the org-write
+        // tokens; all writes route through the host-executed org_action gate
+        // (sagri-ai#312).
+        capabilityProfile: 'operator',
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
