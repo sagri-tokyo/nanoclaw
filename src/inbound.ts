@@ -37,6 +37,14 @@ export interface InboundDeps {
     chatJid: string,
     msg: NewMessage,
   ) => void | Promise<void>;
+  /**
+   * Approval-reply intercept (D2.4). Returns true when the message was an
+   * `approve <token>` / `reject <token>` keyword (handled — execution is
+   * fire-and-forget after the synchronous classification), false when it was
+   * ordinary text the dispatcher should keep processing. Optional so
+   * deployments without the org-action gate are unaffected.
+   */
+  handleApproval?: (chatJid: string, msg: NewMessage) => boolean;
   loadSenderAllowlist: () => SenderAllowlistConfig;
 }
 
@@ -82,6 +90,10 @@ export function handleInboundMessage(
     Promise.resolve(deps.handleAbort(chatJid, msg)).catch((err) =>
       logger.error({ err, chatJid }, 'Abort handler error'),
     );
+    return;
+  }
+
+  if (deps.handleApproval && deps.handleApproval(chatJid, msg)) {
     return;
   }
 

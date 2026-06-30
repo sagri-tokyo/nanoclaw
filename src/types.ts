@@ -71,6 +71,11 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  // Slack `bot_id` of the sender, when the message came from any bot/webhook
+  // (not just our own user). Carried so the approval classifier can never treat
+  // a third-party bot message as a human approver (D2.4). `is_bot_message` is
+  // set true whenever this is present.
+  bot_id?: string;
   files?: MessageFileBundle;
   // True when the source is a 1:1 DM (Slack `channel_type === 'im'`,
   // WhatsApp/Telegram personal chats). Channels populate this so the
@@ -80,6 +85,35 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+}
+
+// A held org-action awaiting approval (D2.4). Host-minted, host-owned. The
+// token is never serialized into any agent-readable IPC/tasks file — only into
+// messages.db and the host-posted Slack prompt.
+export type PendingActionState =
+  | 'pending'
+  | 'approved'
+  | 'consumed'
+  | 'denied'
+  | 'expired';
+
+export interface PendingActionRow {
+  token: string;
+  source_group: string;
+  chat_jid: string;
+  action: string;
+  target_ref: string;
+  reversibility: 'reversible' | 'draft';
+  stakes_hint: 'safe' | 'gated';
+  citation_refs: string;
+  canonical_args: string;
+  summary: string;
+  requester: string;
+  state: PendingActionState;
+  created_at: string;
+  expires_at: string;
+  approved_by: string | null;
+  consumed_at: string | null;
 }
 
 export interface ScheduledTask {

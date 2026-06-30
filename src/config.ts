@@ -5,9 +5,12 @@ import path from 'path';
 import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
-// Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
+// Read non-secret config values from .env (falls back to process.env). This
+// list carries no secrets. The Anthropic credentials are held by the credential
+// proxy (credential-proxy.ts); the GitHub App credentials, GitHub token, and
+// NOTION_API_KEY are loaded lower in this file from CREDENTIALS_DIRECTORY
+// (systemd LoadCredential=) and delivered to containers as read-only mounted
+// files (see container-runner.ts), never via `-e`.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
@@ -45,6 +48,15 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   '.config',
   'nanoclaw',
   'sender-allowlist.json',
+);
+// Approver allowlist (D2.4). Fail-CLOSED: missing/invalid => deny-all. Stored
+// OUTSIDE project root, never mounted into containers (tamper-proof from
+// agents, like the mount/sender allowlists).
+export const APPROVER_ALLOWLIST_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'approver-allowlist.json',
 );
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
@@ -200,3 +212,5 @@ export const GITHUB_APP_PRIVATE_KEY =
 export const GITHUB_APP_INSTALLATION_ID =
   process.env.GITHUB_APP_INSTALLATION_ID ||
   loadCredentialsDirectory('GITHUB_APP_INSTALLATION_ID');
+export const NOTION_API_KEY =
+  process.env.NOTION_API_KEY || loadCredentialsDirectory('NOTION_API_KEY');

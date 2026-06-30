@@ -172,6 +172,38 @@ describe('SlackChannel', () => {
     vi.restoreAllMocks();
   });
 
+  // --- Bot/self detection (D2.4 approver-safety) ---
+
+  describe('bot/self detection carries bot_id', () => {
+    it('flags a third-party bot message as is_bot_message and carries bot_id', async () => {
+      const onMessage = vi.fn();
+      const channel = new SlackChannel(createTestOpts({ onMessage }));
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ user: '', botId: 'B_THIRD_PARTY' }),
+      );
+
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      const msg = onMessage.mock.calls[0][1] as NewMessage;
+      expect(msg.is_bot_message).toBe(true);
+      expect(msg.bot_id).toBe('B_THIRD_PARTY');
+    });
+
+    it('leaves a human message un-flagged with no bot_id', async () => {
+      const onMessage = vi.fn();
+      const channel = new SlackChannel(createTestOpts({ onMessage }));
+      await channel.connect();
+
+      await triggerMessageEvent(createMessageEvent({ user: 'U_USER_456' }));
+
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      const msg = onMessage.mock.calls[0][1] as NewMessage;
+      expect(msg.is_bot_message).toBe(false);
+      expect(msg.bot_id).toBeUndefined();
+    });
+  });
+
   // --- Connection lifecycle ---
 
   describe('connection lifecycle', () => {
@@ -341,7 +373,11 @@ describe('SlackChannel', () => {
           sender: 'B_OTHER_BOT',
           sender_name: 'B_OTHER_BOT',
           is_from_me: false,
-          is_bot_message: false,
+          // A third-party bot is not our assistant (is_from_me false) but IS a
+          // bot — it must be flagged so the approval classifier never treats it
+          // as a human approver (D2.4 / ADR-0002 finding 5).
+          is_bot_message: true,
+          bot_id: 'B_OTHER_BOT',
         }),
       );
     });
@@ -1222,7 +1258,8 @@ describe('SlackChannel', () => {
         sender_name: 'B_OTHER_BOT',
         thread_id: '100.0',
         is_from_me: false,
-        is_bot_message: false,
+        is_bot_message: true,
+        bot_id: 'B_OTHER_BOT',
       });
     });
 

@@ -13,6 +13,14 @@ import {
   logger,
   type ActionRecord,
 } from './logger.js';
+import {
+  isPlainObject,
+  isReversibility,
+  isStakesHint,
+  isStringArray,
+  type Reversibility,
+  type StakesHint,
+} from './org-action-gate.js';
 import { RegisteredGroup } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
@@ -61,6 +69,26 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  /**
+   * Drain-time handler for a gated/safe `org_action` request (D2.4). Given the
+   * record the container dropped plus the verified source-group identity and
+   * the chat jid that owns the source group, the host re-classifies and either
+   * executes (safe), holds (gated, posts a Slack approval prompt), or refuses
+   * (red line / allowlist). Optional so non-Sagri deployments need not wire it;
+   * an `org_action` request with no handler is rejected.
+   */
+  onOrgAction?: (
+    record: {
+      action: string;
+      target_ref: string;
+      reversibility: Reversibility;
+      stakes_hint: StakesHint;
+      citation_refs: string[];
+      canonical_args: Record<string, unknown>;
+    },
+    sourceGroup: string,
+    chatJid: string,
+  ) => Promise<void>;
   /**
    * Optional override for the action-record sink. Defaults to
    * `logger.action`. Exists so tests can observe emitted records via an
@@ -218,6 +246,12 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    action?: string;
+    target_ref?: string;
+    reversibility?: string;
+    stakes_hint?: string;
+    citation_refs?: unknown;
+    canonical_args?: unknown;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -653,6 +687,110 @@ export async function processTaskIpc(
         emitReject('ipc_register_group', 'MissingRequiredField');
       }
       break;
+
+    case 'org_action': {
+      if (!deps.onOrgAction) {
+        logger.warn(
+          { sourceGroup },
+          'org_action received but no handler is wired',
+        );
+        emitReject('ipc_org_action', 'Unauthorized');
+        break;
+      }
+      if (
+        typeof data.action !== 'string' ||
+        typeof data.target_ref !== 'string' ||
+        typeof data.reversibility !== 'string' ||
+        typeof data.stakes_hint !== 'string'
+      ) {
+        logger.warn({ sourceGroup }, 'Invalid org_action — missing fields');
+        emitReject('ipc_org_action', 'MissingRequiredField');
+        break;
+      }
+      // reversibility/stakes_hint are closed enums; an out-of-set value must be
+      // a hard reject, never coerced. A coerced stakes_hint='safe' would route a
+      // gated action through the execute path; a coerced reversibility hides the
+      // true tier from the approver summary.
+      if (
+        !isReversibility(data.reversibility) ||
+        !isStakesHint(data.stakes_hint)
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'Invalid org_action — reversibility/stakes_hint outside the allowed set',
+        );
+        emitReject('ipc_org_action', 'InvalidPayload');
+        break;
+      }
+      const reversibility: Reversibility = data.reversibility;
+      const stakesHint: StakesHint = data.stakes_hint;
+      // canonical_args is the exact arg set the host replays. A malformed
+      // value must be a hard reject, never coerced to {} — a coerced {} would
+      // pass the gate, consume the approval, and then drop the write silently.
+      if (!isPlainObject(data.canonical_args)) {
+        logger.warn(
+          { sourceGroup },
+          'Invalid org_action — canonical_args must be a non-array object',
+        );
+        emitReject('ipc_org_action', 'InvalidPayload');
+        break;
+      }
+      const canonicalArgs: Record<string, unknown> = data.canonical_args;
+      if (
+        data.citation_refs !== undefined &&
+        !isStringArray(data.citation_refs)
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'Invalid org_action — citation_refs must be a string array',
+        );
+        emitReject('ipc_org_action', 'InvalidPayload');
+        break;
+      }
+      const citationRefs: string[] = data.citation_refs ?? [];
+      // The chat jid that owns the source group is where the approval prompt
+      // posts. For main, fall back to the requesting group's own jid.
+      let chatJid: string | undefined;
+      for (const [jid, group] of Object.entries(registeredGroups)) {
+        if (group.folder === sourceGroup) {
+          chatJid = jid;
+          break;
+        }
+      }
+      if (!chatJid) {
+        logger.warn(
+          { sourceGroup },
+          'org_action: source group not resolvable to a chat jid',
+        );
+        emitReject('ipc_org_action', 'TargetGroupNotRegistered');
+        break;
+      }
+      await deps.onOrgAction(
+        {
+          action: data.action,
+          target_ref: data.target_ref,
+          reversibility,
+          stakes_hint: stakesHint,
+          citation_refs: citationRefs,
+          canonical_args: canonicalArgs,
+        },
+        sourceGroup,
+        chatJid,
+      );
+      emitIpcAction(sink, {
+        level: 'info',
+        session_id: sourceGroup,
+        trigger_source: sourceGroup,
+        tool: 'ipc_org_action',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(data.action),
+        duration_ms: Date.now() - ipcStart,
+        outcome: 'ok',
+        error_class: null,
+        group: sourceGroup,
+      });
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

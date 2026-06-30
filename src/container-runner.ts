@@ -25,6 +25,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   LITELLM_GATEWAY_PORT,
+  NOTION_API_KEY,
   READER_RPC_PORT,
   TIMEZONE,
 } from './config.js';
@@ -57,6 +58,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // GITHUB_TOKEN=...`, which exposes a live token to anyone who can read the
 // process table or inspect the container.
 const GITHUB_TOKEN_CONTAINER_PATH = '/run/nanoclaw/github_token';
+const NOTION_API_KEY_CONTAINER_PATH = '/run/nanoclaw/notion_api_key';
 
 // Container path the LiteLLM per-task virtual key is mounted at, read-only. The
 // container entrypoint re-exports its contents as ANTHROPIC_API_KEY before
@@ -534,17 +536,16 @@ async function resolveGitHubToken(): Promise<string | undefined> {
 }
 
 /**
- * Create a per-container host directory (mode 0700) to hold credential files
- * mounted read-only into the container instead of passed via `-e`. Owned by the
- * uid the container will run as (see resolveContainerUid). The caller removes it
- * after the container exits.
- *
- * Random suffix guarantees per-container isolation even if two containers for
- * the same group spawn within the same millisecond (containerName carries only
- * a Date.now() suffix), so one container's cleanup cannot delete a dir another
- * container is still reading.
+ * Create the per-container host directory that holds mounted-file secrets, owned
+ * by the uid the container runs as and mode 0700. A single dir holds every
+ * secret for one container so cleanup is one rmSync. Returns the directory path
+ * so the caller can remove it after the container exits.
  */
-function createCredDir(containerName: string): string {
+function makeCredDir(containerName: string, containerUid: number): string {
+  // Random suffix guarantees per-container isolation even if two containers for
+  // the same group spawn within the same millisecond (containerName carries
+  // only a Date.now() suffix), so one container's cleanup cannot delete a dir
+  // another container is still reading.
   const credDir = path.join(
     os.tmpdir(),
     `nanoclaw-cred-${containerName}-${randomBytes(6).toString('hex')}`,
@@ -554,38 +555,46 @@ function createCredDir(containerName: string): string {
   // chown targets a *different* uid only in the root-runner case
   // (resolveContainerUid returns 1000 while getuid is 0) — root has CAP_CHOWN,
   // so it is permitted. Every non-root case is a chown-to-self that needs no
-  // capability. gid is set to containerUid too, but each file is 0600
-  // owner-only so gid never gates the container read.
-  const containerUid = resolveContainerUid();
+  // capability. chmod after chown re-asserts 0700 in case mkdirSync's mode was
+  // masked by the runner's umask.
   fs.chownSync(credDir, containerUid, containerUid);
-  // chmod after chown: mkdir mode is masked by umask, so re-assert 0700 to
-  // guarantee the dir is owner-only regardless of the runner's umask.
   fs.chmodSync(credDir, 0o700);
-
   return credDir;
 }
 
 /**
- * Write a single secret into a per-container cred dir as a mode-0600 file owned
- * by the container uid. Used for the GitHub token and the LiteLLM virtual key;
- * both share one dir so the existing cleanup reaps every secret at once.
+ * Write one secret into an existing cred dir as a mode-0600 file owned by the
+ * uid the container runs as, so it can be mounted read-only instead of passed
+ * via `-e` (which would expose the live value on the host argv and in
+ * `docker inspect`).
  */
-function writeCredFile(credDir: string, name: string, value: string): void {
-  const filePath = path.join(credDir, name);
+function writeCredFile(
+  credDir: string,
+  fileName: string,
+  value: string,
+  containerUid: number,
+): void {
+  const filePath = path.join(credDir, fileName);
   fs.writeFileSync(filePath, value, { mode: 0o600 });
-  const containerUid = resolveContainerUid();
+
+  // gid is set to containerUid too, but the file is 0600 owner-only so gid never
+  // gates the container read. chmod after chown re-asserts 0600 in case
+  // writeFileSync's mode was masked by the runner's umask.
   fs.chownSync(filePath, containerUid, containerUid);
-  // chmod after chown: writeFileSync mode is masked by umask, so re-assert 0600
-  // to guarantee the secret is owner-only regardless of the runner's umask.
   fs.chmodSync(filePath, 0o600);
+}
+
+interface MountedSecret {
+  /** File name inside the cred dir (and basename of the read-only mount). */
+  fileName: string;
+  value: string;
+  /** Absolute path the file is mounted at inside the container. */
+  containerPath: string;
 }
 
 interface BuiltContainerArgs {
   args: string[];
-  /**
-   * Per-container host directory holding credential files (GitHub token and/or
-   * LiteLLM virtual key), if any were written.
-   */
+  /** Per-container host directory holding the mounted-file secrets, if any. */
   credDir?: string;
 }
 
@@ -615,42 +624,51 @@ async function buildContainerArgs(
     ? await mintVirtualKey({ taskId: containerName, channel })
     : undefined;
 
+  // Secrets go in via read-only mounted files, never `-e NAME=...` (see
+  // writeCredFile for the why).
   const githubToken = await resolveGitHubToken();
+  const notionApiKey = NOTION_API_KEY;
+  const mountedSecrets: MountedSecret[] = [];
+  if (githubToken) {
+    // GitHub repo scope is intentionally not narrowed at mint time
+    // (mintInstallationToken(..., [])): the container skills hit arbitrary repos
+    // at runtime, so scope is governed by the GitHub App installation's repo
+    // allowlist, not the token request.
+    mountedSecrets.push({
+      fileName: 'github_token',
+      value: githubToken,
+      containerPath: GITHUB_TOKEN_CONTAINER_PATH,
+    });
+  }
+  if (notionApiKey) {
+    mountedSecrets.push({
+      fileName: 'notion_api_key',
+      value: notionApiKey,
+      containerPath: NOTION_API_KEY_CONTAINER_PATH,
+    });
+  }
+  if (virtualKey) {
+    // Entrypoint re-exports this as ANTHROPIC_API_KEY. Same mounted-file
+    // rationale as the other secrets.
+    mountedSecrets.push({
+      fileName: 'litellm_key',
+      value: virtualKey,
+      containerPath: LITELLM_KEY_CONTAINER_PATH,
+    });
+  }
+
   let credDir: string | undefined;
-  if (githubToken || virtualKey) {
-    // One cred dir per container holds every mounted secret; the caller's
-    // cleanup reaps the whole dir once buildContainerArgs returns it. Until
-    // then, any write failure must remove the dir itself, so a partial secret
-    // is never orphaned on a throw the caller has no handle to clean up.
-    const dir = createCredDir(containerName);
-    credDir = dir;
-    const mountSecret = (
-      fileName: string,
-      value: string,
-      containerPath: string,
-    ): void => {
-      writeCredFile(dir, fileName, value);
-      args.push(...readonlyMountArgs(path.join(dir, fileName), containerPath));
-    };
-    try {
-      if (githubToken) {
-        // Deliver via a mounted file rather than `-e GITHUB_TOKEN=...` so the
-        // live token never appears in the host argv or `docker inspect`. The
-        // container entrypoint re-exports it from the mount. Repo scope is
-        // intentionally not narrowed at mint time (mintInstallationToken(...,
-        // [])): the container skills hit arbitrary repos at runtime, so scope
-        // is governed by the GitHub App installation's repo allowlist, not the
-        // token request.
-        mountSecret('github_token', githubToken, GITHUB_TOKEN_CONTAINER_PATH);
-      }
-      if (virtualKey) {
-        // Same mounted-file rationale as the GitHub token. The entrypoint
-        // re-exports it as ANTHROPIC_API_KEY.
-        mountSecret('litellm_key', virtualKey, LITELLM_KEY_CONTAINER_PATH);
-      }
-    } catch (error) {
-      fs.rmSync(dir, { recursive: true, force: true });
-      throw error;
+  if (mountedSecrets.length > 0) {
+    const containerUid = resolveContainerUid();
+    credDir = makeCredDir(containerName, containerUid);
+    for (const secret of mountedSecrets) {
+      writeCredFile(credDir, secret.fileName, secret.value, containerUid);
+      args.push(
+        ...readonlyMountArgs(
+          path.join(credDir, secret.fileName),
+          secret.containerPath,
+        ),
+      );
     }
   }
 
