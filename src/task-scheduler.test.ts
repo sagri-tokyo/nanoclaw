@@ -532,6 +532,55 @@ describe('runTask consecutive-failure suppression', () => {
     expect(sent).toEqual([]);
   });
 
+  it('closes the container on an error-only result so the group queue does not wedge', async () => {
+    vi.useFakeTimers();
+    try {
+      // failure_post_threshold high enough that the single failure is suppressed
+      // from Slack; we only care about the container-close path here.
+      const task = makeTask({ id: 'error-close', failure_post_threshold: 99 });
+      let resolveRunner: (() => void) | null = null;
+      const closeStdin = vi.fn((_jid: string) => {
+        if (resolveRunner) resolveRunner();
+      });
+      // Mirror a real container that streams an error result and then stays
+      // alive (hung in waitForIpcMessage) until the host sends _close via
+      // closeStdin. Without the error-branch scheduleClose, that _close never
+      // comes and the runner never resolves, wedging the group queue.
+      const hangingRunner = async (
+        _group: RegisteredGroup,
+        _input: unknown,
+        _onProcess: unknown,
+        onOutput?: (output: ContainerOutput) => Promise<void>,
+      ): Promise<ContainerOutput> => {
+        if (onOutput) await onOutput(errorOutput);
+        await new Promise<void>((resolve) => {
+          resolveRunner = resolve;
+        });
+        return errorOutput;
+      };
+      const runPromise = _runTaskForTests(
+        task,
+        {
+          registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+          getSessions: () => ({}),
+          queue: {
+            enqueueTask: () => {},
+            closeStdin,
+            notifyIdle: () => {},
+          } as never,
+          onProcess: () => {},
+          sendMessage: async () => {},
+        },
+        hangingRunner,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(closeStdin).toHaveBeenCalledWith('C123@slack');
+      await runPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('posts on the second consecutive failure with threshold 2', async () => {
     const task = makeTask({ id: 'two-in-a-row', failure_post_threshold: 2 });
     logTaskRun({
