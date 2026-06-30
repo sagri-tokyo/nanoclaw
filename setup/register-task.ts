@@ -12,7 +12,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { STORE_DIR } from '../src/config.ts';
 import { createTask, getTaskById, initDatabase, updateTask } from '../src/db.ts';
 import { logger } from '../src/logger.ts';
-import { ScheduledTask } from '../src/types.ts';
+import { CapabilityProfile, ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
 const EXIT_BAD_ARGS = 4;
@@ -25,14 +25,15 @@ interface RegisterTaskArgs {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
-  capabilityProfile: NonNullable<ScheduledTask['capability_profile']>;
+  capabilityProfile: CapabilityProfile;
   runbookUrl?: string;
   postAfterFails?: number;
 }
 
-const CAPABILITY_PROFILES: ReadonlyArray<
-  NonNullable<ScheduledTask['capability_profile']>
-> = ['operator', 'trusted-writer'];
+const CAPABILITY_PROFILES: ReadonlyArray<CapabilityProfile> = [
+  'operator',
+  'trusted-writer',
+];
 
 export interface UpsertTaskInput {
   id: string;
@@ -47,7 +48,7 @@ export interface UpsertTaskInput {
    * stores `operator` on create, which denies the container the org-write
    * tokens. A defined value overwrites the row's profile on update.
    */
-  capabilityProfile?: NonNullable<ScheduledTask['capability_profile']>;
+  capabilityProfile?: CapabilityProfile;
   /**
    * `undefined` leaves the existing row's `runbook_url` untouched on update
    * and stores `null` on create. A non-empty string is persisted as-is.
@@ -115,16 +116,13 @@ function parseArgs(args: string[]): RegisterTaskArgs {
         const raw = args[++i];
         if (
           raw === undefined ||
-          !CAPABILITY_PROFILES.includes(
-            raw as NonNullable<ScheduledTask['capability_profile']>,
-          )
+          !CAPABILITY_PROFILES.includes(raw as CapabilityProfile)
         ) {
           throw new RegisterTaskArgError(
             `--capability-profile must be one of ${CAPABILITY_PROFILES.join(', ')} (got ${raw ?? '<missing>'})`,
           );
         }
-        result.capabilityProfile =
-          raw as NonNullable<ScheduledTask['capability_profile']>;
+        result.capabilityProfile = raw as CapabilityProfile;
         break;
       }
       case '--runbook-url': {

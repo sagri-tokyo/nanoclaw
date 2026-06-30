@@ -7,7 +7,7 @@ import {
   logTaskRun,
 } from './db.js';
 import { HTTP_STATUS_529_ERROR_CLASS } from './container-runner.js';
-import type { ContainerOutput } from './container-runner.js';
+import type { ContainerInput, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup, ScheduledTask } from './types.js';
 import {
   _resetSchedulerLoopForTests,
@@ -806,13 +806,11 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
     result: 'done',
   };
 
-  async function capturedProfileFor(
-    task: ScheduledTask,
-  ): Promise<unknown> {
+  async function capturedProfileFor(task: ScheduledTask): Promise<unknown> {
     let captured: unknown;
     const capturingRunner = async (
       _group: RegisteredGroup,
-      input: { capabilityProfile?: unknown },
+      input: ContainerInput,
       _onProcess: unknown,
       onOutput?: (output: ContainerOutput) => Promise<void>,
     ): Promise<ContainerOutput> => {
@@ -833,7 +831,7 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
         onProcess: () => {},
         sendMessage: async () => {},
       },
-      capturingRunner as never,
+      capturingRunner,
     );
     return captured;
   }

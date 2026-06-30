@@ -91,11 +91,7 @@ export interface NewMessage {
 // token is never serialized into any agent-readable IPC/tasks file — only into
 // messages.db and the host-posted Slack prompt.
 export type PendingActionState =
-  | 'pending'
-  | 'approved'
-  | 'consumed'
-  | 'denied'
-  | 'expired';
+  'pending' | 'approved' | 'consumed' | 'denied' | 'expired';
 
 export interface PendingActionRow {
   token: string;
@@ -116,6 +112,12 @@ export interface PendingActionRow {
   consumed_at: string | null;
 }
 
+// Per-task capability profile (sagri-ai#312). Fail-closed: an absent value
+// resolves to `operator`, which denies the container the Notion/GitHub write
+// tokens and forces writes through the host-executed `org_action` gate. Only
+// the poller ScheduledTasks opt in to `trusted-writer`.
+export type CapabilityProfile = 'operator' | 'trusted-writer';
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;
@@ -132,11 +134,7 @@ export interface ScheduledTask {
   created_at: string;
   runbook_url?: string | null;
   failure_post_threshold?: number;
-  // Per-task capability profile (sagri-ai#312). Fail-closed: an absent value
-  // resolves to `operator`, which denies the container the Notion/GitHub write
-  // tokens and forces writes through the host-executed `org_action` gate. Only
-  // the poller ScheduledTasks opt in to `trusted-writer`.
-  capability_profile?: 'operator' | 'trusted-writer';
+  capability_profile?: CapabilityProfile;
 }
 
 export interface TaskRunLog {

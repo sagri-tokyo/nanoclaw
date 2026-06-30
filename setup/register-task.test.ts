@@ -519,7 +519,7 @@ describe('parseArgs (strict --capability-profile semantics)', () => {
     ).toThrow(RegisterTaskArgError);
     expect(() =>
       _parseArgs([...baseArgs, '--capability-profile', 'root']),
-    ).toThrow('--capability-profile');
+    ).toThrow('--capability-profile must be one of operator, trusted-writer (got root)');
   });
 
   it('rejects an empty --capability-profile value', () => {

@@ -45,7 +45,7 @@ import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
-import { RegisteredGroup } from './types.js';
+import { CapabilityProfile, RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -96,7 +96,7 @@ export interface ContainerInput {
    * host-executed `org_action` gate. `trusted-writer` keeps both tokens mounted
    * and is opt-in for the poller ScheduledTasks that write directly.
    */
-  capabilityProfile?: 'operator' | 'trusted-writer';
+  capabilityProfile?: CapabilityProfile;
   /**
    * Triggering Slack user id (NewMessage.sender), used as OTel enduser.id when
    * telemetry is enabled (RFC 0001 Phase 1). Absent for scheduled tasks and
@@ -182,7 +182,7 @@ interface ContainerPlan {
    * `input.capabilityProfile` resolves to `operator` here, so a misdeclared or
    * un-migrated task never receives the write tokens.
    */
-  capabilityProfile: 'operator' | 'trusted-writer';
+  capabilityProfile: CapabilityProfile;
 }
 
 function buildContainerPlan(
