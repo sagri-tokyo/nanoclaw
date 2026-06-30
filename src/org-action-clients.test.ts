@@ -5,11 +5,13 @@ import type { RequestOptions } from 'https';
 
 import {
   executeOrgAction,
+  resolveNotionTarget,
   type OrgActionClientDeps,
 } from './org-action-clients.js';
 import type { FetchUntrustedDeps } from './fetch-untrusted.js';
 
 const HEX32 = 'a'.repeat(32);
+const DASHED_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
 interface CapturedRequest {
   method: string;
@@ -349,5 +351,119 @@ describe('slack digest + doc.draft', () => {
     const req = server.captured[0];
     expect(req.method).toBe('POST');
     expect(req.path).toBe('/v1/pages');
+  });
+});
+
+function searchResult(pages: { id: string; title: string }[]): string {
+  return JSON.stringify({
+    object: 'list',
+    results: pages.map((p) => ({
+      object: 'page',
+      id: p.id,
+      properties: {
+        Title: {
+          id: 'title',
+          type: 'title',
+          title: [{ type: 'text', plain_text: p.title }],
+        },
+      },
+    })),
+  });
+}
+
+describe('resolveNotionTarget — host-side name resolution', () => {
+  it('POSTs /v1/search with a page filter and the query, using the host token', async () => {
+    server.setResponse(
+      200,
+      searchResult([{ id: DASHED_ID, title: 'Soil Model Task' }]),
+    );
+    await resolveNotionTarget('Soil Model Task', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(server.captured).toHaveLength(1);
+    const req = server.captured[0];
+    expect(req.method).toBe('POST');
+    expect(req.path).toBe('/v1/search');
+    expect(req.headers.authorization).toBe('Bearer notion-secret');
+    expect(JSON.parse(req.body)).toEqual({
+      query: 'Soil Model Task',
+      filter: { property: 'object', value: 'page' },
+    });
+  });
+
+  it('returns the single match as a dash-stripped 32-hex id plus its title', async () => {
+    server.setResponse(
+      200,
+      searchResult([{ id: DASHED_ID, title: 'Soil Model Task' }]),
+    );
+    const resolution = await resolveNotionTarget('Soil Model Task', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({
+      kind: 'resolved',
+      id: HEX32,
+      title: 'Soil Model Task',
+    });
+  });
+
+  it('returns an unresolved no_match sentinel on zero results', async () => {
+    server.setResponse(200, searchResult([]));
+    const resolution = await resolveNotionTarget('Nothing', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({ kind: 'unresolved', reason: 'no_match' });
+  });
+
+  it('returns an unresolved multiple_matches sentinel on more than one result', async () => {
+    server.setResponse(
+      200,
+      searchResult([
+        { id: DASHED_ID, title: 'Soil Model Task' },
+        {
+          id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+          title: 'Soil Model Task 2',
+        },
+      ]),
+    );
+    const resolution = await resolveNotionTarget('Soil', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({
+      kind: 'unresolved',
+      reason: 'multiple_matches',
+    });
+  });
+
+  it('resolves with a null title when the single match has no title text', async () => {
+    server.setResponse(
+      200,
+      JSON.stringify({
+        object: 'list',
+        results: [{ object: 'page', id: DASHED_ID, properties: {} }],
+      }),
+    );
+    const resolution = await resolveNotionTarget('Soil Model Task', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({
+      kind: 'resolved',
+      id: HEX32,
+      title: null,
+    });
+  });
+
+  it('throws (fail-fast) on a non-2xx search response', async () => {
+    server.setResponse(401, '{"message":"unauthorized"}');
+    await expect(
+      resolveNotionTarget('Soil Model Task', {
+        notionApiKey: 'notion-secret',
+        fetchDeps: loopbackDeps(server.port),
+      }),
+    ).rejects.toThrow();
   });
 });

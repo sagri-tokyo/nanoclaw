@@ -71,7 +71,7 @@ import {
 import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
 import { loadApproverAllowlist } from './approver-allowlist.js';
 import { parseApprovalIntent } from './approval-trigger.js';
-import { executeOrgAction } from './org-action-clients.js';
+import { executeOrgAction, resolveNotionTarget } from './org-action-clients.js';
 import { requireEnv } from './fetch-untrusted.js';
 import { expirePendingActions } from './db.js';
 import {
@@ -990,6 +990,14 @@ async function main(): Promise<void> {
                 await channel.sendMessage(jid, text);
               },
             }),
+    // Host-side Notion name resolution (sagri-ai#346). The operator container
+    // has no NOTION_API_KEY after sagri-ai#312, so it cannot resolve a page
+    // name to an id in-container; the host (which holds the token) does it
+    // before classification. A read, so it runs even under the write stub.
+    resolveNotionTarget: (query) =>
+      resolveNotionTarget(query, {
+        notionApiKey: requireEnv('NOTION_API_KEY'),
+      }),
     now: () => new Date().toISOString(),
     ttlMs: 24 * 60 * 60 * 1000,
   };
@@ -1111,6 +1119,7 @@ async function main(): Promise<void> {
         {
           action: record.action,
           target_ref: record.target_ref,
+          target_query: record.target_query,
           reversibility: record.reversibility,
           stakes_hint: record.stakes_hint,
           citation_refs: record.citation_refs,

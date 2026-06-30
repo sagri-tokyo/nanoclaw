@@ -19,7 +19,7 @@ import {
   resolveDeps,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
-import { GITHUB_REPO_ALLOWLIST } from './org-action-gate.js';
+import { GITHUB_REPO_ALLOWLIST, isPlainObject } from './org-action-gate.js';
 
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -290,6 +290,75 @@ export async function executeOrgAction(
     default:
       throw new Error(`org-action: unknown action "${request.action}"`);
   }
+}
+
+export interface NotionResolveDeps {
+  notionApiKey: string;
+  // SSRF-fetch deps, injected in tests to route to a loopback fake. Same seam
+  // executeOrgAction uses, so resolution inherits the public-address /
+  // DNS-rebinding guards rather than opening a new un-guarded fetch path.
+  fetchDeps?: FetchUntrustedDeps;
+}
+
+export type NotionTargetResolution =
+  | { kind: 'resolved'; id: string; title: string | null }
+  | { kind: 'unresolved'; reason: 'no_match' | 'multiple_matches' };
+
+function extractTitle(page: Record<string, unknown>): string | null {
+  const properties = page.properties;
+  if (!isPlainObject(properties)) return null;
+  for (const value of Object.values(properties)) {
+    if (!isPlainObject(value) || value.type !== 'title') continue;
+    const parts = value.title;
+    if (!Array.isArray(parts)) return null;
+    const text = parts
+      .map((part) =>
+        isPlainObject(part) && typeof part.plain_text === 'string'
+          ? part.plain_text
+          : '',
+      )
+      .join('');
+    return text.length > 0 ? text : null;
+  }
+  return null;
+}
+
+/**
+ * Resolve a Notion page NAME to a page id host-side (the operator container
+ * has no NOTION_API_KEY after sagri-ai#312, so it cannot resolve the name
+ * in-container). One-match-or-abort: a search that returns zero or more than
+ * one page is an `unresolved` sentinel the caller turns into a refuse, never a
+ * best-guess pick. A non-2xx search throws (fail-fast). Reuses the SSRF-guarded
+ * `fetchJsonWrite` so this opens no new un-guarded fetch path.
+ */
+export async function resolveNotionTarget(
+  query: string,
+  deps: NotionResolveDeps,
+): Promise<NotionTargetResolution> {
+  const fetchDeps = resolveDeps(deps.fetchDeps);
+  const response = await fetchJsonWrite({
+    url: `${NOTION_API_BASE}/search`,
+    method: 'POST',
+    headers: notionHeaders(deps.notionApiKey),
+    body: JSON.stringify({
+      query,
+      filter: { property: 'object', value: 'page' },
+    }),
+    deps: fetchDeps,
+  });
+  const results = response.results;
+  if (!Array.isArray(results) || results.length === 0) {
+    return { kind: 'unresolved', reason: 'no_match' };
+  }
+  if (results.length > 1) {
+    return { kind: 'unresolved', reason: 'multiple_matches' };
+  }
+  const page = results[0];
+  if (!isPlainObject(page) || typeof page.id !== 'string') {
+    throw new Error('org-action: Notion search result has no page id');
+  }
+  const id = page.id.replace(/-/g, '').toLowerCase();
+  return { kind: 'resolved', id, title: extractTitle(page) };
 }
 
 function assertAllowlistedRepo(repo: string): void {

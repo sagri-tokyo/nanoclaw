@@ -12,9 +12,11 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
+import type { NotionTargetResolution } from './org-action-clients.js';
 import type { NewMessage, PendingActionRow } from './types.js';
 
 const HEX32 = 'a'.repeat(32);
+const RESOLVED_ID = 'b'.repeat(32);
 const TOKEN = 'T'.repeat(43);
 
 beforeEach(() => {
@@ -24,13 +26,14 @@ beforeEach(() => {
 interface Recorder {
   executed: { action: string; target_ref: string }[];
   posted: { jid: string; text: string }[];
+  resolveQueries: string[];
 }
 
 function makeDeps(overrides: Partial<OrgActionGateDeps> = {}): {
   deps: OrgActionGateDeps;
   rec: Recorder;
 } {
-  const rec: Recorder = { executed: [], posted: [] };
+  const rec: Recorder = { executed: [], posted: [], resolveQueries: [] };
   const deps: OrgActionGateDeps = {
     approvers: () => new Set(['U_APPROVER']),
     sendMessage: async (jid, text) => {
@@ -38,6 +41,13 @@ function makeDeps(overrides: Partial<OrgActionGateDeps> = {}): {
     },
     executeAction: async (req) => {
       rec.executed.push({ action: req.action, target_ref: req.target_ref });
+    },
+    // Default records the query and refuses (no match). Tests that exercise a
+    // successful resolution override this; tests asserting "search not called"
+    // assert rec.resolveQueries stays empty against this default.
+    resolveNotionTarget: async (query): Promise<NotionTargetResolution> => {
+      rec.resolveQueries.push(query);
+      return { kind: 'unresolved', reason: 'no_match' };
     },
     now: () => '2026-06-22T00:00:00.000Z',
     ttlMs: 24 * 60 * 60 * 1000,
@@ -157,6 +167,188 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     );
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)).toBeUndefined();
+  });
+});
+
+describe('driveOrgActionRequest — host-side Notion target resolution', () => {
+  const ctx = {
+    sourceGroup: 'g',
+    chatJid: 'slack:C0AAA1111',
+    requesterGroup: 'g',
+  };
+
+  function resolverReturning(
+    result: NotionTargetResolution,
+    rec: Recorder,
+  ): OrgActionGateDeps['resolveNotionTarget'] {
+    return async (query) => {
+      rec.resolveQueries.push(query);
+      return result;
+    };
+  }
+
+  it('resolves a name to one id, holds the lifecycle flip, persists the resolved id, and shows the title', async () => {
+    const { deps, rec } = makeDeps();
+    deps.resolveNotionTarget = resolverReturning(
+      { kind: 'resolved', id: RESOLVED_ID, title: 'Soil Model Task' },
+      rec,
+    );
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Soil Model Task',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual(['Soil Model Task']);
+    expect(rec.executed).toHaveLength(0);
+    const row = getPendingAction(TOKEN);
+    expect(row?.state).toBe('pending');
+    expect(row?.target_ref).toBe(RESOLVED_ID);
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('Soil Model Task');
+    expect(rec.posted[0].text).toContain(RESOLVED_ID);
+  });
+
+  it('refuses (no hold, no execute) when the name resolves to zero matches', async () => {
+    const { deps, rec } = makeDeps();
+    deps.resolveNotionTarget = resolverReturning(
+      { kind: 'unresolved', reason: 'no_match' },
+      rec,
+    );
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Unknown Page',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual(['Unknown Page']);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted).toHaveLength(0);
+  });
+
+  it('refuses when the name resolves to multiple matches', async () => {
+    const { deps, rec } = makeDeps();
+    deps.resolveNotionTarget = resolverReturning(
+      { kind: 'unresolved', reason: 'multiple_matches' },
+      rec,
+    );
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Soil',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual(['Soil']);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+  });
+
+  it('refuses a red-line query before any Notion search call', async () => {
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'MRV tracker',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual([]);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+  });
+
+  it('refuses (does not execute) when the resolver throws an API error', async () => {
+    const { deps, rec } = makeDeps();
+    deps.resolveNotionTarget = async (query) => {
+      rec.resolveQueries.push(query);
+      throw new Error('notion 500');
+    };
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Soil Model Task',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual(['Soil Model Task']);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+  });
+
+  it('uses a valid 32-hex target_ref directly without calling the resolver', async () => {
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        target_query: 'Ignored Name',
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        citation_refs: [],
+        canonical_args: { text: 'hi' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual([]);
+    expect(rec.executed).toEqual([
+      { action: 'notion.append_progress', target_ref: HEX32 },
+    ]);
+  });
+
+  it('ignores target_query for a github action (no resolution attempted)', async () => {
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'github.file_issue',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        target_query: 'Some Name',
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        citation_refs: [],
+        canonical_args: { title: 'Bug', body: 'Details' },
+      },
+      ctx,
+      deps,
+    );
+    expect(rec.resolveQueries).toEqual([]);
+    expect(rec.executed).toEqual([
+      { action: 'github.file_issue', target_ref: 'sagri-tokyo/sagri-ai' },
+    ]);
   });
 });
 

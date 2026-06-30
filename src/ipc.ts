@@ -81,6 +81,7 @@ export interface IpcDeps {
     record: {
       action: string;
       target_ref: string;
+      target_query?: string;
       reversibility: Reversibility;
       stakes_hint: StakesHint;
       citation_refs: string[];
@@ -248,6 +249,7 @@ export async function processTaskIpc(
     containerConfig?: RegisteredGroup['containerConfig'];
     action?: string;
     target_ref?: string;
+    target_query?: unknown;
     reversibility?: string;
     stakes_hint?: string;
     citation_refs?: unknown;
@@ -748,6 +750,22 @@ export async function processTaskIpc(
         break;
       }
       const citationRefs: string[] = data.citation_refs ?? [];
+      // target_query is the optional Notion page NAME the host resolves to an
+      // id host-side (the operator container has no NOTION_API_KEY after
+      // sagri-ai#312). A non-string is a hard reject, never coerced — a coerced
+      // value would feed the resolver a malformed query.
+      if (
+        data.target_query !== undefined &&
+        typeof data.target_query !== 'string'
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'Invalid org_action — target_query must be a string',
+        );
+        emitReject('ipc_org_action', 'InvalidPayload');
+        break;
+      }
+      const targetQuery: string | undefined = data.target_query;
       // The chat jid that owns the source group is where the approval prompt
       // posts. For main, fall back to the requesting group's own jid.
       let chatJid: string | undefined;
@@ -769,6 +787,7 @@ export async function processTaskIpc(
         {
           action: data.action,
           target_ref: data.target_ref,
+          target_query: targetQuery,
           reversibility,
           stakes_hint: stakesHint,
           citation_refs: citationRefs,

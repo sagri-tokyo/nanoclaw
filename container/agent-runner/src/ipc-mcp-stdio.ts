@@ -660,6 +660,12 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
       .describe(
         'Constrained id: Notion 32-hex id | repo slug | Slack channel id',
       ),
+    target_query: z
+      .string()
+      .optional()
+      .describe(
+        'For a notion.* action only: the page NAME to resolve when you do not have a 32-hex id. The host resolves it to a page id (one-match-or-abort) before classifying. Ignored for github.* / slack.* and when target_ref is already a valid id.',
+      ),
     reversibility: z.enum(['reversible', 'draft']),
     stakes_hint: z
       .enum(['safe', 'gated'])
@@ -679,6 +685,7 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
       type: 'org_action',
       action: args.action,
       target_ref: args.target_ref,
+      target_query: args.target_query,
       reversibility: args.reversibility,
       stakes_hint: args.stakes_hint,
       citation_refs: args.citation_refs,
