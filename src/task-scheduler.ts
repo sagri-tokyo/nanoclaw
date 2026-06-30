@@ -356,6 +356,12 @@ async function runTask(
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
+          // An error is terminal for a single-turn task. Close the container
+          // like the success/result paths do — otherwise the agent-runner sits
+          // in its streaming query loop awaiting a _close that never comes, and
+          // the container hangs until the IDLE_TIMEOUT hard kill (~30 min),
+          // wedging the whole group queue behind it (sagri-tokyo/sagri-ai#322).
+          scheduleClose();
           error = streamedOutput.error;
           // Prefer the structured error_class from the agent-runner when
           // present so action records stay accurate after container-runner
