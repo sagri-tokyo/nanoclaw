@@ -10,7 +10,12 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 import { STORE_DIR } from '../src/config.ts';
-import { createTask, getTaskById, initDatabase, updateTask } from '../src/db.ts';
+import {
+  createTask,
+  getTaskById,
+  initDatabase,
+  updateTask,
+} from '../src/db.ts';
 import { logger } from '../src/logger.ts';
 import { CapabilityProfile, ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
@@ -138,9 +143,7 @@ function parseArgs(args: string[]): RegisterTaskArgs {
       case '--post-after-fails': {
         const raw = args[++i];
         if (raw === undefined || raw === '') {
-          throw new RegisterTaskArgError(
-            '--post-after-fails requires a value',
-          );
+          throw new RegisterTaskArgError('--post-after-fails requires a value');
         }
         const parsed = Number(raw);
         if (!Number.isInteger(parsed) || parsed < 1) {
@@ -218,7 +221,10 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
       'upsertTask: runbookUrl must be a non-empty string or undefined',
     );
   }
-  const nextRun = computeInitialNextRun(input.scheduleType, input.scheduleValue);
+  const nextRun = computeInitialNextRun(
+    input.scheduleType,
+    input.scheduleValue,
+  );
   const existing = getTaskById(input.id);
 
   if (existing) {

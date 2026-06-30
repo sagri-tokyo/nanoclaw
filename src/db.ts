@@ -234,7 +234,12 @@ function createSchema(database: Database.Database): void {
       `ALTER TABLE scheduled_tasks ADD COLUMN capability_profile TEXT NOT NULL DEFAULT 'operator'`,
     );
   } catch (error) {
-    if (!(error instanceof Error && error.message.includes('duplicate column name'))) {
+    if (
+      !(
+        error instanceof Error &&
+        error.message.includes('duplicate column name')
+      )
+    ) {
       throw error;
     }
   }
@@ -558,7 +563,8 @@ export function getLastBotMessageTimestamp(
        WHERE chat_jid = ? AND (is_bot_message = 1 OR content LIKE ? ESCAPE '\\')`,
     )
     .get(chatJid, `${escapeLikePattern(botPrefix)}:%`) as
-    { ts: string | null } | undefined;
+    | { ts: string | null }
+    | undefined;
   return row?.ts ?? undefined;
 }
 
@@ -612,7 +618,8 @@ export function createTask(
 
 export function getTaskById(id: string): ScheduledTask | undefined {
   return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as
-    ScheduledTask | undefined;
+    | ScheduledTask
+    | undefined;
 }
 
 export function getTasksForGroup(groupFolder: string): ScheduledTask[] {

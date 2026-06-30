@@ -1507,9 +1507,7 @@ describe('container-runner capability profile write-token gating', () => {
     }
   });
 
-  async function captureArgsForInput(
-    input: ContainerInput,
-  ): Promise<string[]> {
+  async function captureArgsForInput(input: ContainerInput): Promise<string[]> {
     const argsPromise = new Promise<string[]>((resolve) => {
       (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
         (_bin: string, args: string[]) => {
@@ -1563,7 +1561,9 @@ describe('container-runner capability profile write-token gating', () => {
   it('mounts both write tokens for the trusted-writer profile', async () => {
     const args = await captureArgsForInput(trustedWriterInput);
     expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).not.toBeNull();
-    expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).not.toBeNull();
+    expect(
+      readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH),
+    ).not.toBeNull();
   });
 
   it('resolves an undefined profile on the interactive path to operator (fail-closed)', async () => {

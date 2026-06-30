@@ -91,7 +91,11 @@ export interface NewMessage {
 // token is never serialized into any agent-readable IPC/tasks file — only into
 // messages.db and the host-posted Slack prompt.
 export type PendingActionState =
-  'pending' | 'approved' | 'consumed' | 'denied' | 'expired';
+  | 'pending'
+  | 'approved'
+  | 'consumed'
+  | 'denied'
+  | 'expired';
 
 export interface PendingActionRow {
   token: string;
