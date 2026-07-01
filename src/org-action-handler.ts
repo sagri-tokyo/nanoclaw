@@ -49,16 +49,22 @@ import { parseApprovalIntent } from './approval-trigger.js';
 import { isApprover } from './approver-allowlist.js';
 import {
   classifyOrgAction,
+  isNotionPageId,
   isPlainObject,
   isReversibility,
   isStakesHint,
   isStringArray,
   renderApprovalSummary,
+  stringContainsRedLine,
+  usesNotionTarget,
   type OrgActionRecord,
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
-import type { OrgActionExecRequest } from './org-action-clients.js';
+import type {
+  NotionTargetResolution,
+  OrgActionExecRequest,
+} from './org-action-clients.js';
 import type { NewMessage, PendingActionRow } from './types.js';
 
 export interface OrgActionGateDeps {
@@ -67,6 +73,10 @@ export interface OrgActionGateDeps {
   approvers: () => Set<string>;
   sendMessage: (jid: string, text: string) => Promise<void>;
   executeAction: (request: OrgActionExecRequest) => Promise<void>;
+  // Resolve a Notion page NAME to a page id host-side. The operator container
+  // has no NOTION_API_KEY after sagri-ai#312, so it cannot resolve the name
+  // in-container; the host (which holds the token) does it before classifying.
+  resolveNotionTarget: (query: string) => Promise<NotionTargetResolution>;
   now: () => string;
   ttlMs: number;
   // Token mint seam (overridable in tests). Default is a 43-char base64url
@@ -77,6 +87,10 @@ export interface OrgActionGateDeps {
 export interface OrgActionRequestInput {
   action: string;
   target_ref: string;
+  // Optional page NAME for a notion.* action whose target_ref is not already a
+  // valid id. The host resolves it to an id before classification. Ignored for
+  // non-notion actions and when target_ref is already a valid id.
+  target_query?: string;
   reversibility: Reversibility;
   stakes_hint: StakesHint;
   citation_refs: string[];
@@ -99,6 +113,7 @@ function defaultMintToken(): string {
 function toClassifierRecord(
   input: OrgActionRequestInput,
   originChannel: string,
+  targetTitle?: string,
 ): OrgActionRecord {
   return {
     action: input.action,
@@ -108,6 +123,72 @@ function toClassifierRecord(
     citation_refs: input.citation_refs,
     canonical_args: input.canonical_args,
     origin_channel: originChannel,
+    target_title: targetTitle,
+  };
+}
+
+interface ResolvedTarget {
+  input: OrgActionRequestInput;
+  targetTitle?: string;
+}
+
+/**
+ * Resolve a Notion page NAME to a page id host-side, before classification.
+ * Returns the (possibly rewritten) input plus the resolved title, or null when
+ * resolution refuses. Fail-closed: a red-line query, a zero/multi-match search,
+ * or any resolver error returns null (refuse), never a best guess.
+ *
+ * target_query is honored only for a notion-class action whose target_ref is
+ * not already a valid id; it is ignored for github and slack actions and when
+ * target_ref is already a valid 32-hex id (existing behavior is unchanged).
+ */
+async function resolveTargetIfNeeded(
+  input: OrgActionRequestInput,
+  ctx: OrgActionRequestContext,
+  deps: OrgActionGateDeps,
+): Promise<ResolvedTarget | null> {
+  if (!usesNotionTarget(input.action)) return { input };
+  if (isNotionPageId(input.target_ref)) return { input };
+
+  const query = input.target_query;
+  if (query === undefined || query.length === 0) return { input };
+
+  // Red line the query BEFORE any Notion call so a name referencing
+  // mrv/carbon/jichitai/自治体/prod refuses without touching the API.
+  if (stringContainsRedLine(query)) {
+    logger.warn(
+      { action: input.action, sourceGroup: ctx.sourceGroup },
+      'org-action refused host-side: target_query is a red line (no Notion call)',
+    );
+    return null;
+  }
+
+  let resolution: NotionTargetResolution;
+  try {
+    resolution = await deps.resolveNotionTarget(query);
+  } catch (err) {
+    logger.warn(
+      { action: input.action, sourceGroup: ctx.sourceGroup, err },
+      'org-action refused host-side: Notion target resolution errored',
+    );
+    return null;
+  }
+
+  if (resolution.kind === 'unresolved') {
+    logger.warn(
+      {
+        action: input.action,
+        reason: resolution.reason,
+        sourceGroup: ctx.sourceGroup,
+      },
+      'org-action refused host-side: Notion target unresolved (zero or many matches)',
+    );
+    return null;
+  }
+
+  return {
+    input: { ...input, target_ref: resolution.id },
+    targetTitle: resolution.title ?? undefined,
   };
 }
 
@@ -183,14 +264,24 @@ export async function driveOrgActionRequest(
   ctx: OrgActionRequestContext,
   deps: OrgActionGateDeps,
 ): Promise<void> {
-  const record = toClassifierRecord(input, ctx.chatJid);
+  // Resolve a Notion page NAME to an id host-side (fail-closed) before the
+  // authoritative classify re-validates the resolved id's shape + red line.
+  const resolved = await resolveTargetIfNeeded(input, ctx, deps);
+  if (!resolved) return;
+  const resolvedInput = resolved.input;
+
+  const record = toClassifierRecord(
+    resolvedInput,
+    ctx.chatJid,
+    resolved.targetTitle,
+  );
   const verdict = classifyOrgAction(record);
 
   if (verdict === 'refuse') {
     logger.warn(
       {
-        action: input.action,
-        target_ref: input.target_ref,
+        action: resolvedInput.action,
+        target_ref: resolvedInput.target_ref,
         sourceGroup: ctx.sourceGroup,
       },
       'org-action refused host-side (red line / allowlist / id shape)',
@@ -200,12 +291,12 @@ export async function driveOrgActionRequest(
 
   if (verdict === 'execute') {
     await deps.executeAction({
-      action: input.action,
-      target_ref: input.target_ref,
-      canonical_args: input.canonical_args,
+      action: resolvedInput.action,
+      target_ref: resolvedInput.target_ref,
+      canonical_args: resolvedInput.canonical_args,
     });
     logger.info(
-      { action: input.action, target_ref: input.target_ref },
+      { action: resolvedInput.action, target_ref: resolvedInput.target_ref },
       'org-action executed host-side (safe)',
     );
     return;
@@ -218,12 +309,12 @@ export async function driveOrgActionRequest(
     token,
     source_group: ctx.sourceGroup,
     chat_jid: ctx.chatJid,
-    action: input.action,
-    target_ref: input.target_ref,
-    reversibility: input.reversibility,
-    stakes_hint: input.stakes_hint,
-    citation_refs: JSON.stringify(input.citation_refs),
-    canonical_args: JSON.stringify(input.canonical_args),
+    action: resolvedInput.action,
+    target_ref: resolvedInput.target_ref,
+    reversibility: resolvedInput.reversibility,
+    stakes_hint: resolvedInput.stakes_hint,
+    citation_refs: JSON.stringify(resolvedInput.citation_refs),
+    canonical_args: JSON.stringify(resolvedInput.canonical_args),
     summary,
     requester: ctx.requesterGroup,
     state: 'pending',
@@ -235,7 +326,11 @@ export async function driveOrgActionRequest(
   createPendingAction(row);
   await deps.sendMessage(ctx.chatJid, renderApprovalPrompt(token, summary));
   logger.info(
-    { token, action: input.action, target_ref: input.target_ref },
+    {
+      token,
+      action: resolvedInput.action,
+      target_ref: resolvedInput.target_ref,
+    },
     'org-action held pending approval',
   );
 }

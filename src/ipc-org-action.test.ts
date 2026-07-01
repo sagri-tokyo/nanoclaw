@@ -16,6 +16,7 @@ const SOURCE_GROUP: RegisteredGroup = {
 interface OrgActionRecordArg {
   action: string;
   target_ref: string;
+  target_query?: string;
   reversibility: string;
   stakes_hint: string;
   citation_refs: string[];
@@ -83,6 +84,43 @@ describe('org_action IPC drain', () => {
         chatJid: 'slack:C0AAA1111',
       },
     ]);
+  });
+
+  it('forwards a string target_query through to the handler record', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Soil Model Task',
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
+    expect(orgActionCalls).toHaveLength(1);
+    expect(orgActionCalls[0].record.target_query).toBe('Soil Model Task');
+  });
+
+  it('rejects a non-string target_query without calling the handler', async () => {
+    await processTaskIpc(
+      {
+        type: 'org_action',
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 42,
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        canonical_args: { property: 'Status', value: 'Approved' },
+      },
+      'slack_sagri-ai-dev',
+      false,
+      deps,
+    );
+    expect(orgActionCalls).toHaveLength(0);
   });
 
   it('defaults a missing citation_refs to an empty array (typed, not undefined)', async () => {

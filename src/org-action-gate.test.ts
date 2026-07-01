@@ -2,11 +2,38 @@ import { describe, it, expect } from 'vitest';
 
 import {
   classifyOrgAction,
+  isNotionPageId,
   renderApprovalSummary,
+  stringContainsRedLine,
   type OrgActionRecord,
 } from './org-action-gate.js';
 
 const HEX32 = 'a'.repeat(32);
+
+describe('isNotionPageId — exported shape predicate', () => {
+  it('accepts a bare 32-hex id', () => {
+    expect(isNotionPageId(HEX32)).toBe(true);
+  });
+
+  it('rejects a dashed id, a short id, and prose', () => {
+    expect(isNotionPageId('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')).toBe(false);
+    expect(isNotionPageId('a'.repeat(31))).toBe(false);
+    expect(isNotionPageId('Soil Model Task')).toBe(false);
+  });
+});
+
+describe('stringContainsRedLine — exported red-line predicate', () => {
+  it.each(['mrv tracker', 'CARBON', 'jichitai page', '自治体', 'prod-config'])(
+    'flags %s',
+    (value) => {
+      expect(stringContainsRedLine(value)).toBe(true);
+    },
+  );
+
+  it('passes an ordinary page name', () => {
+    expect(stringContainsRedLine('Soil Model Task')).toBe(false);
+  });
+});
 
 function record(overrides: Partial<OrgActionRecord> = {}): OrgActionRecord {
   return {

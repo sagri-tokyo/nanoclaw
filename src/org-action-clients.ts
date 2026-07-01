@@ -19,7 +19,11 @@ import {
   resolveDeps,
   type FetchUntrustedDeps,
 } from './fetch-untrusted.js';
-import { GITHUB_REPO_ALLOWLIST } from './org-action-gate.js';
+import {
+  GITHUB_REPO_ALLOWLIST,
+  isNotionPageId,
+  isPlainObject,
+} from './org-action-gate.js';
 
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -290,6 +294,103 @@ export async function executeOrgAction(
     default:
       throw new Error(`org-action: unknown action "${request.action}"`);
   }
+}
+
+export interface NotionResolveDeps {
+  notionApiKey: string;
+  // SSRF-fetch deps, injected in tests to route to a loopback fake. Same seam
+  // executeOrgAction uses, so resolution inherits the public-address /
+  // DNS-rebinding guards rather than opening a new un-guarded fetch path.
+  fetchDeps?: FetchUntrustedDeps;
+}
+
+export type NotionTargetResolution =
+  | { kind: 'resolved'; id: string; title: string | null }
+  | { kind: 'unresolved'; reason: 'no_match' | 'multiple_matches' };
+
+function extractTitle(page: Record<string, unknown>): string | null {
+  const properties = page.properties;
+  if (!isPlainObject(properties)) return null;
+  for (const value of Object.values(properties)) {
+    if (!isPlainObject(value) || value.type !== 'title') continue;
+    const parts = value.title;
+    if (!Array.isArray(parts)) return null;
+    const text = parts
+      .map((part) =>
+        isPlainObject(part) && typeof part.plain_text === 'string'
+          ? part.plain_text
+          : '',
+      )
+      .join('');
+    return text.length > 0 ? text : null;
+  }
+  return null;
+}
+
+/**
+ * Resolve a Notion page NAME to a page id host-side (the operator container
+ * has no NOTION_API_KEY after sagri-ai#312, so it cannot resolve the name
+ * in-container). One-match-or-abort: a search that returns zero or more than
+ * one page is an `unresolved` sentinel the caller turns into a refuse, never a
+ * best-guess pick. A non-2xx search throws (fail-fast). Reuses the SSRF-guarded
+ * `fetchJsonWrite` so this opens no new un-guarded fetch path.
+ */
+export async function resolveNotionTarget(
+  query: string,
+  deps: NotionResolveDeps,
+): Promise<NotionTargetResolution> {
+  const fetchDeps = resolveDeps(deps.fetchDeps);
+  const response = await fetchJsonWrite({
+    url: `${NOTION_API_BASE}/search`,
+    method: 'POST',
+    headers: notionHeaders(deps.notionApiKey),
+    // page_size 10 bounds the response under the 256KB fetch cap (the default
+    // returns up to 100 full page objects, which overflows it). /v1/search is
+    // relevance-ranked, not a title-exact lookup: it returns pages even when no
+    // title equals the query, so the exact-title filter below is what makes
+    // resolution precise. 10 candidates lets a distinctive title surface while
+    // staying well under the body cap.
+    body: JSON.stringify({
+      query,
+      filter: { property: 'object', value: 'page' },
+      page_size: 20,
+    }),
+    deps: fetchDeps,
+  });
+  const results = response.results;
+  if (!Array.isArray(results)) {
+    return { kind: 'unresolved', reason: 'no_match' };
+  }
+  // Keep only exact title matches, then apply one-match-or-abort over that
+  // filtered set. A relevance hit whose title does not equal the query is not
+  // the page the operator named. Compare trimmed, NFC-normalized (so composed
+  // vs decomposed accents match), and case-insensitively.
+  const normalize = (value: string) =>
+    value.trim().normalize('NFC').toLowerCase();
+  const wanted = normalize(query);
+  const matches = results.filter((page): page is Record<string, unknown> => {
+    if (!isPlainObject(page) || typeof page.id !== 'string') return false;
+    const title = extractTitle(page);
+    return title !== null && normalize(title) === wanted;
+  });
+  if (matches.length === 0) {
+    return { kind: 'unresolved', reason: 'no_match' };
+  }
+  if (matches.length > 1) {
+    return { kind: 'unresolved', reason: 'multiple_matches' };
+  }
+  const page = matches[0];
+  const rawId = page.id as string;
+  const id = rawId.replace(/-/g, '').toLowerCase();
+  // Throw a specific diagnostic rather than letting the classifier refuse the
+  // resolved id with a generic shape-refuse log line. The handler turns this
+  // throw into a refuse.
+  if (!isNotionPageId(id)) {
+    throw new Error(
+      `org-action: Notion search returned a malformed page id "${rawId}"`,
+    );
+  }
+  return { kind: 'resolved', id, title: extractTitle(page) };
 }
 
 function assertAllowlistedRepo(repo: string): void {

@@ -46,6 +46,10 @@ function deps(token?: string): OrgActionGateDeps {
         `  [WRITE-CLIENT FIRED] ${req.action} target=${req.target_ref} args=${JSON.stringify(req.canonical_args)}`,
       );
     },
+    resolveNotionTarget: async (query) => {
+      console.log(`  [RESOLVE-NOTION-TARGET] query=${JSON.stringify(query)}`);
+      return { kind: 'resolved', id: 'a'.repeat(32), title: query };
+    },
     now: () => '2026-06-29T00:00:00.000Z',
     ttlMs: 60_000,
     mintToken: token ? () => token : undefined,
@@ -56,7 +60,9 @@ function ctx() {
   return { sourceGroup: GROUP, chatJid: CHAT, requesterGroup: GROUP };
 }
 
-function agentEmits(over: Partial<OrgActionRequestInput>): OrgActionRequestInput {
+function agentEmits(
+  over: Partial<OrgActionRequestInput>,
+): OrgActionRequestInput {
   return {
     action: 'notion.append_progress',
     target_ref: 'a'.repeat(32),
@@ -87,14 +93,21 @@ const TOK = (n: string) => (n + 'x'.repeat(43)).slice(0, 43); // 43-char base64u
 async function main() {
   _initTestDatabase();
 
-  banner('1. SAFE action — agent says stakes_hint:safe, host agrees -> executes now');
+  banner(
+    '1. SAFE action — agent says stakes_hint:safe, host agrees -> executes now',
+  );
   await driveOrgActionRequest(
-    agentEmits({ action: 'notion.append_progress', canonical_args: { text: 'progress note' } }),
+    agentEmits({
+      action: 'notion.append_progress',
+      canonical_args: { text: 'progress note' },
+    }),
     ctx(),
     deps(),
   );
 
-  banner('2. GATED lifecycle flip — Status->Approved is held, posts approval prompt');
+  banner(
+    '2. GATED lifecycle flip — Status->Approved is held, posts approval prompt',
+  );
   const t2 = TOK('GATED1');
   await driveOrgActionRequest(
     agentEmits({
@@ -114,63 +127,125 @@ async function main() {
   banner('2c. EXACTLY-ONCE — replay the same approve -> no second execution');
   const before = executed.length;
   await handleApprovalReply(CHAT, approveMsg(t2), deps(t2));
-  console.log(`  executes triggered by replay: ${executed.length - before} (want 0)`);
+  console.log(
+    `  executes triggered by replay: ${executed.length - before} (want 0)`,
+  );
 
-  banner('3. ADVERSARIAL stakes_hint — agent LIES safe on a red-line (mrv) target -> refused, no row, no write');
+  banner(
+    '3. ADVERSARIAL stakes_hint — agent LIES safe on a red-line (mrv) target -> refused, no row, no write',
+  );
   const beforeEx = executed.length;
   await driveOrgActionRequest(
-    agentEmits({ action: 'notion.append_progress', target_ref: 'a'.repeat(32), stakes_hint: 'safe', canonical_args: { text: 'update the mrv carbon ledger' } }),
+    agentEmits({
+      action: 'notion.append_progress',
+      target_ref: 'a'.repeat(32),
+      stakes_hint: 'safe',
+      canonical_args: { text: 'update the mrv carbon ledger' },
+    }),
     ctx(),
     deps(),
   );
-  console.log(`  writes fired: ${executed.length - beforeEx} (want 0), slack posts: 0 expected`);
+  console.log(
+    `  writes fired: ${executed.length - beforeEx} (want 0), slack posts: 0 expected`,
+  );
 
   banner('3b. red-line in target_ref written in Japanese (自治体) -> refused');
   await driveOrgActionRequest(
-    agentEmits({ action: 'doc.draft', target_ref: 'b'.repeat(32), canonical_args: { body: 'memo about 自治体 onboarding' } }),
+    agentEmits({
+      action: 'doc.draft',
+      target_ref: 'b'.repeat(32),
+      canonical_args: { body: 'memo about 自治体 onboarding' },
+    }),
     ctx(),
     deps(),
   );
 
-  banner('4. ADVERSARIAL approver — hold a gated action, then attack the approval');
+  banner(
+    '4. ADVERSARIAL approver — hold a gated action, then attack the approval',
+  );
   const t4 = TOK('GATED2');
   await driveOrgActionRequest(
-    agentEmits({ action: 'notion.write_property', canonical_args: { property: 'Status', value: 'Ready for AI' } }),
+    agentEmits({
+      action: 'notion.write_property',
+      canonical_args: { property: 'Status', value: 'Ready for AI' },
+    }),
     ctx(),
     deps(t4),
   );
   const exBefore = executed.length;
 
   console.log('\n  4a. bot/self message tries to approve:');
-  await handleApprovalReply(CHAT, approveMsg(t4, { sender: APPROVER, is_bot_message: true, bot_id: 'B123' }), deps(t4));
+  await handleApprovalReply(
+    CHAT,
+    approveMsg(t4, { sender: APPROVER, is_bot_message: true, bot_id: 'B123' }),
+    deps(t4),
+  );
   console.log('  4b. non-allowlisted human tries to approve:');
-  await handleApprovalReply(CHAT, approveMsg(t4, { sender: 'U_RANDO' }), deps(t4));
-  console.log(`  writes fired by attacks: ${executed.length - exBefore} (want 0), row still: ${getPendingAction(t4)?.state}`);
+  await handleApprovalReply(
+    CHAT,
+    approveMsg(t4, { sender: 'U_RANDO' }),
+    deps(t4),
+  );
+  console.log(
+    `  writes fired by attacks: ${executed.length - exBefore} (want 0), row still: ${getPendingAction(t4)?.state}`,
+  );
   console.log('  4c. real allowlisted approver -> executes:');
   await handleApprovalReply(CHAT, approveMsg(t4), deps(t4));
   console.log(`  row after legit approve: ${getPendingAction(t4)?.state}`);
 
-  banner('5. github out-of-allowlist repo -> refused; allowlisted repo -> executes');
-  await driveOrgActionRequest(agentEmits({ action: 'github.file_issue', target_ref: 'attacker/evil-repo', canonical_args: { title: 'x' } }), ctx(), deps());
-  await driveOrgActionRequest(agentEmits({ action: 'github.file_issue', target_ref: 'sagri-tokyo/sagri-ai', reversibility: 'draft', canonical_args: { title: 'real issue' } }), ctx(), deps());
+  banner(
+    '5. github out-of-allowlist repo -> refused; allowlisted repo -> executes',
+  );
+  await driveOrgActionRequest(
+    agentEmits({
+      action: 'github.file_issue',
+      target_ref: 'attacker/evil-repo',
+      canonical_args: { title: 'x' },
+    }),
+    ctx(),
+    deps(),
+  );
+  await driveOrgActionRequest(
+    agentEmits({
+      action: 'github.file_issue',
+      target_ref: 'sagri-tokyo/sagri-ai',
+      reversibility: 'draft',
+      canonical_args: { title: 'real issue' },
+    }),
+    ctx(),
+    deps(),
+  );
 
-  banner('6. RE-CLASSIFY-AT-APPROVE — a tampered approved row (red-line target) cannot execute');
+  banner(
+    '6. RE-CLASSIFY-AT-APPROVE — a tampered approved row (red-line target) cannot execute',
+  );
   // Simulate a row that reached state=approved but whose persisted args are a red line
   // (DB tampering / a classifier change between hold and approve). Boot re-drive must refuse it.
   const t6 = TOK('TAMPER');
   const tampered: PendingActionRow = {
-    token: t6, source_group: GROUP, chat_jid: CHAT,
-    action: 'notion.append_progress', target_ref: 'c'.repeat(32),
-    reversibility: 'reversible', stakes_hint: 'gated',
-    citation_refs: '[]', canonical_args: JSON.stringify({ text: 'tamper: prod deploy' }),
-    summary: 'tampered', requester: GROUP, state: 'approved',
-    created_at: '2026-06-29T00:00:00.000Z', expires_at: '2026-06-29T01:00:00.000Z',
-    approved_by: APPROVER, consumed_at: null,
+    token: t6,
+    source_group: GROUP,
+    chat_jid: CHAT,
+    action: 'notion.append_progress',
+    target_ref: 'c'.repeat(32),
+    reversibility: 'reversible',
+    stakes_hint: 'gated',
+    citation_refs: '[]',
+    canonical_args: JSON.stringify({ text: 'tamper: prod deploy' }),
+    summary: 'tampered',
+    requester: GROUP,
+    state: 'approved',
+    created_at: '2026-06-29T00:00:00.000Z',
+    expires_at: '2026-06-29T01:00:00.000Z',
+    approved_by: APPROVER,
+    consumed_at: null,
   };
   createPendingAction(tampered);
   const exB = executed.length;
   await reDriveApprovedActions(deps());
-  console.log(`  writes fired for tampered row: ${executed.length - exB} (want 0), row left: ${getPendingAction(t6)?.state}`);
+  console.log(
+    `  writes fired for tampered row: ${executed.length - exB} (want 0), row left: ${getPendingAction(t6)?.state}`,
+  );
 
   banner('TALLY');
   console.log(`  total write-client executions: ${executed.length}`);

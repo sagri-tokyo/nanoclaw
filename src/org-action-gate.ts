@@ -65,6 +65,11 @@ export interface OrgActionRecord {
   // The Slack channel jid the request originated in. The cross-channel digest
   // gate compares the digest target against this.
   origin_channel: string;
+  // The human-readable page title for a host-resolved Notion target. Set only
+  // when target_ref was resolved from a name; shown in the approval summary so
+  // the approver can catch a wrong-page resolution. Cosmetic: it never feeds
+  // the classifier decision.
+  target_title?: string;
 }
 
 export type OrgActionVerdict = 'execute' | 'hold' | 'refuse';
@@ -87,10 +92,24 @@ function hasTraversal(id: string): boolean {
   return /(^|\/)\.\.(\/|$)/.test(id);
 }
 
-function stringContainsRedLine(value: string): boolean {
+export function stringContainsRedLine(value: string): boolean {
   const lower = value.toLowerCase();
   if (lower.includes(RED_LINE_JP)) return true;
   return RED_LINE_ROMAJI.some((marker) => lower.includes(marker));
+}
+
+// Exported so the host-side target-resolution path can pre-validate a resolved
+// id's shape with the exact predicate the classifier uses, and skip resolution
+// when target_ref is already a valid id.
+export function isNotionPageId(value: string): boolean {
+  return NOTION_PAGE_ID.test(value);
+}
+
+// The single rule for "this action targets a Notion page id". Shared by the
+// classifier (which validates the id shape) and the host-side name resolver
+// (which decides whether to resolve a name at all), so the two can never drift.
+export function usesNotionTarget(action: string): boolean {
+  return action.startsWith('notion.') || action === 'doc.draft';
 }
 
 function isRedLine(record: OrgActionRecord): boolean {
@@ -124,7 +143,7 @@ export function classifyOrgAction(record: OrgActionRecord): OrgActionVerdict {
     return 'execute';
   }
 
-  if (record.action.startsWith('notion.') || record.action === 'doc.draft') {
+  if (usesNotionTarget(record.action)) {
     if (!NOTION_PAGE_ID.test(record.target_ref)) return 'refuse';
     if (record.action === 'notion.write_property') {
       const property = record.canonical_args.property;
@@ -162,9 +181,12 @@ export function renderApprovalSummary(record: OrgActionRecord): string {
     .map((key) => `${key}=${formatArgValue(record.canonical_args[key])}`)
     .join(', ');
   const citations = record.citation_refs.join(', ') || '(none)';
+  const target = record.target_title
+    ? `"${record.target_title}" (${record.target_ref})`
+    : record.target_ref;
   return [
     `action: ${record.action}`,
-    `target: ${record.target_ref}`,
+    `target: ${target}`,
     `reversibility: ${record.reversibility}`,
     `args: ${argEntries || '(none)'}`,
     `citations: ${citations}`,
