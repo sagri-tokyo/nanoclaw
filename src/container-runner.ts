@@ -15,6 +15,7 @@ import path from 'path';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  COMPANY_BRAIN_WIKI_DIR,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
@@ -267,6 +268,19 @@ function buildContainerPlan(
           readonly: true,
         });
       }
+    }
+
+    // Company Brain internal-tier wiki corpus, mounted read-only at the path
+    // the company-brain skill greps. isMain only: customer/gov-tier containers
+    // never receive the internal corpus, which is the physical-segregation
+    // posture the skill documents. Guarded on existence so non-sagri deploys
+    // (upstream, local dev) skip it.
+    if (fs.existsSync(COMPANY_BRAIN_WIKI_DIR)) {
+      mounts.push({
+        hostPath: COMPANY_BRAIN_WIKI_DIR,
+        containerPath: '/workspace/extra/wiki',
+        readonly: true,
+      });
     }
   } else {
     // Other groups only get their own folder

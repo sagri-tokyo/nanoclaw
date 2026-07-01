@@ -27,6 +27,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
+  COMPANY_BRAIN_WIKI_DIR: '/opt/sagri-ai/wiki',
   CREDENTIAL_PROXY_PORT: 3001,
   LITELLM_GATEWAY_PORT: 4000,
   LITELLM_PER_TASK_BUDGET_USD: 1,
@@ -987,6 +988,35 @@ describe('container-runner memory-gate hardening', () => {
     const mount = findMountFor(args, '/workspace/global/CLAUDE.md');
     expect(mount).not.toBeNull();
     expect(mount!.endsWith(':ro')).toBe(true);
+  });
+
+  async function captureArgsWithWiki(isMain: boolean): Promise<string[]> {
+    const existsSync = fs.existsSync as unknown as ReturnType<typeof vi.fn>;
+    const original = existsSync.getMockImplementation() as (p: string) => boolean;
+    existsSync.mockImplementation((p: string) =>
+      p === '/opt/sagri-ai/wiki' ? true : original(p),
+    );
+    try {
+      return await captureArgs(isMain);
+    } finally {
+      existsSync.mockImplementation(original);
+    }
+  }
+
+  it('mounts /workspace/extra/wiki read-only for main when the corpus exists', async () => {
+    const args = await captureArgsWithWiki(true);
+    const mount = findMountFor(args, '/workspace/extra/wiki');
+    expect(mount).toBe('/opt/sagri-ai/wiki:/workspace/extra/wiki:ro');
+  });
+
+  it('does not mount the wiki corpus for non-main groups (tier segregation)', async () => {
+    const args = await captureArgsWithWiki(false);
+    expect(findMountFor(args, '/workspace/extra/wiki')).toBeNull();
+  });
+
+  it('does not mount the wiki corpus for main when the corpus is absent', async () => {
+    const args = await captureArgs(true);
+    expect(findMountFor(args, '/workspace/extra/wiki')).toBeNull();
   });
 
   it('overlays settings.json and hooks/ after the writable /home/node/.claude mount', async () => {

@@ -62,6 +62,13 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
+// Host dir the EC2 user-data overlay checks the Company Brain wiki corpus out
+// to. Mounted read-only into the isMain container by buildContainerPlan. Only
+// exists on the sagri-ai deployment; absent on upstream/dev, where the mount is
+// skipped.
+export const COMPANY_BRAIN_WIKI_DIR =
+  process.env.COMPANY_BRAIN_WIKI_DIR ?? '/opt/sagri-ai/wiki';
+
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
