@@ -389,8 +389,23 @@ describe('resolveNotionTarget — host-side name resolution', () => {
     expect(JSON.parse(req.body)).toEqual({
       query: 'Soil Model Task',
       filter: { property: 'object', value: 'page' },
-      page_size: 10,
+      page_size: 20,
     });
+  });
+
+  it('returns no_match when the single relevance hit has no title text (cannot name-match a titleless page)', async () => {
+    server.setResponse(
+      200,
+      JSON.stringify({
+        object: 'list',
+        results: [{ object: 'page', id: DASHED_ID, properties: {} }],
+      }),
+    );
+    const resolution = await resolveNotionTarget('Soil Model Task', {
+      notionApiKey: 'notion-secret',
+      fetchDeps: loopbackDeps(server.port),
+    });
+    expect(resolution).toEqual({ kind: 'unresolved', reason: 'no_match' });
   });
 
   it('returns the single match as a dash-stripped 32-hex id plus its title', async () => {

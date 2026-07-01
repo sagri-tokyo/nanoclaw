@@ -353,7 +353,7 @@ export async function resolveNotionTarget(
     body: JSON.stringify({
       query,
       filter: { property: 'object', value: 'page' },
-      page_size: 10,
+      page_size: 20,
     }),
     deps: fetchDeps,
   });
@@ -361,14 +361,17 @@ export async function resolveNotionTarget(
   if (!Array.isArray(results)) {
     return { kind: 'unresolved', reason: 'no_match' };
   }
-  // Keep only exact (trimmed, case-insensitive) title matches, then apply
-  // one-match-or-abort over that filtered set. A relevance hit whose title does
-  // not equal the query is not the page the operator named.
-  const wanted = query.trim().toLowerCase();
+  // Keep only exact title matches, then apply one-match-or-abort over that
+  // filtered set. A relevance hit whose title does not equal the query is not
+  // the page the operator named. Compare trimmed, NFC-normalized (so composed
+  // vs decomposed accents match), and case-insensitively.
+  const normalize = (value: string) =>
+    value.trim().normalize('NFC').toLowerCase();
+  const wanted = normalize(query);
   const matches = results.filter((page): page is Record<string, unknown> => {
     if (!isPlainObject(page) || typeof page.id !== 'string') return false;
     const title = extractTitle(page);
-    return title !== null && title.trim().toLowerCase() === wanted;
+    return title !== null && normalize(title) === wanted;
   });
   if (matches.length === 0) {
     return { kind: 'unresolved', reason: 'no_match' };
