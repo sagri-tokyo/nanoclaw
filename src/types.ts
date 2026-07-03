@@ -39,7 +39,7 @@ export interface RegisteredGroup {
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
-  isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  isMain?: boolean; // True for the main control group (elevated mount/visibility privileges; does not affect trigger gating)
 }
 
 // Reference to a Slack file attachment. Metadata only — never bytes. A ref may

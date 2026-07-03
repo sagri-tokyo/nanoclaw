@@ -370,8 +370,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const isMainGroup = group.isMain === true;
-
   const missedMessages = getMessagesSince(
     chatJid,
     getOrRecoverCursor(chatJid),
@@ -381,15 +379,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // Explicit @mention trigger (today's behaviour). Main / no-trigger groups
-  // always proceed, but thread targeting only follows the actual trigger.
+  // Explicit @mention trigger (today's behaviour). No-trigger groups always
+  // proceed, but thread targeting only follows the actual trigger.
   const explicitTrigger = findExplicitTriggerMessage(
     chatJid,
     missedMessages,
     group,
   );
-  const triggered =
-    isMainGroup || group.requiresTrigger === false || explicitTrigger !== null;
+  const triggered = group.requiresTrigger === false || explicitTrigger !== null;
 
   // Determine the thread to act in: an explicit trigger uses its own thread; a
   // no-mention follow-up uses the candidate's thread. Thread context is
@@ -746,15 +743,14 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const needsTrigger = group.requiresTrigger !== false;
           const explicitTrigger = findExplicitTriggerMessage(
             chatJid,
             groupMessages,
             group,
           );
 
-          // For non-main groups, only act on trigger messages.
+          // For trigger-required groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
