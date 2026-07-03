@@ -93,6 +93,9 @@ function deps(
     fetchDeps: loopbackDeps(server.port),
     spawnGh: async (args) => {
       ghCalls.push({ args });
+      if (args[1] === 'list') {
+        return { stdout: '[]', code: 0 };
+      }
       return {
         stdout: 'https://github.com/sagri-tokyo/sagri-ai/issues/1\n',
         code: 0,
@@ -184,7 +187,7 @@ describe('notion writers', () => {
 });
 
 describe('github writers', () => {
-  it('file_issue spawns gh with an arg array against the allowlisted repo', async () => {
+  it('file_issue searches for duplicates then spawns gh create when none exist', async () => {
     await executeOrgAction(
       {
         action: 'github.file_issue',
@@ -193,8 +196,22 @@ describe('github writers', () => {
       },
       deps(),
     );
-    expect(ghCalls).toHaveLength(1);
+    expect(ghCalls).toHaveLength(2);
     expect(ghCalls[0].args).toEqual([
+      'issue',
+      'list',
+      '--repo',
+      'sagri-tokyo/sagri-ai',
+      '--search',
+      'Bug',
+      '--state',
+      'all',
+      '--json',
+      'title,url',
+      '--limit',
+      '5',
+    ]);
+    expect(ghCalls[1].args).toEqual([
       'issue',
       'create',
       '--repo',
@@ -204,6 +221,152 @@ describe('github writers', () => {
       '--body',
       'Details',
     ]);
+  });
+
+  it('refuses to file when a case-insensitive title match already exists', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'Existing Bug', body: 'd' },
+        },
+        deps({
+          spawnGh: async (args) => {
+            ghCalls.push({ args });
+            if (args[1] === 'list') {
+              return {
+                stdout: JSON.stringify([
+                  {
+                    number: 291,
+                    title: 'existing bug',
+                    url: 'https://github.com/sagri-tokyo/sagri-ai/issues/291',
+                  },
+                ]),
+                code: 0,
+              };
+            }
+            return { stdout: '', code: 0 };
+          },
+        }),
+      ),
+    ).rejects.toThrow(/already exists.*issues\/291/);
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
+  });
+
+  it('refuses when an existing title is a substring of the new title', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            title: 'Dedup file_issue against existing open issues',
+            body: 'd',
+          },
+        },
+        deps({
+          spawnGh: async (args) => {
+            ghCalls.push({ args });
+            if (args[1] === 'list') {
+              return {
+                stdout: JSON.stringify([
+                  {
+                    title: 'dedup file_issue',
+                    url: 'https://github.com/sagri-tokyo/sagri-ai/issues/362',
+                  },
+                ]),
+                code: 0,
+              };
+            }
+            return { stdout: '', code: 0 };
+          },
+        }),
+      ),
+    ).rejects.toThrow(/issues\/362/);
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
+  });
+
+  it('skips a malformed hit but still catches a real duplicate later in the list', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'Real Dup', body: 'd' },
+        },
+        deps({
+          spawnGh: async (args) => {
+            ghCalls.push({ args });
+            if (args[1] === 'list') {
+              return {
+                stdout: JSON.stringify([
+                  { number: 1 },
+                  {
+                    title: 'real dup',
+                    url: 'https://github.com/sagri-tokyo/sagri-ai/issues/9',
+                  },
+                ]),
+                code: 0,
+              };
+            }
+            return { stdout: '', code: 0 };
+          },
+        }),
+      ),
+    ).rejects.toThrow(/issues\/9/);
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
+  });
+
+  it('files when the search returns only topically-unrelated issues', async () => {
+    await executeOrgAction(
+      {
+        action: 'github.file_issue',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        canonical_args: { title: 'Add dedup check to file_issue', body: 'd' },
+      },
+      deps({
+        spawnGh: async (args) => {
+          ghCalls.push({ args });
+          if (args[1] === 'list') {
+            return {
+              stdout: JSON.stringify([
+                {
+                  number: 5,
+                  title: 'Something completely different',
+                  url: 'https://github.com/sagri-tokyo/sagri-ai/issues/5',
+                },
+              ]),
+              code: 0,
+            };
+          }
+          return { stdout: 'created', code: 0 };
+        },
+      }),
+    );
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list', 'create']);
+  });
+
+  it('refuses (does not create) when the duplicate search itself fails', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'Bug', body: 'd' },
+        },
+        deps({
+          spawnGh: async (args) => {
+            ghCalls.push({ args });
+            if (args[1] === 'list') {
+              return { stdout: '', stderr: 'search boom', code: 1 };
+            }
+            return { stdout: 'created', code: 0 };
+          },
+        }),
+      ),
+    ).rejects.toThrow(/gh issue list/);
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
   });
 
   it('open_draft_pr always passes --draft', async () => {

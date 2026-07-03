@@ -232,6 +232,34 @@ export async function executeOrgAction(
         'body',
         BODY_MAX,
       );
+      // ponytail: best-effort, non-atomic. Two concurrent file_issue replays
+      // for the same title can both pass this check before either creates.
+      // Fine here — org-actions execute serially after single-approval, and
+      // GitHub has no issue-creation idempotency key to make it atomic.
+      const search = await spawnGh(
+        [
+          'issue',
+          'list',
+          '--repo',
+          request.target_ref,
+          '--search',
+          title,
+          '--state',
+          'all',
+          '--json',
+          'title,url',
+          '--limit',
+          '5',
+        ],
+        deps.githubToken,
+      );
+      assertGhOk(search, 'gh issue list');
+      const duplicate = findDuplicateIssue(search.stdout, title);
+      if (duplicate !== null) {
+        throw new Error(
+          `org-action: a similar issue already exists: ${duplicate.url} ("${duplicate.title}") — refusing to file a duplicate`,
+        );
+      }
       const result = await spawnGh(
         [
           'issue',
@@ -391,6 +419,49 @@ export async function resolveNotionTarget(
     );
   }
   return { kind: 'resolved', id, title: extractTitle(page) };
+}
+
+interface IssueSearchHit {
+  title: string;
+  url: string;
+}
+
+// Search-before-create dedup for `github.file_issue`: gh already relevance-
+// ranks candidates server-side via `--search <title>`, so this only needs to
+// decide which of those candidates counts as "the same issue". A case-
+// insensitive exact-or-substring title match is the smallest check that would
+// have caught the 2026-07-03 near-miss (re-filing sagri-ai#291 whose card was
+// unfurled in the same message).
+// ponytail: exact/substring title match, not fuzzy. If real near-dupes slip
+// through with reworded titles, swap in a token-overlap score here.
+function findDuplicateIssue(
+  searchStdout: string,
+  title: string,
+): IssueSearchHit | null {
+  const parsed = JSON.parse(searchStdout);
+  if (!Array.isArray(parsed)) {
+    throw new Error('org-action: gh issue list returned a non-array payload');
+  }
+  const normalize = (value: string) =>
+    value.trim().normalize('NFC').toLowerCase();
+  const wanted = normalize(title);
+  for (const hit of parsed) {
+    if (!isPlainObject(hit) || typeof hit.title !== 'string') continue;
+    const existing = normalize(hit.title);
+    if (existing.length === 0) continue;
+    const isMatch =
+      existing === wanted ||
+      existing.includes(wanted) ||
+      wanted.includes(existing);
+    if (!isMatch) continue;
+    if (typeof hit.url !== 'string') {
+      throw new Error(
+        'org-action: gh issue list hit matched by title but has no url',
+      );
+    }
+    return { title: hit.title, url: hit.url };
+  }
+  return null;
 }
 
 function assertAllowlistedRepo(repo: string): void {
