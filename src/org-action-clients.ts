@@ -461,11 +461,13 @@ function findDuplicateIssue(
     return existing.includes(wanted) || wanted.includes(existing);
   };
   const hit = parsed.find(
-    (candidate): candidate is Record<string, unknown> =>
-      isPlainObject(candidate) &&
-      typeof candidate.title === 'string' &&
-      normalize(candidate.title).length > 0 &&
-      isMatch(normalize(candidate.title)),
+    (candidate): candidate is { title: string } & Record<string, unknown> => {
+      if (!isPlainObject(candidate) || typeof candidate.title !== 'string') {
+        return false;
+      }
+      const existing = normalize(candidate.title);
+      return existing.length > 0 && isMatch(existing);
+    },
   );
   if (!hit) return null;
   if (typeof hit.url !== 'string') {
@@ -473,7 +475,7 @@ function findDuplicateIssue(
       'org-action: gh issue list hit matched by title but has no url',
     );
   }
-  return { title: hit.title as string, url: hit.url };
+  return { title: hit.title, url: hit.url };
 }
 
 function assertAllowlistedRepo(repo: string): void {

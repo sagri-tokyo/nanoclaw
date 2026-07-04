@@ -400,6 +400,28 @@ describe('github writers', () => {
     expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
   });
 
+  it('refuses (does not create) when the search returns malformed JSON', async () => {
+    await expect(
+      executeOrgAction(
+        {
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: { title: 'Bug', body: 'd' },
+        },
+        deps({
+          spawnGh: async (args) => {
+            ghCalls.push({ args });
+            if (args[1] === 'list') {
+              return { stdout: 'not json', code: 0 };
+            }
+            return { stdout: 'created', code: 0 };
+          },
+        }),
+      ),
+    ).rejects.toThrow(/invalid JSON/);
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
+  });
+
   it('open_draft_pr always passes --draft', async () => {
     await executeOrgAction(
       {
