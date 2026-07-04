@@ -439,10 +439,7 @@ interface IssueSearchHit {
 const SUBSTRING_MATCH_MIN_LENGTH = 8;
 // A substring hit alone false-positives on a generic phrase that happens to
 // open an unrelated, more specific title (e.g. "Fix the API error" inside
-// "Fix the API error handling bug in upload"). Requiring the shorter title
-// to cover most of the longer one keeps genuine near-dupes (same title,
-// minor rewording) while rejecting a short generic clause absorbed into an
-// unrelated longer one.
+// "Fix the API error handling bug in upload").
 const SUBSTRING_MATCH_MIN_LENGTH_RATIO = 0.6;
 // gh already relevance-ranks hits server-side; widening past the top few
 // results still cheaply covers most real duplicates without a second page.
@@ -466,10 +463,11 @@ function findDuplicateIssue(
   const wanted = normalize(title);
   const isMatch = (existing: string): boolean => {
     if (existing === wanted) return true;
-    if (existing.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
-    if (wanted.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
     const [shorter, longer] =
-      existing.length <= wanted.length ? [existing, wanted] : [wanted, existing];
+      existing.length <= wanted.length
+        ? [existing, wanted]
+        : [wanted, existing];
+    if (shorter.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
     if (!longer.includes(shorter)) return false;
     return shorter.length / longer.length >= SUBSTRING_MATCH_MIN_LENGTH_RATIO;
   };
