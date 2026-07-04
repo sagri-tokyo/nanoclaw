@@ -434,34 +434,46 @@ interface IssueSearchHit {
 // unfurled in the same message).
 // ponytail: exact/substring title match, not fuzzy. If real near-dupes slip
 // through with reworded titles, swap in a token-overlap score here.
+// SUBSTRING_MATCH_MIN_LENGTH guards against a short title (e.g. "Bug fix")
+// substring-matching nearly everything in the search results.
+const SUBSTRING_MATCH_MIN_LENGTH = 8;
+
 function findDuplicateIssue(
   searchStdout: string,
   title: string,
 ): IssueSearchHit | null {
-  const parsed = JSON.parse(searchStdout);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(searchStdout);
+  } catch {
+    throw new Error('org-action: gh issue list returned invalid JSON');
+  }
   if (!Array.isArray(parsed)) {
     throw new Error('org-action: gh issue list returned a non-array payload');
   }
   const normalize = (value: string) =>
     value.trim().normalize('NFC').toLowerCase();
   const wanted = normalize(title);
-  for (const hit of parsed) {
-    if (!isPlainObject(hit) || typeof hit.title !== 'string') continue;
-    const existing = normalize(hit.title);
-    if (existing.length === 0) continue;
-    const isMatch =
-      existing === wanted ||
-      existing.includes(wanted) ||
-      wanted.includes(existing);
-    if (!isMatch) continue;
-    if (typeof hit.url !== 'string') {
-      throw new Error(
-        'org-action: gh issue list hit matched by title but has no url',
-      );
-    }
-    return { title: hit.title, url: hit.url };
+  const isMatch = (existing: string): boolean => {
+    if (existing === wanted) return true;
+    if (existing.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
+    if (wanted.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
+    return existing.includes(wanted) || wanted.includes(existing);
+  };
+  const hit = parsed.find(
+    (candidate): candidate is Record<string, unknown> =>
+      isPlainObject(candidate) &&
+      typeof candidate.title === 'string' &&
+      normalize(candidate.title).length > 0 &&
+      isMatch(normalize(candidate.title)),
+  );
+  if (!hit) return null;
+  if (typeof hit.url !== 'string') {
+    throw new Error(
+      'org-action: gh issue list hit matched by title but has no url',
+    );
   }
-  return null;
+  return { title: hit.title as string, url: hit.url };
 }
 
 function assertAllowlistedRepo(repo: string): void {

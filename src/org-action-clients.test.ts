@@ -347,6 +347,37 @@ describe('github writers', () => {
     expect(ghCalls.map((c) => c.args[1])).toEqual(['list', 'create']);
   });
 
+  it('files when a short title would otherwise substring-match an unrelated issue', async () => {
+    // "Bug" is a substring of the existing title below; without a minimum
+    // length on the substring check this would wrongly refuse as a dupe.
+    await executeOrgAction(
+      {
+        action: 'github.file_issue',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        canonical_args: { title: 'Bug', body: 'd' },
+      },
+      deps({
+        spawnGh: async (args) => {
+          ghCalls.push({ args });
+          if (args[1] === 'list') {
+            return {
+              stdout: JSON.stringify([
+                {
+                  number: 5,
+                  title: 'Bug in the deployment pipeline',
+                  url: 'https://github.com/sagri-tokyo/sagri-ai/issues/5',
+                },
+              ]),
+              code: 0,
+            };
+          }
+          return { stdout: 'created', code: 0 };
+        },
+      }),
+    );
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list', 'create']);
+  });
+
   it('refuses (does not create) when the duplicate search itself fails', async () => {
     await expect(
       executeOrgAction(
