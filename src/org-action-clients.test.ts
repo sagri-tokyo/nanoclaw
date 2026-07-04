@@ -209,7 +209,7 @@ describe('github writers', () => {
       '--json',
       'title,url',
       '--limit',
-      '5',
+      '25',
     ]);
     expect(ghCalls[1].args).toEqual([
       'issue',
@@ -254,14 +254,16 @@ describe('github writers', () => {
     expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
   });
 
-  it('refuses when an existing title is a substring of the new title', async () => {
+  it('refuses when an existing title is a near-identical substring of the new title', async () => {
+    // High length overlap (near dupe with a short appended note), unlike the
+    // generic-phrase-prefix case below.
     await expect(
       executeOrgAction(
         {
           action: 'github.file_issue',
           target_ref: 'sagri-tokyo/sagri-ai',
           canonical_args: {
-            title: 'Dedup file_issue against existing open issues',
+            title: 'Dedup file_issue against existing open issues (typo)',
             body: 'd',
           },
         },
@@ -272,7 +274,7 @@ describe('github writers', () => {
               return {
                 stdout: JSON.stringify([
                   {
-                    title: 'dedup file_issue',
+                    title: 'Dedup file_issue against existing open issues',
                     url: 'https://github.com/sagri-tokyo/sagri-ai/issues/362',
                   },
                 ]),
@@ -285,6 +287,42 @@ describe('github writers', () => {
       ),
     ).rejects.toThrow(/issues\/362/);
     expect(ghCalls.map((c) => c.args[1])).toEqual(['list']);
+  });
+
+  it('files when a generic phrase is a strict prefix of a longer, unrelated title', async () => {
+    // "Fix the API error" is a real substring of the new title below but
+    // covers well under SUBSTRING_MATCH_MIN_LENGTH_RATIO of it, so this must
+    // not be treated as a duplicate (greptile P1: generic-phrase false
+    // positive).
+    await executeOrgAction(
+      {
+        action: 'github.file_issue',
+        target_ref: 'sagri-tokyo/sagri-ai',
+        canonical_args: {
+          title: 'Fix the API error handling bug in upload',
+          body: 'd',
+        },
+      },
+      deps({
+        spawnGh: async (args) => {
+          ghCalls.push({ args });
+          if (args[1] === 'list') {
+            return {
+              stdout: JSON.stringify([
+                {
+                  number: 5,
+                  title: 'Fix the API error',
+                  url: 'https://github.com/sagri-tokyo/sagri-ai/issues/5',
+                },
+              ]),
+              code: 0,
+            };
+          }
+          return { stdout: 'created', code: 0 };
+        },
+      }),
+    );
+    expect(ghCalls.map((c) => c.args[1])).toEqual(['list', 'create']);
   });
 
   it('skips a malformed hit but still catches a real duplicate later in the list', async () => {

@@ -249,7 +249,7 @@ export async function executeOrgAction(
           '--json',
           'title,url',
           '--limit',
-          '5',
+          String(DUPLICATE_SEARCH_LIMIT),
         ],
         deps.githubToken,
       );
@@ -437,6 +437,16 @@ interface IssueSearchHit {
 // SUBSTRING_MATCH_MIN_LENGTH guards against a short title (e.g. "Bug fix")
 // substring-matching nearly everything in the search results.
 const SUBSTRING_MATCH_MIN_LENGTH = 8;
+// A substring hit alone false-positives on a generic phrase that happens to
+// open an unrelated, more specific title (e.g. "Fix the API error" inside
+// "Fix the API error handling bug in upload"). Requiring the shorter title
+// to cover most of the longer one keeps genuine near-dupes (same title,
+// minor rewording) while rejecting a short generic clause absorbed into an
+// unrelated longer one.
+const SUBSTRING_MATCH_MIN_LENGTH_RATIO = 0.6;
+// gh already relevance-ranks hits server-side; widening past the top few
+// results still cheaply covers most real duplicates without a second page.
+const DUPLICATE_SEARCH_LIMIT = 25;
 
 function findDuplicateIssue(
   searchStdout: string,
@@ -458,7 +468,10 @@ function findDuplicateIssue(
     if (existing === wanted) return true;
     if (existing.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
     if (wanted.length < SUBSTRING_MATCH_MIN_LENGTH) return false;
-    return existing.includes(wanted) || wanted.includes(existing);
+    const [shorter, longer] =
+      existing.length <= wanted.length ? [existing, wanted] : [wanted, existing];
+    if (!longer.includes(shorter)) return false;
+    return shorter.length / longer.length >= SUBSTRING_MATCH_MIN_LENGTH_RATIO;
   };
   const hit = parsed.find(
     (candidate): candidate is { title: string } & Record<string, unknown> => {
