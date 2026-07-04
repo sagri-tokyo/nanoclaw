@@ -62,6 +62,7 @@ import {
   findChannel,
   formatMessagesViaReader,
   formatOutbound,
+  isTriggerRequired,
 } from './router.js';
 import {
   restoreRemoteControl,
@@ -386,7 +387,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages,
     group,
   );
-  const triggered = group.requiresTrigger === false || explicitTrigger !== null;
+  const triggered = !isTriggerRequired(group) || explicitTrigger !== null;
 
   // Determine the thread to act in: an explicit trigger uses its own thread; a
   // no-mention follow-up uses the candidate's thread. Thread context is
@@ -743,7 +744,7 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const needsTrigger = group.requiresTrigger !== false;
+          const needsTrigger = isTriggerRequired(group);
           const explicitTrigger = findExplicitTriggerMessage(
             chatJid,
             groupMessages,
