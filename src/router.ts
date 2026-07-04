@@ -5,7 +5,9 @@ import { logger } from './logger.js';
 
 // Trigger gating depends only on requiresTrigger (default true). isMain does
 // not bypass it: the main group is trigger-only like any other (sagri-ai#361).
-export function isTriggerRequired(group: RegisteredGroup): boolean {
+export function isTriggerRequired(
+  group: Pick<RegisteredGroup, 'requiresTrigger'>,
+): boolean {
   return group.requiresTrigger !== false;
 }
 

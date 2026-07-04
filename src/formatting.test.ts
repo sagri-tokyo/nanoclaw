@@ -12,7 +12,7 @@ import {
   isTriggerRequired,
   stripInternalTags,
 } from './router.js';
-import { NewMessage, RegisteredGroup } from './types.js';
+import { NewMessage } from './types.js';
 
 function makeMsg(overrides: Partial<NewMessage> = {}): NewMessage {
   return {
@@ -289,16 +289,16 @@ describe('formatOutbound', () => {
 // --- Trigger gating with requiresTrigger flag ---
 
 describe('trigger gating (requiresTrigger interaction)', () => {
-  // Exercises the real isTriggerRequired gate (imported from router). The
-  // message-scan half mirrors processGroupMessages/startMessageLoop, which
-  // do not extract that step. isMain no longer bypasses the gate
+  // Exercises the real isTriggerRequired gate (imported from router); the
+  // message-scan half still mirrors processGroupMessages/startMessageLoop
+  // rather than being extracted. isMain no longer bypasses the gate
   // (sagri-ai#361): the main group is trigger-only like any other.
   function shouldProcess(
     requiresTrigger: boolean | undefined,
     trigger: string | undefined,
     messages: NewMessage[],
   ): boolean {
-    if (!isTriggerRequired({ requiresTrigger } as RegisteredGroup)) return true;
+    if (!isTriggerRequired({ requiresTrigger })) return true;
     const triggerPattern = getTriggerPattern(trigger);
     return messages.some((m) => triggerPattern.test(m.content.trim()));
   }
