@@ -1,7 +1,15 @@
-import { Channel, NewMessage } from './types.js';
+import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { formatLocalTime } from './timezone.js';
 import { readUntrustedContent, type ReaderOutput } from './reader.js';
 import { logger } from './logger.js';
+
+// Trigger gating depends only on requiresTrigger (default true). isMain does
+// not bypass it: the main group is trigger-only like any other (sagri-ai#361).
+export function isTriggerRequired(
+  group: Pick<RegisteredGroup, 'requiresTrigger'>,
+): boolean {
+  return group.requiresTrigger !== false;
+}
 
 export function escapeXml(s: string): string {
   if (!s) return '';
