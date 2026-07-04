@@ -12,7 +12,7 @@ import {
   isTriggerRequired,
   stripInternalTags,
 } from './router.js';
-import { NewMessage } from './types.js';
+import { NewMessage, RegisteredGroup } from './types.js';
 
 function makeMsg(overrides: Partial<NewMessage> = {}): NewMessage {
   return {
@@ -306,6 +306,12 @@ describe('trigger gating (requiresTrigger interaction)', () => {
   it('group with requiresTrigger=undefined requires trigger (defaults to true)', () => {
     const msgs = [makeMsg({ content: 'hello no trigger' })];
     expect(shouldProcess(undefined, undefined, msgs)).toBe(false);
+  });
+
+  it('ignores isMain: a main group with requiresTrigger=true still requires a trigger (sagri-ai#361)', () => {
+    const mainGroupConfig: Pick<RegisteredGroup, 'requiresTrigger' | 'isMain'> =
+      { requiresTrigger: true, isMain: true };
+    expect(isTriggerRequired(mainGroupConfig)).toBe(true);
   });
 
   it('group with requiresTrigger=true requires trigger', () => {
