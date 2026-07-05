@@ -214,7 +214,12 @@ interface ThreadFollowupCandidate {
 }
 
 interface ExplicitTriggerMessage {
+  // The Slack thread the trigger lives in, or undefined for a top-level
+  // message. Drives whether thread context is fetched (SLACK_THREAD_FOLLOWUPS).
   threadId?: string;
+  // The trigger's own ts. Always the reply anchor, so an outbound never falls
+  // back to the channel's mutable lastThreadTs map.
+  anchorTs: string;
 }
 
 function isAllowedTriggerMessage(
@@ -240,7 +245,8 @@ function isEligibleHumanMessage(
   );
 }
 
-function findExplicitTriggerMessage(
+/** @internal - exported for testing */
+export function findExplicitTriggerMessage(
   chatJid: string,
   msgs: NewMessage[],
   group: RegisteredGroup,
@@ -253,10 +259,27 @@ function findExplicitTriggerMessage(
       triggerPattern.test(message.content.trim()) &&
       isAllowedTriggerMessage(chatJid, message, allowlistCfg)
     ) {
-      return { threadId: message.thread_id };
+      return { threadId: message.thread_id, anchorTs: message.id };
     }
   }
   return null;
+}
+
+/**
+ * Reply anchor for a batch with no explicit trigger (a requiresTrigger:false
+ * group that proceeds anyway): the newest human message's thread, else its own
+ * ts. Skips trailing bot messages so the anchor tracks the human being
+ * answered. The bot-skip is belt-and-suspenders at the current call site —
+ * getMessagesSince already filters bot rows — but keeps the helper correct for
+ * any future caller passing unfiltered messages.
+ *
+ * @internal - exported for testing
+ */
+export function newestHumanThreadAnchor(
+  messages: NewMessage[],
+): string | undefined {
+  const anchor = [...messages].reverse().find((m) => !m.is_bot_message);
+  return anchor?.thread_id ?? anchor?.id;
 }
 
 /**
@@ -389,13 +412,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
   const triggered = !isTriggerRequired(group) || explicitTrigger !== null;
 
-  // Determine the thread to act in: an explicit trigger uses its own thread; a
-  // no-mention follow-up uses the candidate's thread. Thread context is
-  // opt-in so default-off explicit mentions keep the existing prompt shape.
-  let targetThreadId: string | undefined;
+  // Anchor the reply to the triggering message's own ts, so sendMessage never
+  // falls back to the channel's live lastThreadTs map (which a faster
+  // concurrent request can overwrite while this one runs). Thread context for
+  // the prompt is a separate concern, opt-in behind SLACK_THREAD_FOLLOWUPS and
+  // only for a trigger that actually lives inside a thread.
+  let targetThreadId: string | undefined =
+    explicitTrigger?.threadId ?? explicitTrigger?.anchorTs;
   let useThreadContext = false;
   if (SLACK_THREAD_FOLLOWUPS && explicitTrigger?.threadId) {
-    targetThreadId = explicitTrigger.threadId;
     useThreadContext = true;
   } else if (!triggered) {
     const candidate =
@@ -404,6 +429,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!candidate) return true; // not a trigger and not a follow-up — keep as context
     targetThreadId = candidate.threadId;
     useThreadContext = true;
+  }
+
+  // A requiresTrigger:false group proceeds without a matching @mention, so no
+  // explicit trigger anchors the reply. Fall back to the newest human message's
+  // own ts — never the live lastThreadTs map.
+  if (!targetThreadId) {
+    targetThreadId = newestHumanThreadAnchor(missedMessages);
   }
 
   // Fetch thread context once (used by the judge and/or the prompt).

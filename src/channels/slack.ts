@@ -220,9 +220,9 @@ export class SlackChannel implements Channel {
 
       const jid = `slack:${msg.channel}`;
 
-      // Track thread context so outbound replies go to the correct thread.
-      // NanoClaw processes one message at a time per group (sequential queue),
-      // so storing the most recent thread_ts per channel is sufficient.
+      // Last-resort fallback only: ingestion isn't gated on the per-group
+      // queue, so a slower reply must anchor via its own SendOptions.threadId —
+      // a faster concurrent request can overwrite this map in real time.
       const threadTs = (msg as GenericMessageEvent).thread_ts;
       if (threadTs) {
         this.lastThreadTs.set(jid, threadTs);
