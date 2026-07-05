@@ -1110,6 +1110,48 @@ describe('SlackChannel', () => {
     });
   });
 
+  // --- reply thread anchoring under concurrency (sagri-ai#368) ---
+
+  describe('reply thread anchoring', () => {
+    it('anchors to the explicit SendOptions.threadId, not the live lastThreadTs a faster request overwrote', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      // A faster, unrelated request arrives and is answered first, overwriting
+      // the channel's live last-seen message while the slow request still runs.
+      await triggerMessageEvent(
+        createMessageEvent({ ts: '1700000000.999', text: 'unrelated' }),
+      );
+
+      // The slow request's reply carries its own trigger ts as the anchor.
+      await channel.sendMessage('slack:C0123456789', 'slow reply', {
+        threadId: '1700000000.111',
+      });
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'slow reply',
+        thread_ts: '1700000000.111',
+      });
+    });
+
+    it('falls back to the live lastThreadTs only when no anchor is given', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ ts: '1700000000.999', text: 'unrelated' }),
+      );
+      await channel.sendMessage('slack:C0123456789', 'unanchored reply');
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'unanchored reply',
+        thread_ts: '1700000000.999',
+      });
+    });
+  });
+
   // --- ownsJid ---
 
   describe('ownsJid', () => {
