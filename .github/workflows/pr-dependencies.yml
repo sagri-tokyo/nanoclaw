@@ -27,8 +27,10 @@ jobs:
           ORG: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
+          # Keep lines carrying a marker, then pull every PR URL from them, so
+          # both bare and markdown-link (Depends-On: [x](url)) forms are caught.
           urls=$(printf '%s' "$BODY" \
-            | grep -oiE '(Depends-On|Blocked by)[: ][[:space:]]*https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+            | grep -iE '(Depends-On|Blocked by)' \
             | grep -oiE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' || true)
           [ -z "$urls" ] && exit 0
           blocked=0
