@@ -1,0 +1,40 @@
+name: pr-dependencies
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # PR_DEP_TOKEN needs read access to every repo a Depends-On may point at.
+      # The built-in GITHUB_TOKEN only sees this repo, so cross-repo private
+      # reads fail without it. Fail fast rather than silently pass.
+      - name: Block on unmerged cross-repo dependencies
+        env:
+          GH_TOKEN: ${{ secrets.PR_DEP_TOKEN }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          urls=$(printf '%s' "$BODY" \
+            | grep -oiE '(Depends-On|Blocked by)[: ][[:space:]]*https://github\.com/[^/]+/[^/]+/pull/[0-9]+' \
+            | grep -oiE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' || true)
+          if [ -z "$urls" ]; then
+            echo "No Depends-On / Blocked by dependencies declared." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          blocked=0
+          echo "| dependency | state |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          for url in $urls; do
+            slug=$(echo "$url" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/[0-9]+#\1#')
+            number=$(echo "$url" | grep -oE '[0-9]+$')
+            state=$(gh pr view "$number" --repo "$slug" --json state,merged -q 'if .merged then "merged" else .state end')
+            echo "| $url | $state |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$state" != "merged" ]; then
+              echo "::error::blocked by $url (state: $state)"
+              blocked=1
+            fi
+          done
+          exit $blocked
