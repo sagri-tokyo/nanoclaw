@@ -4,9 +4,9 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
   # A merged dependency fires no event on the blocked PR, so its check stays
-  # red until re-run. The working re-run is the check's "Re-run" button (it
-  # replays the pull_request context); workflow_dispatch is a manual entrypoint
-  # for the deferred auto-revalidation sweep. ponytail: sweep tracked as follow-up.
+  # red until re-run. The working re-run is the check's "Re-run" button, which
+  # replays the pull_request context; workflow_dispatch is a manual entrypoint
+  # for the auto-revalidation sweep tracked in sagri-tokyo/sagri-ai#404.
   workflow_dispatch:
 
 jobs:
