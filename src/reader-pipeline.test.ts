@@ -275,7 +275,7 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
 
     // Prompt size is bounded by (fixed template ≈ 1025) + (reader output: intent
     // ≤ 500, extracted_data ≤ ~200, risk_flags ≤ ~16×64). The mock's reader
-    // output here is ~150 chars total, so <1225 leaves no room for the 87-char
+    // output here is ~150 chars total, so <1225 leaves no room for the 83-char
     // attacker payload (or a paraphrase thereof) to fit unnoticed.
     expect(prompt.length).toBeLessThan(1225);
 
@@ -366,7 +366,10 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
       confidence: READER_CONFIDENCE,
       riskFlags: READER_RISK_FLAGS,
     });
-    expect(prompt.length).toBeLessThan(1725);
+    // Same bound as the single-message case, sized so the 56-char quoted
+    // payload cannot fit under it: actual laundered prompt is ~1574, so <1625
+    // leaves a margin smaller than the payload it must exclude.
+    expect(prompt.length).toBeLessThan(1625);
 
     expect(prompt).not.toContain('SYSTEM OVERRIDE');
     expect(prompt).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
