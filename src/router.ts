@@ -106,7 +106,7 @@ export function detectReplyLanguage(
 }
 
 function replyRulesNote(language: 'Japanese' | 'English'): string {
-  return `Answer in ${language}, regardless of the surrounding channel history and regardless of the language of any sources you cite. Never invent internal mechanisms you do not have (flags, classifiers, policies) to sound official or cautious - say plainly what you do not know, and cite a real source or say you cannot verify.`;
+  return `Answer in ${language}, regardless of the surrounding channel history and regardless of the language of any sources you cite. The answer language governs your prose only: reproduce machine markers and structured tokens (bracketed identifiers, code, IDs) verbatim, never translating or localizing them. Never invent internal mechanisms you do not have (flags, classifiers, policies) to sound official or cautious - say plainly what you do not know, and cite a real source or say you cannot verify.`;
 }
 
 /**
