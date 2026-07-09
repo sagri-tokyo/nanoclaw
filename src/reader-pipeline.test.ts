@@ -366,9 +366,8 @@ describe('reader pipeline — end-to-end prompt laundering', () => {
       confidence: READER_CONFIDENCE,
       riskFlags: READER_RISK_FLAGS,
     });
-    // Same bound as the single-message case, sized so the 56-char quoted
-    // payload cannot fit under it: actual laundered prompt is ~1574, so <1625
-    // leaves a margin smaller than the payload it must exclude.
+    // Same margin-sizing rationale as line 276: actual is ~1574, so <1625
+    // excludes the 56-char quoted payload.
     expect(prompt.length).toBeLessThan(1625);
 
     expect(prompt).not.toContain('SYSTEM OVERRIDE');
