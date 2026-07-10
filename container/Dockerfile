@@ -25,8 +25,21 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     jq \
+    unzip \
     uuid-runtime \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2, required by the sagri-ai skills that shell out to `aws`
+# (dsm-experiment poller and skill, sagri-batch, sagri-dsm). Without it those
+# tasks fail with `aws: command not found` at the cross-account assume-role step.
+# Pinned and checksum-verified; x86_64 only, matching the amd64 EC2 runtime.
+ARG AWS_CLI_VERSION=2.35.20
+ARG AWS_CLI_SHA256=a4aa00212a97e6a5abd38cde5524719f7f5f122a6dcfdbc974eefdf741de1be6
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip" -o /tmp/awscliv2.zip \
+    && echo "${AWS_CLI_SHA256}  /tmp/awscliv2.zip" | sha256sum -c - \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
