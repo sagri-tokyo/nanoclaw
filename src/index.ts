@@ -1076,8 +1076,20 @@ async function main(): Promise<void> {
       );
       continue;
     }
-    channels.push(channel);
-    await channel.connect();
+    // Isolate per-channel connect failures. A channel that fails closed (e.g.
+    // Slack rejecting on auth.test() so it never opens a socket deaf to the
+    // kill switch) must not abort startup for the other channels. Only add a
+    // channel once it has connected; if every channel fails the length check
+    // below still exits fatally.
+    try {
+      await channel.connect();
+      channels.push(channel);
+    } catch (err) {
+      logger.error(
+        { channel: channelName, err },
+        'Channel failed to connect, skipping',
+      );
+    }
   }
   if (channels.length === 0) {
     logger.fatal('No channels connected');
