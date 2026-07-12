@@ -1002,9 +1002,6 @@ async function main(): Promise<void> {
               { request },
               'org-action STUB: external write suppressed (NANOCLAW_STUB_ORG_WRITES=1)',
             );
-            console.log(
-              `\n  [STUB ORG-WRITE FIRED] ${request.action} target=${request.target_ref} args=${JSON.stringify(request.canonical_args)}\n`,
-            );
           }
         : async (request) =>
             executeOrgAction(request, {

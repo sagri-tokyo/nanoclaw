@@ -540,7 +540,10 @@ describe('logger.action emission', () => {
 });
 
 describe('logger.action ANTHROPIC_API_KEY redaction sentinel', () => {
-  const TOKEN = 'sk-ant-test-key-1234567890';
+  // Deliberately not a recognisable secret shape: this block isolates the
+  // env-value substring scan, so the value must not independently trip the
+  // pattern-based sentinel in logger-redactor.ts.
+  const TOKEN = 'env-configured-token-value-abc123';
   let originalKey: string | undefined;
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
   let stderrSpy: ReturnType<typeof vi.spyOn>;

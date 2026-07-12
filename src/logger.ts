@@ -18,8 +18,15 @@
  * Hashing helpers (`hashPayload`, `canonicalJson`) are exported so call
  * sites can hash inputs/outputs without duplicating canonicalisation logic.
  * Bare hex sha256 — no salt, no prefix, no truncation.
+ *
+ * Every entrypoint (`debug`/`info`/`warn`/`error`/`fatal`/`action`) routes its
+ * payload through the redaction sentinel (`assertNoSensitiveValues`) before
+ * emitting. A payload carrying a secret-shaped value makes the log call THROW
+ * `SensitiveValueError` rather than emit — call sites can no longer assume
+ * logging never throws. The top-level crash handlers below guard against this.
  */
 import { createHash } from 'crypto';
+import { assertNoSensitiveValues } from './logger-redactor.js';
 
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
@@ -75,6 +82,12 @@ function log(
   msg?: string,
 ): void {
   if (LEVELS[level] < threshold) return;
+  if (typeof dataOrMsg === 'string') {
+    assertNoSensitiveValues(dataOrMsg, 'msg');
+  } else {
+    if (msg !== undefined) assertNoSensitiveValues(msg, 'msg');
+    assertNoSensitiveValues(dataOrMsg, 'data');
+  }
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
   if (typeof dataOrMsg === 'string') {
@@ -360,6 +373,7 @@ export function validateActionRecord(record: ActionRecord): void {
 
 function emitAction(record: ActionRecord): void {
   validateActionRecord(record);
+  assertNoSensitiveValues(record);
   const stream = record.level === 'info' ? process.stdout : process.stderr;
   stream.write(JSON.stringify(record) + '\n');
 }
@@ -392,9 +406,20 @@ export const logger = {
  */
 export const __test_internals__ = { formatErr };
 
-// Route uncaught errors through logger so they get timestamps in stderr
+// Route uncaught errors through logger so they get timestamps in stderr.
+// The redaction sentinel throws if the error text carries a secret, so guard
+// the log call: crash-handling code must never itself crash. On a sentinel
+// hit we still emit a secret-free line and still exit, rather than leaking the
+// value or dropping the crash silently.
 process.on('uncaughtException', (err) => {
-  logger.fatal({ err }, 'Uncaught exception');
+  try {
+    logger.fatal({ err }, 'Uncaught exception');
+    // eslint-disable-next-line no-catch-all/no-catch-all -- crash handler must swallow, not rethrow
+  } catch {
+    process.stderr.write(
+      '[FATAL] uncaught exception (logger threw while handling it, log suppressed)\n',
+    );
+  }
   process.exit(1);
 });
 
@@ -403,5 +428,12 @@ process.on('unhandledRejection', (reason) => {
     reason instanceof Error
       ? reason
       : new Error(`Non-Error rejection: ${JSON.stringify(reason)}`);
-  logger.error({ err }, 'Unhandled rejection');
+  try {
+    logger.error({ err }, 'Unhandled rejection');
+    // eslint-disable-next-line no-catch-all/no-catch-all -- crash handler must swallow, not rethrow
+  } catch {
+    process.stderr.write(
+      '[ERROR] unhandled rejection (logger threw while handling it, log suppressed)\n',
+    );
+  }
 });
