@@ -29,12 +29,18 @@ const PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
   { name: 'github-pat-fine-grained', re: /github_pat_[A-Za-z0-9_]{20,}/ },
   // Legacy `secret_` and current `ntn_` Notion integration-token prefixes.
   // Leading boundary so `mysecret_...` (prefix mid-word) does not match.
-  { name: 'notion-token', re: /(?<![A-Za-z0-9])(?:secret_|ntn_)[A-Za-z0-9]{20,}/ },
+  {
+    name: 'notion-token',
+    re: /(?<![A-Za-z0-9])(?:secret_|ntn_)[A-Za-z0-9]{20,}/,
+  },
   // AKIA long-term keys and ASIA STS/temporary credentials (fixed 20-char shape).
   // Boundaries on both sides so the key is not matched inside a longer
   // uppercase/digit run (a base32 blob, an uppercase hash) — a false positive
   // here throws into the caller, so precision is safety-critical.
-  { name: 'aws-access-key-id', re: /(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])/ },
+  {
+    name: 'aws-access-key-id',
+    re: /(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])/,
+  },
   // Require a token-shaped value after `Bearer` so "Bearer prefix missing" and
   // other prose does not throw; real bearer tokens (incl. JWTs) match this.
   { name: 'bearer-header', re: /Bearer\s+[A-Za-z0-9\-_.]{16,}/ },
