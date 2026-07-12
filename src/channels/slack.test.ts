@@ -249,6 +249,39 @@ describe('SlackChannel', () => {
 
       expect(channel.isConnected()).toBe(false);
     });
+
+    it('rewrites a mention delivered during the pre-auth.test() startup window', async () => {
+      const onMessage = vi.fn();
+      const channel = new SlackChannel(createTestOpts({ onMessage }));
+      const app = currentApp();
+
+      // Regression for the auth.test()-before-start() ordering fix (see
+      // connect(), sagri-tokyo/sagri-ai#154): deliver a mention the instant the
+      // socket opens and assert botUserId was already resolved to rewrite it.
+      app.start = vi.fn(async () => {
+        const handler = app.eventHandlers.get('message');
+        await handler({
+          event: createMessageEvent({ text: '<@U_BOT_123> stop' }),
+        });
+      });
+
+      await channel.connect();
+
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      const msg = onMessage.mock.calls[0][1] as NewMessage;
+      expect(msg.content).toBe('@Jonesy stop');
+    });
+
+    it('fails closed without opening the socket when auth.test() rejects', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      const app = currentApp();
+      app.start = vi.fn(app.start);
+      app.client.auth.test.mockRejectedValueOnce(new Error('invalid_auth'));
+
+      await expect(channel.connect()).rejects.toThrow('invalid_auth');
+      expect(app.start).not.toHaveBeenCalled();
+      expect(channel.isConnected()).toBe(false);
+    });
   });
 
   // --- Message handling ---
