@@ -105,9 +105,17 @@ function scanKey(key: string, parentField: string): void {
  * that defines `toJSON` is scanned via that method's return value — that is
  * exactly what `JSON.stringify` emits, so a `toJSON` returning a secret with
  * no enumerable string field is still caught. For an Error, `message`/`stack`
- * (what `formatErr` emits) and every own enumerable property (what
- * `JSON.stringify` emits under a non-`err` key) are scanned. Numbers,
- * booleans, null, and undefined carry no string content and are skipped.
+ * (what `formatErr` emits), every own enumerable property, and a custom
+ * `toJSON` output (both of which `JSON.stringify` emits under a non-`err` key,
+ * e.g. an `AxiosError`/Octokit `RequestError`) are scanned. Numbers, booleans,
+ * null, and undefined carry no string content and are skipped.
+ *
+ * The `toJSON` short-circuit models `JSON.stringify(value)` and is correct
+ * wherever the logger stringifies a value as a unit — every per-value
+ * `formatData` emit and the whole-record `logger.action`. `formatData` does
+ * not stringify the top-level container, but callers only ever pass plain
+ * key/value records there (no container `toJSON`), so the outer walk still
+ * matches what is emitted.
  *
  * `seen` guards against circular references (e.g. an `Error` with a circular
  * `cause`): a cycle is skipped rather than recursed into, so the scan cannot
@@ -131,6 +139,16 @@ export function assertNoSensitiveValues(
     for (const [key, value] of Object.entries(payload)) {
       scanKey(key, base);
       assertNoSensitiveValues(value, `${base}.${key}`, seen);
+    }
+    // A subclass toJSON (AxiosError, Octokit RequestError) is what
+    // JSON.stringify emits for an Error under a non-`err` key; scan it too.
+    const errToJson = (payload as { toJSON?: unknown }).toJSON;
+    if (typeof errToJson === 'function') {
+      assertNoSensitiveValues(
+        (errToJson as () => unknown).call(payload),
+        `${base}.<toJSON>`,
+        seen,
+      );
     }
     return;
   }

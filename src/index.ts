@@ -1001,6 +1001,8 @@ async function main(): Promise<void> {
             // Log identity only, not canonical_args: an arg carrying a
             // secret-shaped value would trip the redaction sentinel and reject
             // the (suppressed) stub write. The hash keeps args correlatable.
+            // canonical_args is JSON.parse-sourced, so hashPayload cannot throw
+            // on undefined/BigInt here.
             logger.warn(
               {
                 action: request.action,

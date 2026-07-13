@@ -144,6 +144,21 @@ describe('assertNoSensitiveValues pattern coverage', () => {
     ).toThrow(SensitiveValueError);
   });
 
+  it('scans a custom Error toJSON (AxiosError-style)', () => {
+    class SdkError extends Error {
+      toJSON() {
+        return {
+          config: {
+            headers: { Authorization: 'Bearer abcdef0123456789ghij.t' },
+          },
+        };
+      }
+    }
+    expect(() =>
+      assertNoSensitiveValues({ failure: new SdkError('boom') }, 'data'),
+    ).toThrow(SensitiveValueError);
+  });
+
   it('does not throw on a benign toJSON (Date)', () => {
     expect(() =>
       assertNoSensitiveValues({ when: new Date(0) }, 'data'),
