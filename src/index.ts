@@ -57,6 +57,7 @@ import {
 import { GroupQueue, abortActionRecord, abortMessage } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { handleInboundMessage } from './inbound.js';
+import { connectChannel } from './channel-startup.js';
 import { startIpcWatcher } from './ipc.js';
 import {
   findChannel,
@@ -1076,8 +1077,7 @@ async function main(): Promise<void> {
       );
       continue;
     }
-    channels.push(channel);
-    await channel.connect();
+    await connectChannel(channel, channelName, channels);
   }
   if (channels.length === 0) {
     logger.fatal('No channels connected');

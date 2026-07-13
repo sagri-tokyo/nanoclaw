@@ -308,18 +308,18 @@ export class SlackChannel implements Channel {
   }
 
   async connect(): Promise<void> {
-    await this.app.start();
+    // Resolve botUserId BEFORE app.start() opens the socket. auth.test() is a
+    // plain Web API call, so doing it first means no inbound event can arrive
+    // while botUserId is unset — closing the race where a `<@UBOTID> stop`
+    // typed at startup skipped the mention rewrite and missed the kill-switch
+    // parser (sagri-tokyo/sagri-ai#154, #128). Fail closed: if the id can't be
+    // resolved the rewrite would be broken for the whole session, so abort
+    // rather than open the socket deaf to the kill switch.
+    const auth = await this.app.client.auth.test();
+    this.botUserId = auth.user_id as string;
+    logger.info({ botUserId: this.botUserId }, 'Resolved Slack bot user ID');
 
-    // Get bot's own user ID for self-message detection.
-    // Resolve this BEFORE setting connected=true so that messages arriving
-    // during startup can correctly detect bot-sent messages.
-    try {
-      const auth = await this.app.client.auth.test();
-      this.botUserId = auth.user_id as string;
-      logger.info({ botUserId: this.botUserId }, 'Connected to Slack');
-    } catch (err) {
-      logger.warn({ err }, 'Connected to Slack but failed to get bot user ID');
-    }
+    await this.app.start();
 
     this.connected = true;
 
