@@ -999,12 +999,18 @@ async function main(): Promise<void> {
     executeAction:
       process.env.NANOCLAW_STUB_ORG_WRITES === '1'
         ? async (request) => {
+            // Log identity only, not canonical_args: an arg carrying a
+            // secret-shaped value would trip the redaction sentinel and reject
+            // the (suppressed) stub write. The hash keeps args correlatable.
+            // canonical_args is JSON.parse-sourced, so hashPayload cannot throw
+            // on undefined/BigInt here.
             logger.warn(
-              { request },
+              {
+                action: request.action,
+                target_ref: request.target_ref,
+                canonical_args_hash: hashPayload(request.canonical_args),
+              },
               'org-action STUB: external write suppressed (NANOCLAW_STUB_ORG_WRITES=1)',
-            );
-            console.log(
-              `\n  [STUB ORG-WRITE FIRED] ${request.action} target=${request.target_ref} args=${JSON.stringify(request.canonical_args)}\n`,
             );
           }
         : async (request) =>
