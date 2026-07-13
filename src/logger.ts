@@ -26,7 +26,10 @@
  * logging never throws. The top-level crash handlers below guard against this.
  */
 import { createHash } from 'crypto';
-import { assertNoSensitiveValues } from './logger-redactor.js';
+import {
+  assertNoSensitiveValues,
+  assertNoSensitiveRecord,
+} from './logger-redactor.js';
 
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
@@ -86,7 +89,7 @@ function log(
     assertNoSensitiveValues(dataOrMsg, 'msg');
   } else {
     if (msg !== undefined) assertNoSensitiveValues(msg, 'msg');
-    assertNoSensitiveValues(dataOrMsg, 'data');
+    assertNoSensitiveRecord(dataOrMsg, 'data');
   }
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;

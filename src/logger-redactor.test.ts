@@ -222,4 +222,17 @@ describe('logger entrypoints route through the sentinel', () => {
     logger.info({ session_id: 'sess-1' }, 'started');
     expect(stdoutSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('throws when a top-level data value leaks behind a clean container toJSON', () => {
+    // formatData stringifies each value, not the container, so a container
+    // toJSON returning something clean must not hide an enumerable secret.
+    const data = {
+      token: 'ghp_AbCdEf0123456789AbCdEf0123456789abcd',
+      toJSON() {
+        return { safe: true };
+      },
+    };
+    expect(() => logger.info(data, 'boot')).toThrow(SensitiveValueError);
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
 });

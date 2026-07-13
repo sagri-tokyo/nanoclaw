@@ -113,9 +113,9 @@ function scanKey(key: string, parentField: string): void {
  * The `toJSON` short-circuit models `JSON.stringify(value)` and is correct
  * wherever the logger stringifies a value as a unit — every per-value
  * `formatData` emit and the whole-record `logger.action`. `formatData` does
- * not stringify the top-level container, but callers only ever pass plain
- * key/value records there (no container `toJSON`), so the outer walk still
- * matches what is emitted.
+ * NOT stringify the top-level free-form container, so that path uses
+ * `assertNoSensitiveRecord` (which walks per key and ignores a container
+ * `toJSON`), never this function directly on the container.
  *
  * `seen` guards against circular references (e.g. an `Error` with a circular
  * `cause`): a cycle is skipped rather than recursed into, so the scan cannot
@@ -178,5 +178,25 @@ export function assertNoSensitiveValues(
       scanKey(key, field);
       assertNoSensitiveValues(value, field ? `${field}.${key}` : key, seen);
     }
+  }
+}
+
+/**
+ * Scan a log record whose VALUES are each serialised independently.
+ *
+ * `formatData` emits every key and `JSON.stringify`s each value on its own; it
+ * never stringifies the container. So a record must be walked per-key: its own
+ * `toJSON` is NOT the serialised form and must not short-circuit the scan (that
+ * would hide enumerable secret values behind a clean `toJSON` result). Each
+ * value is still handed to `assertNoSensitiveValues`, so nested `toJSON` and
+ * Error handling apply normally.
+ */
+export function assertNoSensitiveRecord(
+  record: Record<string, unknown>,
+  field = '',
+): void {
+  for (const [key, value] of Object.entries(record)) {
+    scanKey(key, field);
+    assertNoSensitiveValues(value, field ? `${field}.${key}` : key);
   }
 }
