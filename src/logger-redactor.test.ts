@@ -118,6 +118,38 @@ describe('assertNoSensitiveValues pattern coverage', () => {
     ).not.toThrow();
   });
 
+  it('scans a secret-shaped property NAME without echoing it', () => {
+    const secretKey = 'ghp_AbCdEf0123456789AbCdEf0123456789abcd';
+    try {
+      assertNoSensitiveValues({ [secretKey]: 'harmless' }, 'data');
+      throw new Error('expected SensitiveValueError');
+    } catch (err) {
+      if (!(err instanceof SensitiveValueError)) throw err;
+      expect(err.pattern).toBe('github-pat-classic');
+      expect(err.field).toBe('data.<key>');
+      expect(err.message).not.toContain(secretKey);
+    }
+  });
+
+  it('scans toJSON() output even with no enumerable secret field', () => {
+    const secret = 'ghp_AbCdEf0123456789AbCdEf0123456789abcd';
+    const sdkResponse = {
+      status: 200,
+      toJSON() {
+        return { token: secret };
+      },
+    };
+    expect(() =>
+      assertNoSensitiveValues({ resp: sdkResponse }, 'data'),
+    ).toThrow(SensitiveValueError);
+  });
+
+  it('does not throw on a benign toJSON (Date)', () => {
+    expect(() =>
+      assertNoSensitiveValues({ when: new Date(0) }, 'data'),
+    ).not.toThrow();
+  });
+
   it('does not stack-overflow on a circular payload', () => {
     const cyclic: Record<string, unknown> = { name: 'ok' };
     cyclic.self = cyclic;

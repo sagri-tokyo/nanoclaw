@@ -90,7 +90,8 @@ node dist/index.js
 Watch for: `org-action held pending approval` → the harness injecting
 `approve <token>` → `org-action executed after approval (exactly-once)` →
 the stub `logger.warn` line `org-action STUB: external write suppressed
-(NANOCLAW_STUB_ORG_WRITES=1)` carrying the `request` record.
+(NANOCLAW_STUB_ORG_WRITES=1)` carrying `action`, `target_ref`, and a
+`canonical_args_hash` (the args themselves are hashed, not logged raw).
 
 The target id is sourced from the env (`NANOCLAW_TARGET_PAGE_ID`), not the
 laundered message — the reader/actor pipeline refuses to source a write target

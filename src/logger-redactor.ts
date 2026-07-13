@@ -76,15 +76,38 @@ function scanString(value: string, field: string): void {
 }
 
 /**
+ * Scan a property NAME. `formatData` and `JSON.stringify` emit keys as well as
+ * values, so a secret-shaped key leaks just like a value would. The thrown
+ * error uses a positional `<key>` label rather than the key itself, so the
+ * offending secret is never copied into `SensitiveValueError.field`.
+ */
+function scanKey(key: string, parentField: string): void {
+  for (const { name, re } of PATTERNS) {
+    if (re.test(key)) {
+      const preview = createHash('sha256')
+        .update(key)
+        .digest('hex')
+        .slice(0, 12);
+      throw new SensitiveValueError(
+        parentField ? `${parentField}.<key>` : '<key>',
+        name,
+        preview,
+      );
+    }
+  }
+}
+
+/**
  * Recursively scan a log payload and throw on the first sensitive match.
  *
- * Walks strings, arrays, plain objects, and `Error` instances. For an Error
- * it scans `message` and `stack` (what `formatErr` emits) plus every own
- * enumerable property (what `JSON.stringify` emits when the error is logged
- * under a non-`err` key), so the scanned surface is a superset of whatever the
- * logger actually serialises — an SDK error carrying secrets in an enumerable
- * `config`/`response` cannot slip through. Numbers, booleans, null, and
- * undefined carry no string content and are skipped.
+ * Walks strings, arrays, plain objects, and `Error` instances. Both property
+ * names and values are scanned, since the logger serialises both. An object
+ * that defines `toJSON` is scanned via that method's return value — that is
+ * exactly what `JSON.stringify` emits, so a `toJSON` returning a secret with
+ * no enumerable string field is still caught. For an Error, `message`/`stack`
+ * (what `formatErr` emits) and every own enumerable property (what
+ * `JSON.stringify` emits under a non-`err` key) are scanned. Numbers,
+ * booleans, null, and undefined carry no string content and are skipped.
  *
  * `seen` guards against circular references (e.g. an `Error` with a circular
  * `cause`): a cycle is skipped rather than recursed into, so the scan cannot
@@ -106,6 +129,7 @@ export function assertNoSensitiveValues(
     scanString(payload.message, `${base}.message`);
     if (payload.stack) scanString(payload.stack, `${base}.stack`);
     for (const [key, value] of Object.entries(payload)) {
+      scanKey(key, base);
       assertNoSensitiveValues(value, `${base}.${key}`, seen);
     }
     return;
@@ -121,7 +145,19 @@ export function assertNoSensitiveValues(
   if (payload !== null && typeof payload === 'object') {
     if (seen.has(payload)) return;
     seen.add(payload);
+    const toJson = (payload as { toJSON?: unknown }).toJSON;
+    if (typeof toJson === 'function') {
+      // JSON.stringify emits only the toJSON() result — scan exactly that,
+      // not the (unserialised) enumerable properties.
+      assertNoSensitiveValues(
+        (payload as { toJSON(): unknown }).toJSON(),
+        field || 'value',
+        seen,
+      );
+      return;
+    }
     for (const [key, value] of Object.entries(payload)) {
+      scanKey(key, field);
       assertNoSensitiveValues(value, field ? `${field}.${key}` : key, seen);
     }
   }
