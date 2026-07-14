@@ -114,6 +114,41 @@ function buildLocalRedirectDeps(args: {
   };
 }
 
+async function expectMalformedSearch(
+  results: unknown[],
+  expectedMessage: string,
+): Promise<void> {
+  const notion = await startFakeServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ results, has_more: false }));
+  });
+  try {
+    const deps = buildLocalRedirectDeps({
+      redirects: {
+        'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+      },
+    });
+    let caught: unknown;
+    try {
+      await fetchUntrustedList(
+        {
+          source_type: 'notion_search',
+          params: { query: 'x', object_kind: 'page', limit: 10 },
+        },
+        deps,
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+    // Pin the exact static message: a malformed-row throw must never
+    // interpolate untrusted response bytes (result.object etc.) into it.
+    expect((caught as FetchUntrustedMalformed).message).toBe(expectedMessage);
+  } finally {
+    await notion.close();
+  }
+}
+
 const READER_RESPONSE = {
   model: 'claude-haiku-4-5',
   content: [
@@ -764,153 +799,51 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
-  it('notion_search throws FetchUntrustedMalformed on a result whose object kind does not match', async () => {
-    // Notion's object filter guarantees only the requested kind returns; a
-    // mismatch is a contract violation, so notionSearch throws rather than
-    // drops it (see the exact-match invariant there).
-    const notion = await startFakeServer((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          results: [
-            {
-              object: 'page',
-              id: 'page-id-1',
-              url: 'https://www.notion.so/page-id-1',
-              properties: {
-                Name: { type: 'title', title: [{ plain_text: 'Keep me' }] },
-              },
-            },
-            {
-              object: 'database',
-              id: 'db-id-1',
-              url: 'https://www.notion.so/db-id-1',
-              title: [{ plain_text: 'Wrong kind' }],
-            },
-          ],
-          has_more: false,
-        }),
-      );
-    });
-    try {
-      const deps = buildLocalRedirectDeps({
-        redirects: {
-          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
-        },
-      });
-      let caught: unknown;
-      try {
-        await fetchUntrustedList(
-          {
-            source_type: 'notion_search',
-            params: { query: 'x', object_kind: 'page', limit: 10 },
-          },
-          deps,
-        );
-      } catch (e) {
-        caught = e;
-      }
-      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
-      // Pin the exact static message: the throw must never interpolate
-      // untrusted response bytes (result.object etc.) into it.
-      expect((caught as FetchUntrustedMalformed).message).toBe(
-        'notion search result object kind did not match the request',
-      );
-    } finally {
-      await notion.close();
-    }
+  it('notion_search throws FetchUntrustedMalformed on a non-object result row', async () => {
+    await expectMalformedSearch(
+      ['not-an-object'],
+      'notion search result was not an object',
+    );
   });
 
-  it('notion_search throws FetchUntrustedMalformed on a result missing id or url', async () => {
-    const notion = await startFakeServer((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          results: [
-            {
-              object: 'page',
-              id: 'page-id-1',
-              properties: {
-                Name: { type: 'title', title: [{ plain_text: 'No url' }] },
-              },
-            },
-          ],
-          has_more: false,
-        }),
-      );
-    });
-    try {
-      const deps = buildLocalRedirectDeps({
-        redirects: {
-          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
-        },
-      });
-      let caught: unknown;
-      try {
-        await fetchUntrustedList(
-          {
-            source_type: 'notion_search',
-            params: { query: 'x', object_kind: 'page', limit: 10 },
+  it('notion_search throws FetchUntrustedMalformed on a result whose object kind does not match', async () => {
+    // Notion's object filter guarantees only the requested kind returns, so a
+    // mismatch is a contract violation.
+    await expectMalformedSearch(
+      [
+        {
+          object: 'page',
+          id: 'page-id-1',
+          url: 'https://www.notion.so/page-id-1',
+          properties: {
+            Name: { type: 'title', title: [{ plain_text: 'Keep me' }] },
           },
-          deps,
-        );
-      } catch (e) {
-        caught = e;
-      }
-      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
-      expect((caught as FetchUntrustedMalformed).message).toBe(
-        'notion search result missing id or url',
-      );
-    } finally {
-      await notion.close();
-    }
+        },
+        {
+          object: 'database',
+          id: 'db-id-1',
+          url: 'https://www.notion.so/db-id-1',
+          title: [{ plain_text: 'Wrong kind' }],
+        },
+      ],
+      'notion search result object kind did not match the request',
+    );
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result missing url (id present)', async () => {
+    await expectMalformedSearch(
+      [{ object: 'page', id: 'page-id-1' }],
+      'notion search result missing id or url',
+    );
   });
 
   it('notion_search throws FetchUntrustedMalformed on a result missing id (url present)', async () => {
-    // Exercises the id === null half of the id/url guard (the missing-url test
-    // above covers the resultUrl === null half).
-    const notion = await startFakeServer((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          results: [
-            {
-              object: 'page',
-              url: 'https://www.notion.so/page-id-1',
-              properties: {
-                Name: { type: 'title', title: [{ plain_text: 'No id' }] },
-              },
-            },
-          ],
-          has_more: false,
-        }),
-      );
-    });
-    try {
-      const deps = buildLocalRedirectDeps({
-        redirects: {
-          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
-        },
-      });
-      let caught: unknown;
-      try {
-        await fetchUntrustedList(
-          {
-            source_type: 'notion_search',
-            params: { query: 'x', object_kind: 'page', limit: 10 },
-          },
-          deps,
-        );
-      } catch (e) {
-        caught = e;
-      }
-      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
-      expect((caught as FetchUntrustedMalformed).message).toBe(
-        'notion search result missing id or url',
-      );
-    } finally {
-      await notion.close();
-    }
+    // Covers the id === null operand; the missing-url case above covers the
+    // resultUrl === null operand of the same guard.
+    await expectMalformedSearch(
+      [{ object: 'page', url: 'https://www.notion.so/page-id-1' }],
+      'notion search result missing id or url',
+    );
   });
 
   it('notion_search surfaces a 404 from /v1/search as FetchUntrustedHttp4xx', async () => {
