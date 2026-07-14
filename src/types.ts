@@ -166,8 +166,10 @@ export interface Channel {
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
-  // Optional: typing indicator. Channels that support it implement it.
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: processing indicator bracketing an interactive run; `messageTs`
+  // anchors it to the triggering message (Slack reacts to it), ignored by
+  // channels that don't need an anchor.
+  setTyping?(jid: string, isTyping: boolean, messageTs?: string): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
   // Optional: fetch a thread's full message history (e.g. Slack

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   findExplicitTriggerMessage,
+  newestHumanMessage,
   newestHumanThreadAnchor,
 } from './index.js';
 import { NewMessage, RegisteredGroup } from './types.js';
@@ -55,6 +56,32 @@ describe('findExplicitTriggerMessage thread anchor', () => {
       threadId: 'ts-thread-root',
       anchorTs: 'ts-reply',
     });
+  });
+});
+
+describe('newestHumanMessage', () => {
+  it('returns the newest non-bot message so the reaction anchors to its own ts', () => {
+    const found = newestHumanMessage([
+      message({ id: 'ts-old' }),
+      message({ id: 'ts-new', thread_id: 'ts-root' }),
+    ]);
+
+    expect(found?.id).toBe('ts-new');
+  });
+
+  it('skips a trailing bot echo so the hourglass never lands on the bot message', () => {
+    const found = newestHumanMessage([
+      message({ id: 'ts-human' }),
+      message({ id: 'ts-bot', is_bot_message: true }),
+    ]);
+
+    expect(found?.id).toBe('ts-human');
+  });
+
+  it('returns undefined for a bot-only batch', () => {
+    expect(
+      newestHumanMessage([message({ id: 'ts-bot', is_bot_message: true })]),
+    ).toBeUndefined();
   });
 });
 

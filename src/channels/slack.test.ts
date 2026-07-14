@@ -77,6 +77,10 @@ vi.mock('@slack/bolt', () => ({
           user: { real_name: 'Alice Smith', name: 'alice' },
         }),
       },
+      reactions: {
+        add: vi.fn().mockResolvedValue({ ok: true }),
+        remove: vi.fn().mockResolvedValue({ ok: true }),
+      },
     };
 
     constructor(opts: any) {
@@ -1260,23 +1264,204 @@ describe('SlackChannel', () => {
   // --- setTyping ---
 
   describe('setTyping', () => {
-    it('resolves without error (no-op)', async () => {
-      const opts = createTestOpts();
-      const channel = new SlackChannel(opts);
+    it('reacts to the anchored message on start and removes it on finish', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
 
-      // Should not throw — Slack has no bot typing indicator API
-      await expect(
-        channel.setTyping('slack:C0123456789', true),
-      ).resolves.toBeUndefined();
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+      expect(currentApp().client.reactions.add).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000001',
+        name: 'hourglass_flowing_sand',
+      });
+
+      await channel.setTyping('slack:C0123456789', false);
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000001',
+        name: 'hourglass_flowing_sand',
+      });
     });
 
-    it('accepts false without error', async () => {
-      const opts = createTestOpts();
-      const channel = new SlackChannel(opts);
+    it('clears every reaction the run added, including piped follow-ups', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      // Run starts, then two messages are piped into the still-active container.
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000002');
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000003');
+      await channel.setTyping('slack:C0123456789', false);
+
+      const removed = currentApp()
+        .client.reactions.remove.mock.calls.map(
+          (c: [{ timestamp: string }]) => c[0].timestamp,
+        )
+        .sort();
+      expect(removed).toEqual([
+        '1704067200.000001',
+        '1704067200.000002',
+        '1704067200.000003',
+      ]);
+    });
+
+    it('shares one set across concurrent adds so none is clobbered', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      // Race the same jid before either awaits — see setTyping's get-or-create
+      // comment for why a shared set is required here.
+      await Promise.all([
+        channel.setTyping('slack:C0123456789', true, '1704067200.000001'),
+        channel.setTyping('slack:C0123456789', true, '1704067200.000002'),
+      ]);
+      await channel.setTyping('slack:C0123456789', false);
+
+      const removed = currentApp()
+        .client.reactions.remove.mock.calls.map(
+          (c: [{ timestamp: string }]) => c[0].timestamp,
+        )
+        .sort();
+      expect(removed).toEqual(['1704067200.000001', '1704067200.000002']);
+    });
+
+    it('does not add a second reaction to the same message', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+
+      expect(currentApp().client.reactions.add).toHaveBeenCalledTimes(1);
+    });
+
+    it('no-ops the start call when no anchor message is given', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await channel.setTyping('slack:C0123456789', true);
+      expect(currentApp().client.reactions.add).not.toHaveBeenCalled();
+    });
+
+    it('does not throw when the reaction API fails (missing scope, deleted message)', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+      currentApp().client.reactions.add.mockRejectedValueOnce(
+        new Error('missing_scope'),
+      );
 
       await expect(
-        channel.setTyping('slack:C0123456789', false),
+        channel.setTyping('slack:C0123456789', true, '1704067200.000001'),
       ).resolves.toBeUndefined();
+      // A failed add records no ts, so finish does not attempt a remove.
+      await channel.setTyping('slack:C0123456789', false);
+      expect(currentApp().client.reactions.remove).not.toHaveBeenCalled();
+    });
+
+    it('undoes a reaction whose add resolves after the run already finished', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+      let resolveAdd: (value: unknown) => void = () => {};
+      currentApp().client.reactions.add.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveAdd = resolve;
+        }),
+      );
+
+      const adding = channel.setTyping(
+        'slack:C0123456789',
+        true,
+        '1704067200.000001',
+      );
+      // Finish drops the set from the map while the add is still pending, so its
+      // clear never sees this reaction.
+      await channel.setTyping('slack:C0123456789', false);
+      resolveAdd({ ok: true });
+      await adding;
+
+      // The add sees the map no longer holds its set and removes its own
+      // reaction — the only remove, since finish saw an empty set.
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledTimes(1);
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000001',
+        name: 'hourglass_flowing_sand',
+      });
+    });
+
+    it('removes its own reaction when a disconnect lands mid-add', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+      let resolveAdd: (value: unknown) => void = () => {};
+      currentApp().client.reactions.add.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveAdd = resolve;
+        }),
+      );
+
+      const adding = channel.setTyping(
+        'slack:C0123456789',
+        true,
+        '1704067200.000001',
+      );
+      // Disconnect clears the map while the add is still pending.
+      await channel.disconnect();
+      resolveAdd({ ok: true });
+      await adding;
+
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledTimes(1);
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000001',
+        name: 'hourglass_flowing_sand',
+      });
+    });
+
+    it('waits for an in-flight setTyping(false) remove before stopping', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+
+      let resolveRemove: (value: unknown) => void = () => {};
+      currentApp().client.reactions.remove.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRemove = resolve;
+        }),
+      );
+      const stopSpy = vi.spyOn(currentApp(), 'stop');
+
+      // A run finishes (firing a remove that hangs) and disconnect races it. The
+      // run already deleted its set, so disconnect can only reach that remove via
+      // the pending-removals drain.
+      const finishing = channel.setTyping('slack:C0123456789', false);
+      const disconnecting = channel.disconnect();
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(stopSpy).not.toHaveBeenCalled();
+
+      resolveRemove({ ok: true });
+      await finishing;
+      await disconnecting;
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('removes tracked reactions on disconnect and leaves nothing for a reconnect', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+      await channel.setTyping('slack:C0123456789', true, '1704067200.000001');
+
+      // Disconnect clears the hourglass a mid-run shutdown would otherwise strand.
+      await channel.disconnect();
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1704067200.000001',
+        name: 'hourglass_flowing_sand',
+      });
+
+      await channel.connect();
+      await channel.setTyping('slack:C0123456789', false);
+      // Reconnect's finish finds an empty map: no second remove.
+      expect(currentApp().client.reactions.remove).toHaveBeenCalledTimes(1);
     });
   });
 

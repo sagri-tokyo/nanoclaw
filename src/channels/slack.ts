@@ -92,6 +92,12 @@ export function extractFileBundle(
 // breaks on natural boundaries before the UI does it for us.
 const MAX_MESSAGE_LENGTH = 3500;
 
+// Emoji reaction added to the triggering message while the agent works, and
+// removed when the run finishes. Slack has no bot typing-indicator API, so this
+// reaction is how the bot acknowledges "processing" without posting a throwaway
+// message. ponytail: swap the name if a different spinner emoji reads better.
+const PROCESSING_REACTION = 'hourglass_flowing_sand';
+
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
@@ -158,6 +164,16 @@ export class SlackChannel implements Channel {
   private flushing = false;
   private userNameCache = new Map<string, string>();
   private lastThreadTs = new Map<string, string>();
+  // Message ts values PROCESSING_REACTION was successfully added to during the
+  // current run, per jid. A run reacts once at start and again for every message
+  // piped into its still-active container, so this is a set, not a single slot:
+  // the single setTyping(false) at run end must clear every reaction the run
+  // added, not just the last one.
+  private processingReactionsByJid = new Map<string, Set<string>>();
+  // In-flight reaction-remove calls, so disconnect can drain removes started by a
+  // run's setTyping(false) that raced shutdown (their set is already gone from
+  // the map above, so disconnect's own cleanup can't see them).
+  private pendingRemovals = new Set<Promise<void>>();
 
   private opts: SlackChannelOpts;
 
@@ -585,14 +601,100 @@ export class SlackChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    // Remove every tracked reaction before stopping: a shutdown mid-run would
+    // otherwise leave hourglasses no setTyping(false) ever clears (the run's
+    // container is gone). Snapshot and clear the map first so an add still in
+    // flight sees its set is no longer mapped and removes its own reaction too.
+    const pending = [...this.processingReactionsByJid.entries()];
+    this.processingReactionsByJid.clear();
+    pending.forEach(([jid, timestamps]) => {
+      const channel = jid.replace(/^slack:/, '');
+      timestamps.forEach((timestamp) =>
+        this.removeReaction(channel, timestamp),
+      );
+    });
+    // Drain every in-flight remove (this call's plus any concurrent
+    // setTyping(false)'s) before stopping so shutdown never exits mid-remove.
+    await Promise.allSettled([...this.pendingRemovals]);
     await this.app.stop();
   }
 
-  // Slack does not expose a typing indicator API for bots.
-  // This no-op satisfies the Channel interface so the orchestrator
-  // doesn't need channel-specific branching.
-  async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
-    // no-op: Slack Bot API has no typing indicator endpoint
+  private removeReaction(channel: string, timestamp: string): Promise<void> {
+    const op = this.app.client.reactions
+      .remove({ channel, timestamp, name: PROCESSING_REACTION })
+      .then(
+        () => undefined,
+        (err) =>
+          logger.debug(
+            { channel, err },
+            'Failed to remove Slack processing reaction',
+          ),
+      );
+    this.pendingRemovals.add(op);
+    void op.finally(() => this.pendingRemovals.delete(op));
+    return op;
+  }
+
+  // See PROCESSING_REACTION: react to messageTs on run start, clear on finish.
+  // Reaction calls are cosmetic: a failure (missing reactions:write scope, a
+  // deleted message) must never fail the user's request, so it is caught and
+  // logged rather than propagated.
+  async setTyping(
+    jid: string,
+    isTyping: boolean,
+    messageTs?: string,
+  ): Promise<void> {
+    if (!this.connected) return;
+    const channel = jid.replace(/^slack:/, '');
+
+    if (isTyping) {
+      // No anchor (e.g. a run with no human message) means nothing to react to.
+      if (!messageTs) return;
+      // Get-or-create the set synchronously so concurrent adds for this jid
+      // (start plus fire-and-forget piped acks) share one reference instead of
+      // each building a fresh one and clobbering the map. The captured set also
+      // serves as this run's token: setTyping(false) and disconnect both drop
+      // it from the map, so if the map no longer points at `reacted` once our
+      // add resolves, our run has ended and the reaction is orphaned. GroupQueue
+      // runs one container per jid, so there is never a concurrent run to strip a
+      // reaction from; a stale add only ever cleans up its own.
+      let reacted = this.processingReactionsByJid.get(jid);
+      if (reacted?.has(messageTs)) return;
+      if (!reacted) {
+        reacted = new Set<string>();
+        this.processingReactionsByJid.set(jid, reacted);
+      }
+      try {
+        await this.app.client.reactions.add({
+          channel,
+          timestamp: messageTs,
+          name: PROCESSING_REACTION,
+        });
+      } catch (err) {
+        logger.debug({ jid, err }, 'Failed to add Slack processing reaction');
+        return;
+      }
+      if (this.processingReactionsByJid.get(jid) !== reacted) {
+        // Our run ended (finish or disconnect) while this add was in flight, so
+        // its clear never saw this reaction; remove it instead of orphaning it.
+        // After disconnect this still reaches Slack: app.stop() tears down socket
+        // mode, not the WebClient reactions.remove uses.
+        await this.removeReaction(channel, messageTs);
+        return;
+      }
+      reacted.add(messageTs);
+      return;
+    }
+
+    const reacted = this.processingReactionsByJid.get(jid);
+    if (!reacted) return;
+    this.processingReactionsByJid.delete(jid);
+    // ponytail: one remove per tracked ts, fired together. Fine for the handful
+    // a run accumulates; a run pumped with hundreds of piped messages could hit
+    // Slack's remove rate limit (failures are swallowed, leaving stale emoji).
+    await Promise.all(
+      [...reacted].map((timestamp) => this.removeReaction(channel, timestamp)),
+    );
   }
 
   /**

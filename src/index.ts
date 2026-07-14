@@ -266,6 +266,15 @@ export function findExplicitTriggerMessage(
   return null;
 }
 
+// The most recent non-bot message in a batch: the one a human actually sent,
+// used both to attribute a run and to anchor its processing indicator. Skipping
+// bot messages keeps a trailing bot echo from being treated as the trigger.
+export function newestHumanMessage(
+  messages: NewMessage[],
+): NewMessage | undefined {
+  return [...messages].reverse().find((m) => !m.is_bot_message);
+}
+
 /**
  * Reply anchor for a batch with no explicit trigger (a requiresTrigger:false
  * group that proceeds anyway): the newest human message's thread, else its own
@@ -279,7 +288,7 @@ export function findExplicitTriggerMessage(
 export function newestHumanThreadAnchor(
   messages: NewMessage[],
 ): string | undefined {
-  const anchor = [...messages].reverse().find((m) => !m.is_bot_message);
+  const anchor = newestHumanMessage(messages);
   return anchor?.thread_id ?? anchor?.id;
 }
 
@@ -491,9 +500,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // disables telemetry for that spawn (no trace reaches Langfuse) rather than
   // fabricating identity. The namespaced unattributed placeholder applies only
   // to scheduled tasks.
-  const triggeringUserId = [...promptMessages]
-    .reverse()
-    .find((message) => !message.is_bot_message)?.sender;
+  const triggeringUserId = newestHumanMessage(promptMessages)?.sender;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -526,7 +533,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  // Anchor the processing indicator to the message that triggered this run: the
+  // explicit @mention when there is one, else the newest human message in the
+  // batch. Never the channel's live lastThreadTs (a concurrent message races it).
+  const reactionTs =
+    explicitTrigger?.anchorTs ?? newestHumanMessage(missedMessages)?.id;
+  await channel.setTyping?.(chatJid, true, reactionTs);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -842,9 +854,15 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
+            // Ack the piped human message too, so it's cleared with the rest at
+            // run end. Skip a trailing bot echo (same filter as the run-start
+            // anchor) so the hourglass never lands on the assistant's own message.
             channel
-              .setTyping?.(chatJid, true)
+              .setTyping?.(
+                chatJid,
+                true,
+                newestHumanMessage(messagesToSend)?.id,
+              )
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
