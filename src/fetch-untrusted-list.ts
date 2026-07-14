@@ -942,14 +942,13 @@ async function notionSearch(
   // items.length is the caller's exact match signal: 1 == unique, ==limit ==
   // "too broad, refine". It stays exact because a row that fails to parse (bad
   // id/url, wrong object kind) throws rather than being dropped, so the count
-  // never silently under-counts. has_more is deliberately not surfaced: it
-  // would only sharpen the exactly-limit boundary, where "refine" is already
-  // the correct instruction, at the cost of changing the shared result
-  // envelope.
+  // of in-window rows never silently under-counts. has_more is deliberately
+  // not surfaced: it would only sharpen the exactly-limit boundary, where
+  // "refine" is already the correct instruction, at the cost of changing the
+  // shared result envelope.
   const out: NotionSearchItem[] = [];
-  // slice enforces the requested page_size: if Notion over-returns past limit,
-  // the surplus is outside the caller's window, so trimming it is not an
-  // under-count of the matches the caller asked to see.
+  // Backstop only: page_size already caps the request; this trims an
+  // over-return from Notion, never the caller's in-window matches.
   for (const result of resultsRaw.slice(0, limit)) {
     if (!isPlainObject(result)) {
       throw new FetchUntrustedMalformed(
