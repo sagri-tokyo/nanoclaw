@@ -978,6 +978,8 @@ async function notionSearch(
       // prompt-injection surface (sagri-ai#119). Do not widen this to full
       // properties.
       const title = extractNotionSearchTitle(result, objectKind);
+      // Laundered serially (like notionDatabaseQuery); parallelizing across
+      // results would risk tripping Notion rate limits.
       item.reader = await launder({
         // Database results carry source 'notion_page' because the reader
         // pipeline has no 'notion_database' source; this is provenance labeling,
