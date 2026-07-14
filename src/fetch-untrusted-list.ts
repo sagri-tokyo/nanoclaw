@@ -939,32 +939,34 @@ async function notionSearch(
     token,
     deps,
   });
-  // items.length is the caller's match signal: 1 == unique, ==limit == "too
-  // broad, refine". Notion's has_more is deliberately not surfaced — it would
-  // only sharpen the exactly-limit boundary, where "refine" is already the
-  // correct instruction, at the cost of changing the shared result envelope.
+  // items.length is the caller's exact match signal: 1 == unique, ==limit ==
+  // "too broad, refine". It stays exact because a row that fails to parse (bad
+  // id/url, wrong object kind) throws rather than being dropped, so the count
+  // never silently under-counts. has_more is deliberately not surfaced: it
+  // would only sharpen the exactly-limit boundary, where "refine" is already
+  // the correct instruction, at the cost of changing the shared result
+  // envelope.
   const out: NotionSearchItem[] = [];
+  // slice enforces the requested page_size: if Notion over-returns past limit,
+  // the surplus is outside the caller's window, so trimming it is not an
+  // under-count of the matches the caller asked to see.
   for (const result of resultsRaw.slice(0, limit)) {
-    // Warn on every drop so a silent under-count doesn't reach the caller.
     if (!isPlainObject(result)) {
-      logger.warn('notion_search: dropped a non-object result row');
-      continue;
+      throw new FetchUntrustedMalformed(
+        'notion search result was not an object',
+      );
+    }
+    if (result.object !== objectKind) {
+      throw new FetchUntrustedMalformed(
+        'notion search result object kind did not match the request',
+      );
     }
     const id = typeof result.id === 'string' ? result.id : null;
     const resultUrl = typeof result.url === 'string' ? result.url : null;
-    // Defense in depth: the server-side filter should already constrain results
-    // to the requested kind; drop any mismatch rather than trust the upstream
-    // filter to stay authoritative.
-    if (result.object !== objectKind) {
-      logger.warn(
-        { object: result.object, objectKind },
-        'notion_search: dropped a result whose object kind did not match',
-      );
-      continue;
-    }
     if (id === null || resultUrl === null) {
-      logger.warn('notion_search: dropped a result missing id or url');
-      continue;
+      throw new FetchUntrustedMalformed(
+        'notion search result missing id or url',
+      );
     }
     const item: NotionSearchItem = {
       id,

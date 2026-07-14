@@ -720,9 +720,9 @@ describe('fetch-untrusted-list', () => {
     // A downstream skill treats items.length as an exact match count:
     // length 1 == unique match, length == limit == "too many, refine". That
     // only holds if the adapter never truncates below limit and asks Notion
-    // for exactly limit rows, so pin both here. (The exact-count guarantee
-    // holds only for well-formed rows; malformed / kind-mismatched rows are
-    // dropped and logged, which the adapter warns about at runtime.)
+    // for exactly limit rows, so pin both here. The throw-not-drop invariant
+    // that keeps the count exact lives in notionSearch and is exercised by the
+    // FetchUntrustedMalformed tests below.
     const notion = await startFakeServer((req, res) => {
       const body = JSON.parse(req.body);
       expect(body.page_size).toBe(10);
@@ -764,9 +764,10 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
-  it('notion_search drops results whose object kind does not match the request', async () => {
-    // Defense in depth: even if Notion's server-side filter leaks a non-page
-    // row, the adapter must exclude it when object_kind is 'page'.
+  it('notion_search throws FetchUntrustedMalformed on a result whose object kind does not match', async () => {
+    // Notion's object filter guarantees only the requested kind returns; a
+    // mismatch is a contract violation, so notionSearch throws rather than
+    // drops it (see the exact-match invariant there).
     const notion = await startFakeServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
@@ -784,12 +785,7 @@ describe('fetch-untrusted-list', () => {
               object: 'database',
               id: 'db-id-1',
               url: 'https://www.notion.so/db-id-1',
-              title: [{ plain_text: 'Drop me' }],
-            },
-            {
-              object: 'block',
-              id: 'block-id-1',
-              url: 'https://www.notion.so/block-id-1',
+              title: [{ plain_text: 'Wrong kind' }],
             },
           ],
           has_more: false,
@@ -802,20 +798,116 @@ describe('fetch-untrusted-list', () => {
           'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
         },
       });
-      const result = await fetchUntrustedList(
-        {
-          source_type: 'notion_search',
-          params: { query: 'x', object_kind: 'page', limit: 10 },
-        },
-        deps,
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      // Pin the exact static message: the throw must never interpolate
+      // untrusted response bytes (result.object etc.) into it.
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result object kind did not match the request',
       );
-      expect(result.items).toEqual([
-        {
-          id: 'page-id-1',
-          url: 'https://www.notion.so/page-id-1',
-          object: 'page',
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result missing id or url', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              id: 'page-id-1',
+              properties: {
+                Name: { type: 'title', title: [{ plain_text: 'No url' }] },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
         },
-      ]);
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result missing id or url',
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result missing id (url present)', async () => {
+    // Exercises the id === null half of the id/url guard (the missing-url test
+    // above covers the resultUrl === null half).
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              url: 'https://www.notion.so/page-id-1',
+              properties: {
+                Name: { type: 'title', title: [{ plain_text: 'No id' }] },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result missing id or url',
+      );
     } finally {
       await notion.close();
     }
