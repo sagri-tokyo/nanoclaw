@@ -1,7 +1,7 @@
 /**
  * List-source adapters that complement `fetchUntrusted`. Each adapter fetches
  * a paginated upstream list (arXiv search, GitHub repo/PR/issue/run lists,
- * Notion database query) and returns a structured list. Constrained fields
+ * Notion database query, Notion search) and returns a structured list. Constrained fields
  * (numeric ids, urls, ISO timestamps, GitHub logins) are always surfaced raw
  * on each item.
  *
@@ -38,6 +38,7 @@ import {
   validatePublicHttpsUrl,
 } from './fetch-untrusted.js';
 import { logger } from './logger.js';
+import { isPlainObject } from './org-action-gate.js';
 import {
   readUntrustedContent,
   type ReaderOutput,
@@ -59,7 +60,8 @@ export type ListSourceType =
   | 'github_pr_list'
   | 'github_issue_list'
   | 'github_run_list'
-  | 'notion_database_query';
+  | 'notion_database_query'
+  | 'notion_search';
 
 const VALID_LIST_SOURCE_TYPES: ReadonlySet<ListSourceType> = new Set([
   'arxiv_search',
@@ -68,6 +70,7 @@ const VALID_LIST_SOURCE_TYPES: ReadonlySet<ListSourceType> = new Set([
   'github_issue_list',
   'github_run_list',
   'notion_database_query',
+  'notion_search',
 ]);
 
 // Post-validation shape produced by `validateInput`. The raw RPC payload may
@@ -141,13 +144,21 @@ export interface NotionDatabaseItem {
   reader?: ReaderOutput;
 }
 
+export interface NotionSearchItem {
+  id: string;
+  url: string;
+  object: 'page' | 'database';
+  reader?: ReaderOutput;
+}
+
 export type ListItem =
   | ArxivItem
   | GithubSearchItem
   | GithubPrItem
   | GithubIssueItem
   | GithubRunItem
-  | NotionDatabaseItem;
+  | NotionDatabaseItem
+  | NotionSearchItem;
 
 export interface FetchUntrustedListResult {
   items: ListItem[];
@@ -774,38 +785,25 @@ function performNotionPost(args: {
   });
 }
 
-async function notionDatabaseQuery(
-  params: Record<string, unknown>,
-  deps: Required<FetchUntrustedDeps>,
-  includeReader: boolean,
-): Promise<NotionDatabaseItem[]> {
-  rejectUnknownKeys(params, new Set(['database_id', 'filter', 'limit']));
-  const databaseId = requireString(params, 'database_id');
-  const limit = requireLimit(params, NOTION_LIMIT_MAX);
-  const filter = params.filter;
-  if (
-    filter !== undefined &&
-    (filter === null || typeof filter !== 'object' || Array.isArray(filter))
-  ) {
-    paramErr('filter must be a JSON object when provided');
-  }
-  const token = requireEnv('NOTION_API_KEY');
-  const url = `https://api.notion.com/v1/databases/${encodeURIComponent(databaseId)}/query`;
-  const requestBody: Record<string, unknown> = { page_size: limit };
-  if (filter !== undefined) requestBody.filter = filter;
+async function notionPostResults(args: {
+  url: string;
+  body: string;
+  token: string;
+  deps: Required<FetchUntrustedDeps>;
+}): Promise<unknown[]> {
   let response: NotionPostResponse;
   try {
     response = await performNotionPost({
-      url,
-      body: JSON.stringify(requestBody),
+      url: args.url,
+      body: args.body,
       headers: {
-        authorization: `Bearer ${token}`,
+        authorization: `Bearer ${args.token}`,
         'notion-version': NOTION_VERSION,
         'content-type': 'application/json',
         accept: 'application/json',
         'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
       },
-      deps,
+      deps: args.deps,
     });
   } catch (err) {
     if (err instanceof FetchUntrustedError) throw err;
@@ -824,13 +822,38 @@ async function notionDatabaseQuery(
   } catch {
     throw new FetchUntrustedMalformed('notion response was not json');
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new FetchUntrustedMalformed('notion response was not an object');
   }
-  const resultsRaw = (parsed as Record<string, unknown>).results;
+  const resultsRaw = parsed.results;
   if (!Array.isArray(resultsRaw)) {
     throw new FetchUntrustedMalformed('notion response missing results array');
   }
+  return resultsRaw;
+}
+
+async function notionDatabaseQuery(
+  params: Record<string, unknown>,
+  deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
+): Promise<NotionDatabaseItem[]> {
+  rejectUnknownKeys(params, new Set(['database_id', 'filter', 'limit']));
+  const databaseId = requireString(params, 'database_id');
+  const limit = requireLimit(params, NOTION_LIMIT_MAX);
+  const filter = params.filter;
+  if (filter !== undefined && !isPlainObject(filter)) {
+    paramErr('filter must be a JSON object when provided');
+  }
+  const token = requireEnv('NOTION_API_KEY');
+  const url = `https://api.notion.com/v1/databases/${encodeURIComponent(databaseId)}/query`;
+  const requestBody: Record<string, unknown> = { page_size: limit };
+  if (filter !== undefined) requestBody.filter = filter;
+  const resultsRaw = await notionPostResults({
+    url,
+    body: JSON.stringify(requestBody),
+    token,
+    deps,
+  });
   const out: NotionDatabaseItem[] = [];
   for (const pageRaw of resultsRaw.slice(0, limit)) {
     if (!pageRaw || typeof pageRaw !== 'object') continue;
@@ -856,6 +879,112 @@ async function notionDatabaseQuery(
         raw: JSON.stringify(properties),
         source: 'notion_page',
         url: pageUrl,
+      });
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+// ---------- notion_search ----------
+
+function concatPlainText(richText: unknown): string {
+  if (!Array.isArray(richText)) return '';
+  return richText
+    .map((span) =>
+      isPlainObject(span) && typeof span.plain_text === 'string'
+        ? span.plain_text
+        : '',
+    )
+    .join('');
+}
+
+function extractNotionSearchTitle(
+  result: Record<string, unknown>,
+  object: 'page' | 'database',
+): string {
+  if (object === 'database') {
+    return concatPlainText(result.title);
+  }
+  const properties = result.properties;
+  if (!isPlainObject(properties)) return '';
+  for (const value of Object.values(properties)) {
+    if (isPlainObject(value) && value.type === 'title') {
+      return concatPlainText(value.title);
+    }
+  }
+  return '';
+}
+
+async function notionSearch(
+  params: Record<string, unknown>,
+  deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
+): Promise<NotionSearchItem[]> {
+  rejectUnknownKeys(params, new Set(['query', 'object_kind', 'limit']));
+  const query = requireString(params, 'query');
+  const objectKind = requireString(params, 'object_kind');
+  if (objectKind !== 'page' && objectKind !== 'database') {
+    paramErr('object_kind must be one of: page, database');
+  }
+  const limit = requireLimit(params, NOTION_LIMIT_MAX);
+  const token = requireEnv('NOTION_API_KEY');
+  const resultsRaw = await notionPostResults({
+    url: 'https://api.notion.com/v1/search',
+    body: JSON.stringify({
+      query,
+      page_size: limit,
+      filter: { property: 'object', value: objectKind },
+    }),
+    token,
+    deps,
+  });
+  // items.length is the caller's match signal: 1 == unique, ==limit == "too
+  // broad, refine". Notion's has_more is deliberately not surfaced — it would
+  // only sharpen the exactly-limit boundary, where "refine" is already the
+  // correct instruction, at the cost of changing the shared result envelope.
+  const out: NotionSearchItem[] = [];
+  for (const result of resultsRaw.slice(0, limit)) {
+    // Warn on every drop so a silent under-count doesn't reach the caller.
+    if (!isPlainObject(result)) {
+      logger.warn('notion_search: dropped a non-object result row');
+      continue;
+    }
+    const id = typeof result.id === 'string' ? result.id : null;
+    const resultUrl = typeof result.url === 'string' ? result.url : null;
+    // Defense in depth: the server-side filter should already constrain results
+    // to the requested kind; drop any mismatch rather than trust the upstream
+    // filter to stay authoritative.
+    if (result.object !== objectKind) {
+      logger.warn(
+        { object: result.object, objectKind },
+        'notion_search: dropped a result whose object kind did not match',
+      );
+      continue;
+    }
+    if (id === null || resultUrl === null) {
+      logger.warn('notion_search: dropped a result missing id or url');
+      continue;
+    }
+    const item: NotionSearchItem = {
+      id,
+      url: resultUrl,
+      object: objectKind,
+    };
+    if (includeReader) {
+      // Launder only the title, deliberately narrower than notionDatabaseQuery's
+      // full-`properties` launder: search only needs the title to
+      // rank/disambiguate, so narrowing the laundered text shrinks the
+      // prompt-injection surface (sagri-ai#119). Do not widen this to full
+      // properties.
+      const title = extractNotionSearchTitle(result, objectKind);
+      item.reader = await launder({
+        // Database results carry source 'notion_page' because the reader
+        // pipeline has no 'notion_database' source; this is provenance labeling,
+        // not a security classification (notion_page is not in ADMIN_SOURCES).
+        raw: title.length > 0 ? title : '(untitled)',
+        source: 'notion_page',
+        url: resultUrl,
       });
     }
     out.push(item);
@@ -923,6 +1052,9 @@ export async function fetchUntrustedList(
       break;
     case 'notion_database_query':
       items = await notionDatabaseQuery(input.params, deps, includeReader);
+      break;
+    case 'notion_search':
+      items = await notionSearch(input.params, deps, includeReader);
       break;
     default: {
       const _exhaustive: never = input.source_type;

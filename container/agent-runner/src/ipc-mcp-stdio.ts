@@ -561,11 +561,11 @@ source_type values:
 
 server.tool(
   'fetch_untrusted_list',
-  `Fetch untrusted list-shaped sources (arXiv search, GitHub repo/PR/issue/run lists, Notion database queries) and return a structured list of items. Constrained fields (numeric ids, urls, ISO timestamps, GitHub logins) are surfaced raw on each item.
+  `Fetch untrusted list-shaped sources (arXiv search, GitHub repo/PR/issue/run lists, Notion database queries, Notion search) and return a structured list of items. Constrained fields (numeric ids, urls, ISO timestamps, GitHub logins) are surfaced raw on each item.
 
 By default, items[].reader is omitted from the response and the host-side Reader RPC is skipped — only the constrained fields reach the agent, eliminating any path for laundered free-text bodies (titles, descriptions, abstracts, page properties) to surface attacker-influenced wording in the agent context. Set \`include_reader: true\` only when the consumer needs the laundered ReaderOutput to rank or summarize items (search/research adapters); enumeration consumers (e.g. polling a Notion queue, listing recent PRs by id) should leave it false.
 
-Use this in place of \`gh ... list --json\`, \`curl https://api.github.com/search/...\`, \`curl https://export.arxiv.org/api/query?...\`, and \`curl POST https://api.notion.com/v1/databases/{id}/query\` when enumerating untrusted items. Returns the FetchUntrustedListResult JSON as a string.
+Use this in place of \`gh ... list --json\`, \`curl https://api.github.com/search/...\`, \`curl https://export.arxiv.org/api/query?...\`, \`curl POST https://api.notion.com/v1/databases/{id}/query\`, and \`curl POST https://api.notion.com/v1/search\` when enumerating untrusted items. Returns the FetchUntrustedListResult JSON as a string.
 
 source_type values and required params:
 • arxiv_search           — { query: string, limit: number (1..25) }
@@ -573,7 +573,8 @@ source_type values and required params:
 • github_pr_list         — { owner, repo, state? (open|closed|all), since? (ISO), limit: number (1..100) }
 • github_issue_list      — { owner, repo, state?, since?, limit: number (1..100) }
 • github_run_list        — { owner, repo, status?, since?, limit: number (1..100) }
-• notion_database_query  — { database_id, filter? (Notion filter JSON), limit: number (1..100) }`,
+• notion_database_query  — { database_id, filter? (Notion filter JSON), limit: number (1..100) }
+• notion_search          — { query: string, object_kind: 'page'|'database', limit: number (1..100) }`,
   {
     source_type: z
       .enum([
@@ -583,6 +584,7 @@ source_type values and required params:
         'github_issue_list',
         'github_run_list',
         'notion_database_query',
+        'notion_search',
       ])
       .describe('Which list adapter to use on the host'),
     params: z
@@ -594,7 +596,7 @@ source_type values and required params:
       .boolean()
       .optional()
       .describe(
-        'Default false. When true, each item carries a laundered ReaderOutput under `reader` (intent paraphrase + extracted_data + risk_flags). Currently only meaningful for `arxiv_search` and `github_search`, where the laundered body is needed to rank items; enumeration consumers (notion_database_query, github_pr_list, github_issue_list, github_run_list) should leave it false.',
+        'Default false. When true, each item carries a laundered ReaderOutput under `reader` (intent paraphrase + extracted_data + risk_flags). Meaningful for `arxiv_search`, `github_search`, and `notion_search`, where the laundered body (abstract, description, or page/database title) is needed to rank or disambiguate items; enumeration consumers (notion_database_query, github_pr_list, github_issue_list, github_run_list) should leave it false.',
       ),
   },
   async (args) => {
