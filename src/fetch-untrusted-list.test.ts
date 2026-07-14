@@ -651,6 +651,429 @@ describe('fetch-untrusted-list', () => {
     ).rejects.toMatchObject({ code: 'bad_url' });
   });
 
+  // ---------- notion_search ----------
+
+  it('notion_search POSTs query+page_size+filter and launders each page title', async () => {
+    const notion = await startFakeServer((req, res) => {
+      expect(req.method).toBe('POST');
+      expect(req.path).toBe('/v1/search');
+      expect(req.headers['notion-version']).toBe('2022-06-28');
+      expect(req.headers.authorization).toBe('Bearer secret_test');
+      const body = JSON.parse(req.body);
+      expect(body.query).toBe('soil brief');
+      expect(body.page_size).toBe(5);
+      expect(body.filter).toEqual({ property: 'object', value: 'page' });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              id: 'page-id-1',
+              url: 'https://www.notion.so/page-id-1',
+              properties: {
+                Status: { type: 'select', select: { name: 'Done' } },
+                Name: {
+                  type: 'title',
+                  title: [{ plain_text: 'Soil Brief One' }],
+                },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'notion_search',
+          params: { query: 'soil brief', object_kind: 'page', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toMatchObject({
+        id: 'page-id-1',
+        url: 'https://www.notion.so/page-id-1',
+        object: 'page',
+      });
+      expect((result.items[0] as { reader?: unknown }).reader).toBeDefined();
+      expect(readerCallBodies).toHaveLength(1);
+      expect(readerCallBodies[0]).toContain('Soil Brief One');
+      // The title-only launder must NOT include other page properties (the
+      // 'Done' select). If this regresses to laundering full `properties`, the
+      // injection surface widens; assert the narrowing holds.
+      expect(readerCallBodies[0]).not.toContain('Done');
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search returns every match up to limit in order with page_size=limit', async () => {
+    // A downstream skill treats items.length as an exact match count:
+    // length 1 == unique match, length == limit == "too many, refine". That
+    // only holds if the adapter never truncates below limit and asks Notion
+    // for exactly limit rows, so pin both here. The throw-not-drop invariant
+    // that keeps the count exact lives in notionSearch and is exercised by the
+    // FetchUntrustedMalformed tests below.
+    const notion = await startFakeServer((req, res) => {
+      const body = JSON.parse(req.body);
+      expect(body.page_size).toBe(10);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [1, 2, 3].map((n) => ({
+            object: 'page',
+            id: `page-id-${n}`,
+            url: `https://www.notion.so/page-id-${n}`,
+            properties: {
+              Name: { type: 'title', title: [{ plain_text: `Page ${n}` }] },
+            },
+          })),
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'notion_search',
+          params: { query: 'page', object_kind: 'page', limit: 10 },
+        },
+        deps,
+      );
+      expect(result.items.map((item) => (item as { id: string }).id)).toEqual([
+        'page-id-1',
+        'page-id-2',
+        'page-id-3',
+      ]);
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result whose object kind does not match', async () => {
+    // Notion's object filter guarantees only the requested kind returns; a
+    // mismatch is a contract violation, so notionSearch throws rather than
+    // drops it (see the exact-match invariant there).
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              id: 'page-id-1',
+              url: 'https://www.notion.so/page-id-1',
+              properties: {
+                Name: { type: 'title', title: [{ plain_text: 'Keep me' }] },
+              },
+            },
+            {
+              object: 'database',
+              id: 'db-id-1',
+              url: 'https://www.notion.so/db-id-1',
+              title: [{ plain_text: 'Wrong kind' }],
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      // Pin the exact static message: the throw must never interpolate
+      // untrusted response bytes (result.object etc.) into it.
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result object kind did not match the request',
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result missing id or url', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              id: 'page-id-1',
+              properties: {
+                Name: { type: 'title', title: [{ plain_text: 'No url' }] },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result missing id or url',
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search throws FetchUntrustedMalformed on a result missing id (url present)', async () => {
+    // Exercises the id === null half of the id/url guard (the missing-url test
+    // above covers the resultUrl === null half).
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              url: 'https://www.notion.so/page-id-1',
+              properties: {
+                Name: { type: 'title', title: [{ plain_text: 'No id' }] },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 10 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedMalformed);
+      expect((caught as FetchUntrustedMalformed).message).toBe(
+        'notion search result missing id or url',
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search surfaces a 404 from /v1/search as FetchUntrustedHttp4xx', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'not found' }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      let caught: unknown;
+      try {
+        await fetchUntrustedList(
+          {
+            source_type: 'notion_search',
+            params: { query: 'x', object_kind: 'page', limit: 5 },
+          },
+          deps,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedHttp4xx);
+      expect(caught).toMatchObject({ code: 'fetch_failure', httpStatus: 404 });
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search reads a database title from the top-level title array', async () => {
+    const notion = await startFakeServer((req, res) => {
+      const body = JSON.parse(req.body);
+      expect(body.filter).toEqual({ property: 'object', value: 'database' });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'database',
+              id: 'db-id-1',
+              url: 'https://www.notion.so/db-id-1',
+              title: [{ plain_text: 'Sagri AI ' }, { plain_text: 'Tasks' }],
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'notion_search',
+          params: { query: 'sagri', object_kind: 'database', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toMatchObject({
+        id: 'db-id-1',
+        url: 'https://www.notion.so/db-id-1',
+        object: 'database',
+      });
+      expect(readerCallBodies).toHaveLength(1);
+      expect(readerCallBodies[0]).toContain('Sagri AI Tasks');
+    } finally {
+      await notion.close();
+    }
+  });
+
+  it('notion_search rejects a missing object_kind with invalid_params', async () => {
+    await expect(
+      fetchUntrustedList({
+        source_type: 'notion_search',
+        params: { query: 'x', limit: 5 },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  it('notion_search rejects an object_kind other than page/database with invalid_params', async () => {
+    await expect(
+      fetchUntrustedList({
+        source_type: 'notion_search',
+        params: { query: 'x', object_kind: 'block', limit: 5 },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  it('notion_search rejects an unknown param with invalid_params', async () => {
+    await expect(
+      fetchUntrustedList({
+        source_type: 'notion_search',
+        params: { query: 'x', object_kind: 'page', limit: 5, extra: 1 },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  it('notion_search throws fetch_failure when NOTION_API_KEY missing', async () => {
+    delete mockEnv.NOTION_API_KEY;
+    await expect(
+      fetchUntrustedList({
+        source_type: 'notion_search',
+        params: { query: 'x', object_kind: 'page', limit: 5 },
+      }),
+    ).rejects.toMatchObject({ code: 'fetch_failure' });
+  });
+
+  it('notion_search omits items[].reader by default and skips the reader RPC', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              object: 'page',
+              id: 'page-id-1',
+              url: 'https://www.notion.so/page-id-1',
+              properties: {
+                Name: {
+                  type: 'title',
+                  title: [{ plain_text: 'Embedded INJECTION here' }],
+                },
+              },
+            },
+          ],
+          has_more: false,
+        }),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'notion_search',
+          params: { query: 'x', object_kind: 'page', limit: 5 },
+        },
+        deps,
+      );
+      expect(result.items).toEqual([
+        {
+          id: 'page-id-1',
+          url: 'https://www.notion.so/page-id-1',
+          object: 'page',
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
+    } finally {
+      await notion.close();
+    }
+  });
+
   // ---------- error subclasses (sagri-tokyo/sagri-ai#255) ----------
 
   it('notion_database_query throws FetchUntrustedHttp4xx on a 404 status', async () => {
