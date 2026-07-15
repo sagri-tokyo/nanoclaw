@@ -755,22 +755,25 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
-  it('github_pr_list rejects a since that is not an ISO-8601 UTC timestamp', async () => {
+  // Every leg taking `since` takes the same guard: pr and issue compare it
+  // byte-wise against updated_at, run_list hands it to GitHub's created filter.
+  // 'yesterday' sorts above every ISO timestamp, so on the compared legs it
+  // ends the walk at row one and returns an empty list that reads exactly like
+  // an empty window. '.000Z' sorts just below the same instant and skews the
+  // boundary instead of failing.
+  it.each([
+    ['github_pr_list', 'yesterday'],
+    ['github_issue_list', 'yesterday'],
+    ['github_run_list', 'yesterday'],
+    ['github_pr_list', '2024-03-01T00:00:00.000Z'],
+    ['github_run_list', '2024-03-01T00:00:00.000Z'],
+  ])('%s rejects a since of %s', async (sourceType, since) => {
     const deps = buildLocalRedirectDeps({ redirects: {} });
-    // Lexicographic compare against updated_at: 'yesterday' sorts above every
-    // ISO timestamp, so the first row would end the walk and the caller would
-    // get an empty list that reads exactly like an empty window.
     await expect(
       fetchUntrustedList(
         {
-          source_type: 'github_pr_list',
-          params: {
-            owner: 'o',
-            repo: 'r',
-            state: 'open',
-            since: 'yesterday',
-            limit: 10,
-          },
+          source_type: sourceType as 'github_pr_list',
+          params: { owner: 'o', repo: 'r', since, limit: 10 },
         },
         deps,
       ),

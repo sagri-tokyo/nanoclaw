@@ -83,7 +83,22 @@ const GITHUB_LIST_OVERSCAN = 3;
 // run.
 const GITHUB_MIN_PAGES = 3;
 
+// GitHub's exact updated_at/created_at spelling. Deliberately no milliseconds:
+// `since` is compared byte-wise against those fields, which is only sound when
+// both sides are spelled the same. '.' sorts below 'Z', so a since carrying
+// '.000Z' would sit just under the same instant and skew the boundary rather
+// than fail. Reject it and make the caller say what it means.
 const ISO_8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+function optionalSince(params: Record<string, unknown>): string | undefined {
+  const since = optionalString(params, 'since');
+  if (since !== undefined && !ISO_8601_UTC.test(since)) {
+    paramErr(
+      'since must be an ISO-8601 UTC timestamp with no milliseconds, e.g. 2026-07-15T00:00:00Z',
+    );
+  }
+  return since;
+}
 
 /**
  * Pages we will read before giving up on reaching `limit`. Scales with the ask,
@@ -460,16 +475,10 @@ function readGithubListEnvelope(
   if (!['open', 'closed', 'all'].includes(stateRaw)) {
     paramErr('state must be one of: open, closed, all');
   }
-  const since = optionalString(params, 'since');
-  // `since` is compared lexicographically against updated_at, and paging now
-  // makes the first row past it end the walk, so a malformed value does not
-  // filter — it decides. 'yesterday' sorts above every ISO timestamp and would
-  // return an empty list that reads exactly like an empty window.
-  if (since !== undefined && !ISO_8601_UTC.test(since)) {
-    paramErr(
-      'since must be an ISO-8601 UTC timestamp, e.g. 2026-07-15T00:00:00Z',
-    );
-  }
+  // Paging makes the first row past `since` end the walk, so a malformed value
+  // does not filter — it decides. 'yesterday' sorts above every ISO timestamp
+  // and would return an empty list that reads exactly like an empty window.
+  const since = optionalSince(params);
   const limit = requireLimit(params, GITHUB_LIST_LIMIT_MAX);
   return { owner, repo, state: stateRaw, since, limit };
 }
@@ -597,7 +606,7 @@ async function githubPrList(
   }
   throw new FetchUntrustedError(
     'fetch_failure',
-    'pulls list exceeded its page ceiling before reaching limit',
+    'pulls list exceeded its page ceiling before reaching limit; narrow the window with since, or lower limit',
   );
 }
 
@@ -689,7 +698,7 @@ async function githubIssueList(
   }
   throw new FetchUntrustedError(
     'fetch_failure',
-    'issues list exceeded its page ceiling before reaching limit',
+    'issues list exceeded its page ceiling before reaching limit; narrow the window with since, or lower limit',
   );
 }
 
@@ -707,7 +716,11 @@ async function githubRunList(
   const owner = requireString(params, 'owner');
   const repo = requireString(params, 'repo');
   const status = optionalString(params, 'status');
-  const since = optionalString(params, 'since');
+  // Not compared byte-wise like the other legs — this one hands `since` to
+  // GitHub's `created` filter — but it takes the same param from the same
+  // callers, so it takes the same guard. Unvalidated, `created=>=yesterday`
+  // goes to GitHub.
+  const since = optionalSince(params);
   const limit = requireLimit(params, GITHUB_LIST_LIMIT_MAX);
   const token = requireEnv('GITHUB_TOKEN');
   const search = new URLSearchParams({
