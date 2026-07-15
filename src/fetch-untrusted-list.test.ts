@@ -371,6 +371,65 @@ describe('fetch-untrusted-list', () => {
 
   // ---------- github_pr_list ----------
 
+  // Both adapters get a case: the call sites are separate, and issues stayed
+  // under the old 256 KiB cap until per_page=100, so a pulls-only test would let
+  // a regression on the issues call site through.
+  it.each(['github_pr_list', 'github_issue_list'] as const)(
+    '%s parses a response larger than the 256 KiB default body cap',
+    async (kind) => {
+      const isPullRequest = kind === 'github_pr_list';
+      const pathSegment = isPullRequest ? 'pull' : 'issues';
+      // Padding stays well under the raised list cap: this pins the raise, not
+      // the ceiling. The size assertion below keeps the fixture honest if either
+      // number moves.
+      const padding = 'x'.repeat(8 * 1024);
+      const rows = Array.from({ length: 60 }, (_, index) => ({
+        number: index + 1,
+        html_url: `https://github.com/o/r/${pathSegment}/${index + 1}`,
+        state: 'open',
+        draft: false,
+        created_at: '2024-03-01T00:00:00Z',
+        updated_at: '2024-03-05T00:00:00Z',
+        user: { login: 'alice' },
+        title: `Item ${index + 1}`,
+        body: padding,
+      }));
+      const serialized = JSON.stringify(rows);
+      expect(serialized.length).toBeGreaterThan(256 * 1024);
+
+      const ghApi = await startFakeServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(serialized);
+      });
+      try {
+        const deps = buildLocalRedirectDeps({
+          redirects: {
+            'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+          },
+        });
+        const result = await fetchUntrustedList(
+          {
+            source_type: kind,
+            params: { owner: 'o', repo: 'r', state: 'open', limit: 100 },
+          },
+          deps,
+        );
+        expect(result.items).toHaveLength(60);
+        expect(result.items[0]).toEqual({
+          number: 1,
+          url: `https://github.com/o/r/${pathSegment}/1`,
+          state: 'open',
+          author: 'alice',
+          created_at: '2024-03-01T00:00:00Z',
+          updated_at: '2024-03-05T00:00:00Z',
+          ...(isPullRequest ? { draft: false } : { labels: [] }),
+        });
+      } finally {
+        await ghApi.close();
+      }
+    },
+  );
+
   it('github_pr_list returns laundered PRs and applies since filter', async () => {
     const ghApi = await startFakeServer((req, res) => {
       expect(req.path).toContain('state=open');

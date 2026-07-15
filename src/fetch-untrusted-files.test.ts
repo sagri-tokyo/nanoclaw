@@ -130,4 +130,28 @@ describe('fetchWithRedirects — file download additions', () => {
     });
     expect(seen[1].authorization).toBe('Bearer secret');
   });
+
+  // A caller's maxBytes survives a redirect, cross-origin included. That is what
+  // the Slack file download needs (files.slack.com 302s to a different origin,
+  // and SLACK_FILE_MAX_BYTES has to still apply there), so a raised GitHub list
+  // cap rides the same path. The exposure is bounded to buffering: the target is
+  // still public-address validated and credentials are stripped above.
+  it('applies maxBytes to the redirect target, not just the initial origin', async () => {
+    const { factory } = makeStub([
+      { status: 302, headers: { location: 'https://other.example/file' } },
+      { status: 200, body: Buffer.alloc(1000, 0x61) },
+    ]);
+    const deps = resolveDeps({
+      lookup: lookupPublic,
+      httpsRequestFactory: factory,
+    });
+    await expect(
+      fetchWithRedirects({
+        url: 'https://files.slack.com/x',
+        headers: {},
+        deps,
+        maxBytes: 100,
+      }),
+    ).rejects.toThrow(FetchUntrustedError);
+  });
 });

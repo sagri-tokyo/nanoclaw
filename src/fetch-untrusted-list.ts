@@ -54,6 +54,23 @@ const GITHUB_SEARCH_LIMIT_MAX = 30;
 const GITHUB_LIST_LIMIT_MAX = 100;
 const NOTION_LIMIT_MAX = 100;
 
+// A GitHub list page does not fit the 256 KiB default: measured against
+// sagri-tokyo/sagri-ai a `pulls` page runs ~17.5 KiB per item, so every
+// realistic `github_pr_list` / `github_issue_list` call died on the cap as an
+// opaque `fetch_failure` 502 (sagri-ai#378).
+//
+// Sized from the ceiling the API permits, not the traffic that happened to be
+// measured: `limit` is validated to <= 100 (GITHUB_LIST_LIMIT_MAX) before the
+// request and GitHub caps an issue/PR body at 65,536 characters, so a full page
+// of maximal ASCII bodies tops out at 100 * (65,536 + the ~20 KiB of
+// surrounding fields) = 8,601,600 bytes, about 8.2 MiB. 16 MiB clears that.
+//
+// It is a DoS backstop, not a correctness guarantee. A pathological page of 100
+// maximal multibyte bodies could still exceed it; that surfaces as a loud leg
+// failure, which is the same class of signal as any other fetch error and not a
+// silent truncation.
+const GITHUB_LIST_MAX_BODY_BYTES = 16 * 1024 * 1024;
+
 export type ListSourceType =
   | 'arxiv_search'
   | 'github_search'
@@ -442,6 +459,7 @@ async function githubPrList(
       'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
     },
     deps,
+    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
   });
   let parsed: unknown;
   try {
@@ -527,6 +545,7 @@ async function githubIssueList(
       'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
     },
     deps,
+    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
   });
   let parsed: unknown;
   try {
