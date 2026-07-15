@@ -65,11 +65,36 @@ const NOTION_LIMIT_MAX = 100;
 // page near 200KB, comfortably inside the cap, and issues pages are far smaller.
 const GITHUB_PAGE_SIZE = 10;
 
-// Bounds the request count when a caller's filters reject most rows — the issue
-// list drops every pull_request row, and on a repo where bots open PRs around
-// the clock those can be most of a page. Without this, a limit the repo cannot
-// satisfy would page to the end of history.
-const GITHUB_MAX_PAGES = 30;
+// How many rows we are willing to read per row the caller asked for, before
+// giving up. The issue list drops every pull_request row, and on a repo where
+// bots open PRs around the clock those can be most of a page, so `limit` rows
+// of output can cost several times that in input. 3 covers a list that is
+// two-thirds PRs. Crossing it throws rather than returning a short list: a
+// truncated list is indistinguishable from a genuinely small one, and inventing
+// that ambiguity is the bug this file is being fixed for (sagri-ai#472, #378).
+// In practice `since` ends paging first — the ceiling only binds on an
+// unfiltered or very wide window.
+const GITHUB_LIST_OVERSCAN = 3;
+
+// Floor under the overscan. A page is GITHUB_PAGE_SIZE rows whatever the ask,
+// so overscan alone is too coarse at small limits: limit 3 works out to a
+// single page, and one page of PR rows would exhaust an issue list before it
+// saw its first issue. Three pages give any limit room to page past a filtered
+// run.
+const GITHUB_MIN_PAGES = 3;
+
+const ISO_8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/**
+ * Pages we will read before giving up on reaching `limit`. Scales with the ask,
+ * so a limit of 10 cannot spend a limit-of-100 request budget.
+ */
+function githubMaxPages(limit: number): number {
+  return Math.max(
+    GITHUB_MIN_PAGES,
+    Math.ceil((limit * GITHUB_LIST_OVERSCAN) / GITHUB_PAGE_SIZE),
+  );
+}
 
 export type ListSourceType =
   | 'arxiv_search'
@@ -436,6 +461,15 @@ function readGithubListEnvelope(
     paramErr('state must be one of: open, closed, all');
   }
   const since = optionalString(params, 'since');
+  // `since` is compared lexicographically against updated_at, and paging now
+  // makes the first row past it end the walk, so a malformed value does not
+  // filter — it decides. 'yesterday' sorts above every ISO timestamp and would
+  // return an empty list that reads exactly like an empty window.
+  if (since !== undefined && !ISO_8601_UTC.test(since)) {
+    paramErr(
+      'since must be an ISO-8601 UTC timestamp, e.g. 2026-07-15T00:00:00Z',
+    );
+  }
   const limit = requireLimit(params, GITHUB_LIST_LIMIT_MAX);
   return { owner, repo, state: stateRaw, since, limit };
 }
@@ -452,9 +486,9 @@ async function githubListPage(
   search: URLSearchParams,
   page: number,
   what: string,
+  token: string,
   deps: Required<FetchUntrustedDeps>,
 ): Promise<Record<string, unknown>[]> {
-  const token = requireEnv('GITHUB_TOKEN');
   const paged = new URLSearchParams(search);
   paged.set('per_page', String(GITHUB_PAGE_SIZE));
   paged.set('page', String(page));
@@ -500,9 +534,14 @@ async function githubPrList(
     direction: 'desc',
   });
   const url = `https://api.github.com/repos/${env.owner}/${env.repo}/pulls`;
+  const token = requireEnv('GITHUB_TOKEN');
   const out: GithubPrItem[] = [];
-  for (let page = 1; page <= GITHUB_MAX_PAGES; page++) {
-    const rows = await githubListPage(url, search, page, 'pulls', deps);
+  // A row updated between two page fetches moves toward page 1, so a row that
+  // was on page N can reappear on page N+1. One request could not do this.
+  const seen = new Set<number>();
+  const maxPages = githubMaxPages(env.limit);
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await githubListPage(url, search, page, 'pulls', token, deps);
     for (const pr of rows) {
       // sort=updated&direction=desc, so the first row older than `since` means
       // every row after it is older too. Stop rather than skip: paging on would
@@ -530,6 +569,8 @@ async function githubPrList(
             : ''
           : '';
       if (number === null || htmlUrl === null || state === null) continue;
+      if (seen.has(number)) continue;
+      seen.add(number);
       const item: GithubPrItem = {
         number,
         url: htmlUrl,
@@ -550,10 +591,14 @@ async function githubPrList(
       out.push(item);
       if (out.length >= env.limit) return out;
     }
-    // A short page is the last page.
-    if (rows.length < GITHUB_PAGE_SIZE) break;
+    // A short page is the last page: the repo has fewer matching rows than
+    // asked for, which is an answer, not a truncation.
+    if (rows.length < GITHUB_PAGE_SIZE) return out;
   }
-  return out;
+  throw new FetchUntrustedError(
+    'fetch_failure',
+    'pulls list exceeded its page ceiling before reaching limit',
+  );
 }
 
 async function githubIssueList(
@@ -568,16 +613,16 @@ async function githubIssueList(
     direction: 'desc',
   });
   const url = `https://api.github.com/repos/${env.owner}/${env.repo}/issues`;
+  const token = requireEnv('GITHUB_TOKEN');
   const out: GithubIssueItem[] = [];
-  for (let page = 1; page <= GITHUB_MAX_PAGES; page++) {
-    const rows = await githubListPage(url, search, page, 'issues', deps);
+  const seen = new Set<number>();
+  const maxPages = githubMaxPages(env.limit);
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await githubListPage(url, search, page, 'issues', token, deps);
     for (const issue of rows) {
-      // GitHub's /issues endpoint returns PRs too; filter them out. Paging
-      // means a page full of PRs costs another page rather than the caller's
-      // budget: `limit` now counts issues that survived this filter, where the
-      // pre-paging code sliced to `limit` first and let PRs eat it.
-      if (issue.pull_request !== undefined) continue;
-      // sort=updated&direction=desc — see the pulls loop.
+      // Cutoff first, before the PR filter: PRs and issues share one
+      // updated-desc sort, so a PR row past the cutoff proves every later row
+      // is too. Filtering first would let a page of old PRs page on for nothing.
       if (
         env.since &&
         typeof issue.updated_at === 'string' &&
@@ -585,6 +630,11 @@ async function githubIssueList(
       ) {
         return out;
       }
+      // GitHub's /issues endpoint returns PRs too; filter them out. Paging
+      // means a page full of PRs costs another page rather than the caller's
+      // budget: `limit` now counts issues that survived this filter, where the
+      // pre-paging code sliced to `limit` first and let PRs eat it.
+      if (issue.pull_request !== undefined) continue;
       const number = typeof issue.number === 'number' ? issue.number : null;
       const htmlUrl =
         typeof issue.html_url === 'string' ? issue.html_url : null;
@@ -611,6 +661,8 @@ async function githubIssueList(
             .filter((n): n is string => n !== null)
         : [];
       if (number === null || htmlUrl === null || state === null) continue;
+      if (seen.has(number)) continue;
+      seen.add(number);
       const item: GithubIssueItem = {
         number,
         url: htmlUrl,
@@ -631,10 +683,14 @@ async function githubIssueList(
       out.push(item);
       if (out.length >= env.limit) return out;
     }
-    // A short page is the last page.
-    if (rows.length < GITHUB_PAGE_SIZE) break;
+    // A short page is the last page: the repo has fewer matching rows than
+    // asked for, which is an answer, not a truncation.
+    if (rows.length < GITHUB_PAGE_SIZE) return out;
   }
-  return out;
+  throw new FetchUntrustedError(
+    'fetch_failure',
+    'issues list exceeded its page ceiling before reaching limit',
+  );
 }
 
 // ---------- github_run_list ----------

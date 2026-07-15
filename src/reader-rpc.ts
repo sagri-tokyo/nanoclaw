@@ -362,9 +362,16 @@ async function runFetchAsRpc<T>(
       // without this line the host log carries error_class alone and every
       // cause collapses into one 502. A `body too large` then reads exactly
       // like an auth failure, which is how sagri-ai#378 sat unexplained for
-      // ten days. err.message is authored in fetch-untrusted.ts, never an
-      // upstream response body, so it is safe here; it stays out of the RPC
-      // reply and out of outputs_hash regardless (see above).
+      // ten days.
+      //
+      // Safe to log because every error reachable from the two methods this
+      // function serves — fetchUntrusted and fetchUntrustedList — builds its
+      // message from authored text and fixed values. Not a module-wide
+      // property: fetchJsonWrite embeds 500 bytes of upstream body in its
+      // message, and is org-action-only precisely because of things like this.
+      // Widening `method` past those two means re-checking that before
+      // trusting this line. The message stays out of the RPC reply and out of
+      // outputs_hash either way (see above).
       logger.error(
         { code: err.code, message: err.message, httpStatus: err.httpStatus },
         `reader-rpc: ${method} fetch error`,

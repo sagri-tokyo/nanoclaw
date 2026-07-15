@@ -527,11 +527,13 @@ describe('fetch-untrusted-list', () => {
 
   it('github_pr_list stops at the caller limit mid-page', async () => {
     const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
       res.writeHead(200, { 'content-type': 'application/json' });
+      // Distinct rows per page, as GitHub serves them.
       res.end(
         JSON.stringify(
           Array.from({ length: 10 }, (_, i) =>
-            prRow(100 - i, '2024-03-05T00:00:00Z'),
+            prRow(100 - (page - 1) * 10 - i, '2024-03-05T00:00:00Z'),
           ),
         ),
       );
@@ -640,12 +642,14 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
-  it('github_issue_list bounds its requests when every row is filtered out', async () => {
+  it('github_issue_list throws rather than return a short list when it hits the page ceiling', async () => {
     const ghApi = await startFakeServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       // Every row is a PR, so the issue filter rejects all of them and the
-      // limit is never reached. Without a page ceiling this walks the repo's
-      // whole history.
+      // limit is never reached. The ceiling has to stop it — but returning
+      // items:[] here would be a lie the caller cannot detect, identical to a
+      // repo with no issues. That silent-short-answer is the bug class this
+      // whole change exists to remove, so it must throw.
       res.end(
         JSON.stringify(
           Array.from({ length: 10 }, (_, i) =>
@@ -660,18 +664,117 @@ describe('fetch-untrusted-list', () => {
           'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
         },
       });
-      const result = await fetchUntrustedList(
-        {
-          source_type: 'github_issue_list',
-          params: { owner: 'o', repo: 'r', state: 'open', limit: 5 },
-        },
-        deps,
-      );
-      expect(result.items).toHaveLength(0);
-      expect(ghApi.captured).toHaveLength(30);
+      await expect(
+        fetchUntrustedList(
+          {
+            source_type: 'github_issue_list',
+            params: { owner: 'o', repo: 'r', state: 'open', limit: 5 },
+          },
+          deps,
+        ),
+      ).rejects.toThrow(/page ceiling/);
+      // limit 5 works out under the 3-page floor, so it gets 3.
+      expect(ghApi.captured).toHaveLength(3);
     } finally {
       await ghApi.close();
     }
+  });
+
+  it('github_pr_list drops a row that repeats across pages', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // PR 91 was updated between the two fetches, so it moved up onto page 1
+      // and page 2 re-serves it. One request could not produce this; thirty
+      // sequential ones against a live repo can.
+      const rows =
+        page === 1
+          ? Array.from({ length: 10 }, (_, i) =>
+              prRow(100 - i, '2024-03-05T00:00:00Z'),
+            )
+          : [
+              prRow(91, '2024-03-05T00:00:00Z'),
+              prRow(90, '2024-03-04T00:00:00Z'),
+            ];
+      res.end(JSON.stringify(rows));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 50 },
+        },
+        deps,
+      );
+      const numbers = result.items.map((i) => (i as { number: number }).number);
+      expect(numbers).toEqual([...new Set(numbers)]);
+      expect(numbers.filter((n) => n === 91)).toHaveLength(1);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_pr_list throws rather than return a short list when pages stop making progress', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // Every page serves the same 10 rows, so dedup rejects everything after
+      // page 1 and the limit is never reached. Returning those 10 would claim
+      // the repo has 10 open PRs; it does not, we just stopped looking.
+      res.end(
+        JSON.stringify(
+          Array.from({ length: 10 }, (_, i) =>
+            prRow(100 - i, '2024-03-05T00:00:00Z'),
+          ),
+        ),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      await expect(
+        fetchUntrustedList(
+          {
+            source_type: 'github_pr_list',
+            params: { owner: 'o', repo: 'r', state: 'open', limit: 50 },
+          },
+          deps,
+        ),
+      ).rejects.toThrow(/page ceiling/);
+      // limit 50 * overscan 3 / page size 10.
+      expect(ghApi.captured).toHaveLength(15);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_pr_list rejects a since that is not an ISO-8601 UTC timestamp', async () => {
+    const deps = buildLocalRedirectDeps({ redirects: {} });
+    // Lexicographic compare against updated_at: 'yesterday' sorts above every
+    // ISO timestamp, so the first row would end the walk and the caller would
+    // get an empty list that reads exactly like an empty window.
+    await expect(
+      fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: {
+            owner: 'o',
+            repo: 'r',
+            state: 'open',
+            since: 'yesterday',
+            limit: 10,
+          },
+        },
+        deps,
+      ),
+    ).rejects.toThrow(/since must be an ISO-8601 UTC timestamp/);
   });
 
   // ---------- github_issue_list ----------
