@@ -786,15 +786,22 @@ describe('fetch-untrusted-list', () => {
   });
 
   // Every leg taking `since` takes the same guard; see ISO_8601_UTC for why.
-  // The two rejected spellings are the ones that fail silently rather than
-  // loudly: 'yesterday' sorts above every ISO timestamp, '.000Z' just below
-  // the same instant.
+  // Each rejected value fails silently rather than loudly if it gets through:
+  // 'yesterday' and an impossible calendar value both sort above every real
+  // updated_at and end the walk at row one, '.000Z' sits just below the same
+  // instant. All of them return a list that reads like an empty window.
   it.each([
     ['github_pr_list', 'yesterday'],
     ['github_issue_list', 'yesterday'],
     ['github_run_list', 'yesterday'],
     ['github_pr_list', '2024-03-01T00:00:00.000Z'],
     ['github_run_list', '2024-03-01T00:00:00.000Z'],
+    ['github_pr_list', '2024-99-99T99:99:99Z'],
+    ['github_issue_list', '2024-99-99T99:99:99Z'],
+    ['github_run_list', '2024-99-99T99:99:99Z'],
+    ['github_pr_list', '2024-02-30T00:00:00Z'],
+    ['github_issue_list', '2024-13-01T00:00:00Z'],
+    ['github_pr_list', '2024-03-01T24:00:00Z'],
   ])('%s rejects a since of %s', async (sourceType, since) => {
     const deps = buildLocalRedirectDeps({ redirects: {} });
     await expect(

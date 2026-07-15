@@ -89,7 +89,19 @@ const ISO_8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 function optionalSince(params: Record<string, unknown>): string | undefined {
   const since = optionalString(params, 'since');
-  if (since !== undefined && !ISO_8601_UTC.test(since)) {
+  if (since === undefined) return since;
+  // The regex fixes the spelling, Date fixes the calendar. '2024-99-99T99:99:99Z'
+  // is the right shape and sorts above every real updated_at, so on its own the
+  // regex lets it end the walk at row one and return the empty list that reads
+  // exactly like an empty window. Round-tripping rejects it, along with the
+  // values Date would silently normalize instead (2024-02-30, 24:00:00). NaN
+  // first: toISOString throws on an invalid date.
+  const parsed = new Date(since);
+  if (
+    !ISO_8601_UTC.test(since) ||
+    Number.isNaN(parsed.valueOf()) ||
+    parsed.toISOString() !== since.replace('Z', '.000Z')
+  ) {
     paramErr(
       'since must be an ISO-8601 UTC timestamp with no milliseconds, e.g. 2026-07-15T00:00:00Z',
     );
