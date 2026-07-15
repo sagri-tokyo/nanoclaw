@@ -541,7 +541,7 @@ describe('fetch-untrusted-list', () => {
 
   // ---------- notion_database_query ----------
 
-  it('notion_database_query POSTs filter+page_size and launders properties per page', async () => {
+  it('notion_database_query POSTs filter+page_size and never invokes the reader', async () => {
     const notion = await startFakeServer((req, res) => {
       expect(req.method).toBe('POST');
       expect(req.headers['notion-version']).toBe('2022-06-28');
@@ -586,20 +586,34 @@ describe('fetch-untrusted-list', () => {
             },
             limit: 10,
           },
-          include_reader: true,
         },
         deps,
       );
-      expect(result.items).toHaveLength(1);
-      expect(result.items[0]).toMatchObject({
-        id: 'page-id-1',
-        url: 'https://www.notion.so/page-id-1',
-        archived: false,
-      });
-      expect(readerCallBodies[0]).toContain('Brief one');
+      expect(result.items).toEqual([
+        {
+          id: 'page-id-1',
+          url: 'https://www.notion.so/page-id-1',
+          created_time: '2024-06-01T00:00:00Z',
+          last_edited_time: '2024-06-02T00:00:00Z',
+          archived: false,
+        },
+      ]);
+      expect(readerCallBodies).toEqual([]);
     } finally {
       await notion.close();
     }
+  });
+
+  // Regression: laundering the full properties blob broke the reader's
+  // scalars-only/200-char output contract on rich rows and 502'd the query.
+  it('notion_database_query rejects include_reader with invalid_params', async () => {
+    await expect(
+      fetchUntrustedList({
+        source_type: 'notion_database_query',
+        params: { database_id: 'abc', limit: 10 },
+        include_reader: true,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_params' });
   });
 
   it('notion_database_query rejects non-object filter with invalid_params', async () => {
