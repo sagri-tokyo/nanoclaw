@@ -58,6 +58,19 @@ const GITHUB_SEARCH_LIMIT_MAX = 30;
 const GITHUB_LIST_LIMIT_MAX = 100;
 const NOTION_LIMIT_MAX = 100;
 
+// A GitHub pulls item embeds full head/base repo and user objects and runs
+// ~20KB, so asking for per_page=100 returns ~2MB and trips the MAX_BODY_BYTES
+// guard before anything is parsed. GITHUB_LIST_LIMIT_MAX was unreachable for
+// pulls (it failed above ~14) until this paged (sagri-ai#472). 10 keeps a pulls
+// page near 200KB, comfortably inside the cap, and issues pages are far smaller.
+const GITHUB_PAGE_SIZE = 10;
+
+// Bounds the request count when a caller's filters reject most rows — the issue
+// list drops every pull_request row, and on a repo where bots open PRs around
+// the clock those can be most of a page. Without this, a limit the repo cannot
+// satisfy would page to the end of history.
+const GITHUB_MAX_PAGES = 30;
+
 export type ListSourceType =
   | 'arxiv_search'
   | 'github_search'
@@ -427,22 +440,26 @@ function readGithubListEnvelope(
   return { owner, repo, state: stateRaw, since, limit };
 }
 
-async function githubPrList(
-  params: Record<string, unknown>,
+/**
+ * Fetches one page of a GitHub array-returning list endpoint.
+ *
+ * Paging exists to keep each response under MAX_BODY_BYTES, not to be polite:
+ * see GITHUB_PAGE_SIZE. `what` names the endpoint in the error text so a caller
+ * can tell a bad pulls response from a bad issues one.
+ */
+async function githubListPage(
+  baseUrl: string,
+  search: URLSearchParams,
+  page: number,
+  what: string,
   deps: Required<FetchUntrustedDeps>,
-  includeReader: boolean,
-): Promise<GithubPrItem[]> {
-  const env = readGithubListEnvelope(params);
+): Promise<Record<string, unknown>[]> {
   const token = requireEnv('GITHUB_TOKEN');
-  const search = new URLSearchParams({
-    state: env.state,
-    per_page: String(env.limit),
-    sort: 'updated',
-    direction: 'desc',
-  });
-  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/pulls?${search.toString()}`;
+  const paged = new URLSearchParams(search);
+  paged.set('per_page', String(GITHUB_PAGE_SIZE));
+  paged.set('page', String(page));
   const response = await fetchWithRedirects({
-    url,
+    url: `${baseUrl}?${paged.toString()}`,
     headers: {
       authorization: `Bearer ${token}`,
       accept: 'application/vnd.github+json',
@@ -456,58 +473,85 @@ async function githubPrList(
   } catch {
     throw new FetchUntrustedError(
       'fetch_failure',
-      'pulls response was not json',
+      `${what} response was not json`,
     );
   }
   if (!Array.isArray(parsed)) {
     throw new FetchUntrustedError(
       'fetch_failure',
-      'pulls response was not an array',
+      `${what} response was not an array`,
     );
   }
+  return parsed.filter(
+    (row): row is Record<string, unknown> =>
+      Boolean(row) && typeof row === 'object',
+  );
+}
+
+async function githubPrList(
+  params: Record<string, unknown>,
+  deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
+): Promise<GithubPrItem[]> {
+  const env = readGithubListEnvelope(params);
+  const search = new URLSearchParams({
+    state: env.state,
+    sort: 'updated',
+    direction: 'desc',
+  });
+  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/pulls`;
   const out: GithubPrItem[] = [];
-  for (const prRaw of parsed.slice(0, env.limit)) {
-    if (!prRaw || typeof prRaw !== 'object') continue;
-    const pr = prRaw as Record<string, unknown>;
-    if (
-      env.since &&
-      typeof pr.updated_at === 'string' &&
-      pr.updated_at < env.since
-    ) {
-      continue;
-    }
-    const number = typeof pr.number === 'number' ? pr.number : null;
-    const htmlUrl = typeof pr.html_url === 'string' ? pr.html_url : null;
-    const state = typeof pr.state === 'string' ? pr.state : null;
-    const draft = typeof pr.draft === 'boolean' ? pr.draft : false;
-    const createdAt = typeof pr.created_at === 'string' ? pr.created_at : null;
-    const updatedAt = typeof pr.updated_at === 'string' ? pr.updated_at : null;
-    const userRaw = pr.user;
-    const author =
-      userRaw && typeof userRaw === 'object'
-        ? typeof (userRaw as Record<string, unknown>).login === 'string'
-          ? ((userRaw as Record<string, unknown>).login as string)
-          : ''
-        : '';
-    if (number === null || htmlUrl === null || state === null) continue;
-    const item: GithubPrItem = {
-      number,
-      url: htmlUrl,
-      state,
-      author,
-      draft,
-      created_at: createdAt ?? '',
-      updated_at: updatedAt ?? '',
-    };
-    if (includeReader) {
-      const title = typeof pr.title === 'string' ? pr.title : '';
-      item.reader = await launder({
-        raw: title.length > 0 ? title : '(no title)',
-        source: 'web_content',
+  for (let page = 1; page <= GITHUB_MAX_PAGES; page++) {
+    const rows = await githubListPage(url, search, page, 'pulls', deps);
+    for (const pr of rows) {
+      // sort=updated&direction=desc, so the first row older than `since` means
+      // every row after it is older too. Stop rather than skip: paging on would
+      // walk the repo's whole history to find nothing.
+      if (
+        env.since &&
+        typeof pr.updated_at === 'string' &&
+        pr.updated_at < env.since
+      ) {
+        return out;
+      }
+      const number = typeof pr.number === 'number' ? pr.number : null;
+      const htmlUrl = typeof pr.html_url === 'string' ? pr.html_url : null;
+      const state = typeof pr.state === 'string' ? pr.state : null;
+      const draft = typeof pr.draft === 'boolean' ? pr.draft : false;
+      const createdAt =
+        typeof pr.created_at === 'string' ? pr.created_at : null;
+      const updatedAt =
+        typeof pr.updated_at === 'string' ? pr.updated_at : null;
+      const userRaw = pr.user;
+      const author =
+        userRaw && typeof userRaw === 'object'
+          ? typeof (userRaw as Record<string, unknown>).login === 'string'
+            ? ((userRaw as Record<string, unknown>).login as string)
+            : ''
+          : '';
+      if (number === null || htmlUrl === null || state === null) continue;
+      const item: GithubPrItem = {
+        number,
         url: htmlUrl,
-      });
+        state,
+        author,
+        draft,
+        created_at: createdAt ?? '',
+        updated_at: updatedAt ?? '',
+      };
+      if (includeReader) {
+        const title = typeof pr.title === 'string' ? pr.title : '';
+        item.reader = await launder({
+          raw: title.length > 0 ? title : '(no title)',
+          source: 'web_content',
+          url: htmlUrl,
+        });
+      }
+      out.push(item);
+      if (out.length >= env.limit) return out;
     }
-    out.push(item);
+    // A short page is the last page.
+    if (rows.length < GITHUB_PAGE_SIZE) break;
   }
   return out;
 }
@@ -518,94 +562,77 @@ async function githubIssueList(
   includeReader: boolean,
 ): Promise<GithubIssueItem[]> {
   const env = readGithubListEnvelope(params);
-  const token = requireEnv('GITHUB_TOKEN');
   const search = new URLSearchParams({
     state: env.state,
-    per_page: String(env.limit),
     sort: 'updated',
     direction: 'desc',
   });
-  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/issues?${search.toString()}`;
-  const response = await fetchWithRedirects({
-    url,
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
-    },
-    deps,
-  });
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(response.body);
-  } catch {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'issues response was not json',
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'issues response was not an array',
-    );
-  }
+  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/issues`;
   const out: GithubIssueItem[] = [];
-  for (const issueRaw of parsed.slice(0, env.limit)) {
-    if (!issueRaw || typeof issueRaw !== 'object') continue;
-    const issue = issueRaw as Record<string, unknown>;
-    // GitHub's /issues endpoint returns PRs too; filter them out.
-    if (issue.pull_request !== undefined) continue;
-    if (
-      env.since &&
-      typeof issue.updated_at === 'string' &&
-      issue.updated_at < env.since
-    ) {
-      continue;
-    }
-    const number = typeof issue.number === 'number' ? issue.number : null;
-    const htmlUrl = typeof issue.html_url === 'string' ? issue.html_url : null;
-    const state = typeof issue.state === 'string' ? issue.state : null;
-    const createdAt =
-      typeof issue.created_at === 'string' ? issue.created_at : null;
-    const updatedAt =
-      typeof issue.updated_at === 'string' ? issue.updated_at : null;
-    const userRaw = issue.user;
-    const author =
-      userRaw && typeof userRaw === 'object'
-        ? typeof (userRaw as Record<string, unknown>).login === 'string'
-          ? ((userRaw as Record<string, unknown>).login as string)
-          : ''
-        : '';
-    const labelsRaw = issue.labels;
-    const labels: string[] = Array.isArray(labelsRaw)
-      ? labelsRaw
-          .map((l) => {
-            if (!l || typeof l !== 'object') return null;
-            const name = (l as Record<string, unknown>).name;
-            return typeof name === 'string' ? name : null;
-          })
-          .filter((n): n is string => n !== null)
-      : [];
-    if (number === null || htmlUrl === null || state === null) continue;
-    const item: GithubIssueItem = {
-      number,
-      url: htmlUrl,
-      state,
-      author,
-      labels,
-      created_at: createdAt ?? '',
-      updated_at: updatedAt ?? '',
-    };
-    if (includeReader) {
-      const title = typeof issue.title === 'string' ? issue.title : '';
-      item.reader = await launder({
-        raw: title.length > 0 ? title : '(no title)',
-        source: 'web_content',
+  for (let page = 1; page <= GITHUB_MAX_PAGES; page++) {
+    const rows = await githubListPage(url, search, page, 'issues', deps);
+    for (const issue of rows) {
+      // GitHub's /issues endpoint returns PRs too; filter them out. Paging
+      // means a page full of PRs costs another page rather than the caller's
+      // budget: `limit` now counts issues that survived this filter, where the
+      // pre-paging code sliced to `limit` first and let PRs eat it.
+      if (issue.pull_request !== undefined) continue;
+      // sort=updated&direction=desc — see the pulls loop.
+      if (
+        env.since &&
+        typeof issue.updated_at === 'string' &&
+        issue.updated_at < env.since
+      ) {
+        return out;
+      }
+      const number = typeof issue.number === 'number' ? issue.number : null;
+      const htmlUrl =
+        typeof issue.html_url === 'string' ? issue.html_url : null;
+      const state = typeof issue.state === 'string' ? issue.state : null;
+      const createdAt =
+        typeof issue.created_at === 'string' ? issue.created_at : null;
+      const updatedAt =
+        typeof issue.updated_at === 'string' ? issue.updated_at : null;
+      const userRaw = issue.user;
+      const author =
+        userRaw && typeof userRaw === 'object'
+          ? typeof (userRaw as Record<string, unknown>).login === 'string'
+            ? ((userRaw as Record<string, unknown>).login as string)
+            : ''
+          : '';
+      const labelsRaw = issue.labels;
+      const labels: string[] = Array.isArray(labelsRaw)
+        ? labelsRaw
+            .map((l) => {
+              if (!l || typeof l !== 'object') return null;
+              const name = (l as Record<string, unknown>).name;
+              return typeof name === 'string' ? name : null;
+            })
+            .filter((n): n is string => n !== null)
+        : [];
+      if (number === null || htmlUrl === null || state === null) continue;
+      const item: GithubIssueItem = {
+        number,
         url: htmlUrl,
-      });
+        state,
+        author,
+        labels,
+        created_at: createdAt ?? '',
+        updated_at: updatedAt ?? '',
+      };
+      if (includeReader) {
+        const title = typeof issue.title === 'string' ? issue.title : '';
+        item.reader = await launder({
+          raw: title.length > 0 ? title : '(no title)',
+          source: 'web_content',
+          url: htmlUrl,
+        });
+      }
+      out.push(item);
+      if (out.length >= env.limit) return out;
     }
-    out.push(item);
+    // A short page is the last page.
+    if (rows.length < GITHUB_PAGE_SIZE) break;
   }
   return out;
 }

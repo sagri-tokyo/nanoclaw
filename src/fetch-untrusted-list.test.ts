@@ -430,6 +430,250 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
+  // ---------- github list pagination (sagri-ai#472) ----------
+  //
+  // A pulls item is ~20KB, so per_page=100 returned ~2MB and tripped
+  // fetchWithRedirects' 256KB MAX_BODY_BYTES guard: github_pr_list failed for
+  // any limit above ~14 and GITHUB_LIST_LIMIT_MAX=100 was unreachable. These
+  // pin the paging that fixes it. The per_page assertion is the load-bearing
+  // one — the bug was per_page tracking limit.
+
+  function prRow(number: number, updatedAt: string): Record<string, unknown> {
+    return {
+      number,
+      html_url: `https://github.com/o/r/pull/${number}`,
+      state: 'open',
+      draft: false,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: updatedAt,
+      user: { login: 'alice' },
+      title: `PR ${number}`,
+    };
+  }
+
+  function issueRow(
+    number: number,
+    updatedAt: string,
+    isPr = false,
+  ): Record<string, unknown> {
+    const row: Record<string, unknown> = {
+      number,
+      html_url: `https://github.com/o/r/issues/${number}`,
+      state: 'open',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: updatedAt,
+      user: { login: 'alice' },
+      labels: [],
+      title: `issue ${number}`,
+    };
+    if (isPr) row.pull_request = { url: 'x' };
+    return row;
+  }
+
+  function pageOf(path: string): number {
+    return Number(new URL(path, 'http://x').searchParams.get('page'));
+  }
+
+  // Exact, not toContain: 'per_page=100'.includes('per_page=10') is true, so a
+  // substring check passes on the very value this guards against.
+  function perPageOf(path: string): string | null {
+    return new URL(path, 'http://x').searchParams.get('per_page');
+  }
+
+  it('github_pr_list never requests more than one page size, whatever the limit', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      const rows =
+        page === 1
+          ? Array.from({ length: 10 }, (_, i) =>
+              prRow(100 - i, '2024-03-05T00:00:00Z'),
+            )
+          : page === 2
+            ? Array.from({ length: 5 }, (_, i) =>
+                prRow(90 - i, '2024-03-04T00:00:00Z'),
+              )
+            : [];
+      res.end(JSON.stringify(rows));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 50 },
+        },
+        deps,
+      );
+      // 10 from page 1 + 5 from page 2; the short page ends it, so no page 3.
+      expect(result.items).toHaveLength(15);
+      expect(ghApi.captured.map((r) => pageOf(r.path))).toEqual([1, 2]);
+      // The regression: per_page tracked the caller's limit, so limit=50 asked
+      // GitHub for 50 pulls (~1MB) at once and tripped MAX_BODY_BYTES.
+      // Asserted out here, not in the handler — startFakeServer catches a
+      // throwing handler and turns it into a 500, which would swallow this.
+      expect(ghApi.captured.map((r) => perPageOf(r.path))).toEqual([
+        '10',
+        '10',
+      ]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_pr_list stops at the caller limit mid-page', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify(
+          Array.from({ length: 10 }, (_, i) =>
+            prRow(100 - i, '2024-03-05T00:00:00Z'),
+          ),
+        ),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 12 },
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(12);
+      // Two pages cover 12; a third would be wasted.
+      expect(ghApi.captured).toHaveLength(2);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_pr_list stops paging once a page crosses the since cutoff', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // Page 2 opens with a row older than `since`. Sorted updated-desc, so
+      // everything past it is older: page 3 must never be requested.
+      const rows =
+        page === 1
+          ? Array.from({ length: 10 }, (_, i) =>
+              prRow(100 - i, '2024-03-05T00:00:00Z'),
+            )
+          : Array.from({ length: 10 }, (_, i) =>
+              prRow(90 - i, '2024-01-01T00:00:00Z'),
+            );
+      res.end(JSON.stringify(rows));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: {
+            owner: 'o',
+            repo: 'r',
+            state: 'open',
+            since: '2024-03-01T00:00:00Z',
+            limit: 100,
+          },
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(10);
+      expect(ghApi.captured.map((r) => pageOf(r.path))).toEqual([1, 2]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_issue_list pages past PR rows without spending the caller limit', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // /issues returns PRs too. Pre-paging, the adapter sliced to `limit`
+      // before dropping them, so a page of PRs ate the whole budget and the
+      // caller got nothing.
+      const rows =
+        page === 1
+          ? Array.from({ length: 10 }, (_, i) =>
+              issueRow(100 - i, '2024-03-05T00:00:00Z', true),
+            )
+          : [
+              issueRow(50, '2024-03-05T00:00:00Z'),
+              issueRow(49, '2024-03-05T00:00:00Z'),
+              issueRow(48, '2024-03-05T00:00:00Z'),
+            ];
+      res.end(JSON.stringify(rows));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_issue_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 3 },
+        },
+        deps,
+      );
+      expect(result.items.map((i) => (i as { number: number }).number)).toEqual(
+        [50, 49, 48],
+      );
+      expect(ghApi.captured.map((r) => pageOf(r.path))).toEqual([1, 2]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
+  it('github_issue_list bounds its requests when every row is filtered out', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // Every row is a PR, so the issue filter rejects all of them and the
+      // limit is never reached. Without a page ceiling this walks the repo's
+      // whole history.
+      res.end(
+        JSON.stringify(
+          Array.from({ length: 10 }, (_, i) =>
+            issueRow(1000 - i, '2024-03-05T00:00:00Z', true),
+          ),
+        ),
+      );
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_issue_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 5 },
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(0);
+      expect(ghApi.captured).toHaveLength(30);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
   // ---------- github_issue_list ----------
 
   it('github_issue_list filters out PRs (which have pull_request key) and surfaces labels', async () => {

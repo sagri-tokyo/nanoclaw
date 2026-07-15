@@ -358,6 +358,17 @@ async function runFetchAsRpc<T>(
         err.httpStatus !== undefined
           ? { upstream_http_status: err.httpStatus }
           : undefined;
+      // The caller only ever gets map.message, a fixed string per code, so
+      // without this line the host log carries error_class alone and every
+      // cause collapses into one 502. A `body too large` then reads exactly
+      // like an auth failure, which is how sagri-ai#378 sat unexplained for
+      // ten days. err.message is authored in fetch-untrusted.ts, never an
+      // upstream response body, so it is safe here; it stays out of the RPC
+      // reply and out of outputs_hash regardless (see above).
+      logger.error(
+        { code: err.code, message: err.message, httpStatus: err.httpStatus },
+        `reader-rpc: ${method} fetch error`,
+      );
       throw new RpcError(map.rpcCode, map.statusCode, map.message, details);
     }
     logger.error({ err }, `reader-rpc: ${method} unexpected error`);
