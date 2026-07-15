@@ -497,7 +497,7 @@ async function githubListPage(
   what: string,
   token: string,
   deps: Required<FetchUntrustedDeps>,
-): Promise<Record<string, unknown>[]> {
+): Promise<{ rows: Record<string, unknown>[]; served: number }> {
   const paged = new URLSearchParams(search);
   paged.set('per_page', String(GITHUB_PAGE_SIZE));
   paged.set('page', String(page));
@@ -525,10 +525,18 @@ async function githubListPage(
       `${what} response was not an array`,
     );
   }
-  return parsed.filter(
-    (row): row is Record<string, unknown> =>
-      Boolean(row) && typeof row === 'object',
-  );
+  // `served` is what GitHub put on the page, before this filter. The callers
+  // end paging on a short page, and that has to mean "GitHub ran out of rows",
+  // not "we dropped one": a single unusable row on a full page would otherwise
+  // truncate the walk and return a short list, the exact ambiguity the page
+  // ceiling throws to avoid.
+  return {
+    rows: parsed.filter(
+      (row): row is Record<string, unknown> =>
+        Boolean(row) && typeof row === 'object',
+    ),
+    served: parsed.length,
+  };
 }
 
 async function githubPrList(
@@ -550,7 +558,14 @@ async function githubPrList(
   const seen = new Set<number>();
   const maxPages = githubMaxPages(env.limit);
   for (let page = 1; page <= maxPages; page++) {
-    const rows = await githubListPage(url, search, page, 'pulls', token, deps);
+    const { rows, served } = await githubListPage(
+      url,
+      search,
+      page,
+      'pulls',
+      token,
+      deps,
+    );
     for (const pr of rows) {
       // sort=updated&direction=desc, so the first row older than `since` means
       // every row after it is older too. Stop rather than skip: paging on would
@@ -602,7 +617,7 @@ async function githubPrList(
     }
     // A short page is the last page: the repo has fewer matching rows than
     // asked for, which is an answer, not a truncation.
-    if (rows.length < GITHUB_PAGE_SIZE) return out;
+    if (served < GITHUB_PAGE_SIZE) return out;
   }
   throw new FetchUntrustedError(
     'fetch_failure',
@@ -627,7 +642,14 @@ async function githubIssueList(
   const seen = new Set<number>();
   const maxPages = githubMaxPages(env.limit);
   for (let page = 1; page <= maxPages; page++) {
-    const rows = await githubListPage(url, search, page, 'issues', token, deps);
+    const { rows, served } = await githubListPage(
+      url,
+      search,
+      page,
+      'issues',
+      token,
+      deps,
+    );
     for (const issue of rows) {
       // Cutoff first, before the PR filter: PRs and issues share one
       // updated-desc sort, so a PR row past the cutoff proves every later row
@@ -694,7 +716,7 @@ async function githubIssueList(
     }
     // A short page is the last page: the repo has fewer matching rows than
     // asked for, which is an answer, not a truncation.
-    if (rows.length < GITHUB_PAGE_SIZE) return out;
+    if (served < GITHUB_PAGE_SIZE) return out;
   }
   throw new FetchUntrustedError(
     'fetch_failure',

@@ -559,6 +559,42 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
+  it('github_pr_list keeps paging when a full page carries an unusable row', async () => {
+    const ghApi = await startFakeServer((req, res) => {
+      const page = pageOf(req.path);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // A full page of 10 whose 5th entry is null. The page is full, so more
+      // rows exist; if the walk ends here because only 9 survived the filter,
+      // the caller gets a short list that reads like the repo running out.
+      const rows: unknown[] =
+        page === 1
+          ? Array.from({ length: 10 }, (_, i) =>
+              i === 4 ? null : prRow(100 - i, '2024-03-05T00:00:00Z'),
+            )
+          : [prRow(80, '2024-03-05T00:00:00Z')];
+      res.end(JSON.stringify(rows));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'github_pr_list',
+          params: { owner: 'o', repo: 'r', state: 'open', limit: 50 },
+        },
+        deps,
+      );
+      // 9 usable from page 1, plus page 2's single row.
+      expect(result.items).toHaveLength(10);
+      expect(ghApi.captured.map((r) => pageOf(r.path))).toEqual([1, 2]);
+    } finally {
+      await ghApi.close();
+    }
+  });
+
   it('github_pr_list stops paging once a page crosses the since cutoff', async () => {
     const ghApi = await startFakeServer((req, res) => {
       const page = pageOf(req.path);
