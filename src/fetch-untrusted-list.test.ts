@@ -30,6 +30,7 @@ import {
   FetchUntrustedMalformed,
   FetchUntrustedSsrfReject,
   FetchUntrustedTimeout,
+  FetchUntrustedUnlaunderable,
 } from './fetch-untrusted.js';
 
 interface CapturedRequest {
@@ -1225,6 +1226,159 @@ describe('fetch-untrusted-list', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ---------- launder() input guard (sagri-ai#471) ----------
+
+  async function runGithubSearchWithDescription(description: string): Promise<{
+    run: () => Promise<FetchUntrustedListResult>;
+    close: () => Promise<void>;
+  }> {
+    const search = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          items: [
+            {
+              id: 1,
+              full_name: 'octo/cat',
+              html_url: 'https://github.com/octo/cat',
+              stargazers_count: 100,
+              language: 'TypeScript',
+              updated_at: '2024-01-01T00:00:00Z',
+              description,
+            },
+          ],
+        }),
+      );
+    });
+    const deps = buildLocalRedirectDeps({
+      redirects: {
+        'api.github.com': { port: search.port, resolveTo: '8.8.8.8' },
+      },
+    });
+    return {
+      run: () =>
+        fetchUntrustedList(
+          {
+            source_type: 'github_search',
+            params: { query: 'x', limit: 1 },
+            include_reader: true,
+          },
+          deps,
+        ),
+      close: search.close,
+    };
+  }
+
+  async function expectUnlaunderableGithubDescription(
+    description: string,
+  ): Promise<void> {
+    const { run, close } = await runGithubSearchWithDescription(description);
+    try {
+      let caught: unknown;
+      try {
+        await run();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(FetchUntrustedUnlaunderable);
+      // See FetchUntrustedUnlaunderable: non-retryable, so not a 502.
+      expect((caught as FetchUntrustedError).code).toBe('invalid_params');
+      // The whole point of the guard: no reader call is paid for.
+      expect(readerCallBodies).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  }
+
+  async function expectLaunderedGithubDescription(
+    description: string,
+  ): Promise<void> {
+    const { run, close } = await runGithubSearchWithDescription(description);
+    try {
+      const result = await run();
+      expect(result.items).toHaveLength(1);
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  }
+
+  it('launder rejects an over-budget raw before any reader call', async () => {
+    await expectUnlaunderableGithubDescription('a'.repeat(4001));
+  });
+
+  it('launder rejects a serialized object raw before any reader call', async () => {
+    // The shape that took out live Notion reads: JSON.stringify(properties).
+    // Well under the length budget, still unparaphrasable into flat scalars.
+    await expectUnlaunderableGithubDescription(
+      JSON.stringify({ Status: { type: 'select', select: { name: 'Done' } } }),
+    );
+  });
+
+  it('launder accepts a prose raw at the length budget', async () => {
+    // 4000 is the budget exactly; 4001 rejects above. Twice the longest field
+    // any adapter launders today (arXiv caps abstracts at 1920 chars).
+    await expectLaunderedGithubDescription('a'.repeat(4000));
+  });
+
+  // An empty raw must NOT be rejected. Adapters pass blank upstream fields
+  // straight through (arxiv_search has no placeholder), and the reader answers
+  // those with "no actionable request". Guarding empty here would turn that
+  // graceful per-item degradation into a throw that loses the whole batch.
+  it('launder accepts a blank raw rather than failing the batch', async () => {
+    const arxivXml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <updated>2024-01-02T00:00:00Z</updated>
+    <published>2024-01-01T00:00:00Z</published>
+    <title></title>
+    <summary></summary>
+    <author><name>Alice</name></author>
+  </entry>
+</feed>`;
+    const arxiv = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/atom+xml' });
+      res.end(arxivXml);
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'export.arxiv.org': { port: arxiv.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      const result = await fetchUntrustedList(
+        {
+          source_type: 'arxiv_search',
+          params: { query: 'x', limit: 5 },
+          include_reader: true,
+        },
+        deps,
+      );
+      expect(result.items).toHaveLength(1);
+      expect(readerCallBodies).toHaveLength(1);
+    } finally {
+      await arxiv.close();
+    }
+  });
+
+  it('launder accepts a prose raw that merely starts with a bracket', async () => {
+    await expectLaunderedGithubDescription('[WIP] guard the launder boundary');
+  });
+
+  // A field that is entirely a JSON array literal stays prose: '[404]' is a
+  // human's title far more often than a serialized blob, and the guard throws
+  // for the whole batch, so a heuristic that convicts valid prose would lose
+  // real rows. Only serialized objects are rejected.
+  it('launder accepts a raw that is entirely a JSON array literal', async () => {
+    await expectLaunderedGithubDescription('[404]');
+  });
+
+  // The reason the shape check parses instead of trusting a leading brace.
+  it('launder accepts brace-prefixed prose that is not valid JSON', async () => {
+    await expectLaunderedGithubDescription('{redacted} internal tooling repo');
   });
 
   // ---------- include_reader default-omit (sagri-ai#119) ----------

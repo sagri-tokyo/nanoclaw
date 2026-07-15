@@ -34,6 +34,7 @@ import {
   FetchUntrustedError,
   FetchUntrustedMalformed,
   FetchUntrustedTimeout,
+  FetchUntrustedUnlaunderable,
   fetchJsonObject,
   fetchWithRedirects,
   requireEnv,
@@ -215,11 +216,58 @@ function rejectUnknownKeys(
   }
 }
 
+// The largest real input is arxiv_search's title+abstract, near 2000 chars,
+// and nothing here enforces that: it holds because arXiv's submission form caps
+// abstracts around 1920, a convention this repo does not own. So no adapter
+// trips this today *given that limit*, which is the assumption to check first
+// if it ever fires. It is a tripwire for a future adapter widened to launder a
+// whole issue body, which is prose the shape check below would wave through.
+// The real ceiling without it is MAX_BODY_BYTES (256KB), no kind of bound on a
+// field meant to be a sentence; 4000 is ~2x the largest real input and ~64x
+// tighter than the body cap. A chosen bound, not a derivation. sagri-ai#471.
+const MAX_LAUNDER_RAW_LENGTH = 4000;
+
+// Sniffs '{' only, deliberately not '[': the shape that broke prod was a
+// serialized object (JSON.stringify(properties)), while a field that is
+// entirely a JSON array literal ('[404]') is a human's prose far more often
+// than it is a blob, and rejecting it would lose a whole batch over a
+// well-formed row. The cost is real and accepted: array serialization is
+// knowingly unguarded, so a widening to JSON.stringify(labels) (a string[]
+// already in scope in githubIssueList) would slip through short and
+// bracket-opened. A flat array of labels is nothing like the nested blob that
+// broke prod, and convicting '[404]' costs a batch. A leading brace alone is
+// not enough to convict either, so parse rather than trust it: '{redacted} ...'
+// prose has to survive.
+function isSerializedObject(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function launder(args: {
   raw: string;
   source: 'web_content' | 'github_issue' | 'github_comment' | 'notion_page';
   url: string;
 }): Promise<ReaderOutput> {
+  // Guarded here, the one boundary every adapter routes through, so a widened
+  // adapter trips it without needing its own check. Both checks throw for the
+  // whole batch, so each may only convict input no honest adapter can send
+  // (sagri-ai#483). Messages carry lengths, never raw bytes.
+  if (args.raw.length > MAX_LAUNDER_RAW_LENGTH) {
+    throw new FetchUntrustedUnlaunderable(
+      `launder raw exceeds ${MAX_LAUNDER_RAW_LENGTH} chars (got ${args.raw.length})`,
+    );
+  }
+  if (isSerializedObject(args.raw)) {
+    throw new FetchUntrustedUnlaunderable(
+      'launder raw must be prose, not a serialized object',
+    );
+  }
   const sourceMetadata: SourceMetadata = { url: args.url };
   try {
     return await readUntrustedContent({
