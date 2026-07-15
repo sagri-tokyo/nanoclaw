@@ -570,9 +570,13 @@ Use this in place of \`gh ... list --json\`, \`curl https://api.github.com/searc
 source_type values and required params:
 • arxiv_search           — { query: string, limit: number (1..25) }
 • github_search          — { query: string, limit: number (1..30) }
-• github_pr_list         — { owner, repo, state? (open|closed|all), since? (ISO), limit: number (1..100) }
+• github_pr_list         — { owner, repo, state? (open|closed|all), since?, limit: number (1..100) }
 • github_issue_list      — { owner, repo, state?, since?, limit: number (1..100) }
 • github_run_list        — { owner, repo, status?, since?, limit: number (1..100) }
+
+\`since\` is exactly YYYY-MM-DDTHH:MM:SSZ, e.g. 2026-07-15T00:00:00Z. Milliseconds are rejected, so pass \`date -u '+%Y-%m-%dT%H:%M:%SZ'\`, not a bare \`toISOString()\`. It is matched against GitHub's own timestamp spelling, which carries no milliseconds.
+
+github_pr_list and github_issue_list page internally. When one cannot reach \`limit\` within its page budget it fails rather than return a short list, because a short list is indistinguishable from a small repo. Narrow the window with \`since\`, or lower \`limit\`. github_run_list does not page and carries no such guarantee.
 • notion_database_query  — { database_id, filter? (Notion filter JSON), limit: number (1..100) }
 • notion_search          — { query: string, object_kind: 'page'|'database', limit: number (1..100) }`,
   {

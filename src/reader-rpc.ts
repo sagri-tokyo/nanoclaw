@@ -358,6 +358,18 @@ async function runFetchAsRpc<T>(
         err.httpStatus !== undefined
           ? { upstream_http_status: err.httpStatus }
           : undefined;
+      // The caller only gets map.message (fixed per code), so without this
+      // log line every failure cause collapses into one opaque 502, and
+      // `body too large` reads exactly like an auth failure (sagri-ai#378).
+      // Safe here: both methods this serves (fetchUntrusted,
+      // fetchUntrustedList) build err.message from authored text and fixed
+      // values only — unlike fetchJsonWrite, which embeds upstream body and
+      // stays org-action-only for that reason. Re-check this before widening
+      // `method` past the two.
+      logger.error(
+        { code: err.code, message: err.message, httpStatus: err.httpStatus },
+        `reader-rpc: ${method} fetch error`,
+      );
       throw new RpcError(map.rpcCode, map.statusCode, map.message, details);
     }
     logger.error({ err }, `reader-rpc: ${method} unexpected error`);
