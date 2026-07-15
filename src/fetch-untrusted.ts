@@ -22,6 +22,7 @@ import { URL } from 'url';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { isPlainObject } from './org-action-gate.js';
 import {
   readUntrustedContent,
   type ReaderOutput,
@@ -694,6 +695,108 @@ async function fetchGithubComment(
   return { raw: body, provenanceUrl: url };
 }
 
+// Notion nests values a few levels deep (a rollup of a relation of a date), and
+// the shape is upstream-controlled. Bound the walk rather than trusting it to
+// terminate.
+const NOTION_VALUE_MAX_DEPTH = 4;
+
+/**
+ * Render one Notion property value as plain text.
+ *
+ * Every property is `{ id, type, [type]: value }`, and the values underneath
+ * are regular enough to walk by shape instead of switching on all ~20 property
+ * types: rich_text and people are arrays of spans, select and status are
+ * `{ name }`, a date is `{ start, end }`, formula and rollup re-wrap a nested
+ * `{ type, [type]: value }`. Walking the shape keeps every type working,
+ * including ones Notion adds later, where a switch would silently drop them.
+ */
+function renderNotionValue(value: unknown, depth: number): string {
+  if (depth > NOTION_VALUE_MAX_DEPTH) return '';
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    // rich_text and title are one string cut into styled runs, so they
+    // concatenate. multi_select, people and relation are distinct items, so
+    // they read as a list. Splitting on the span shape keeps "first " + "second"
+    // from rendering as "first , second".
+    const isRichText = value.every(
+      (entry) => isPlainObject(entry) && typeof entry.plain_text === 'string',
+    );
+    const parts = value
+      .map((entry) => renderNotionValue(entry, depth + 1))
+      .filter((text) => text.length > 0);
+    return parts.join(isRichText ? '' : ', ');
+  }
+  if (!isPlainObject(value)) return '';
+  if (typeof value.plain_text === 'string') return value.plain_text;
+  if (typeof value.name === 'string') return value.name;
+  if (typeof value.start === 'string') {
+    return typeof value.end === 'string'
+      ? `${value.start} to ${value.end}`
+      : value.start;
+  }
+  // unique_id and verification are the two shapes that carry neither text, a
+  // name, a date, nor a nested envelope, so they need naming outright. Without
+  // these they fall to '' and read as an empty field.
+  // A unique_id prefix is optional in Notion, so key off the number and treat
+  // the prefix as decoration. Requiring both drops the id of every database
+  // that never configured one.
+  if ('prefix' in value && typeof value.number === 'number') {
+    return typeof value.prefix === 'string'
+      ? `${value.prefix}-${value.number}`
+      : String(value.number);
+  }
+  if (typeof value.state === 'string') return value.state;
+  // formula/rollup re-wrap the same envelope, so unwrap it the same way.
+  if (typeof value.type === 'string') {
+    const nested = renderNotionValue(value[value.type], depth + 1);
+    if (nested.length > 0) return nested;
+  }
+  // Last resort, and it has to stay after the unwrap: a people entry with no
+  // display name still has a top-level id worth surfacing, but a formula's id
+  // would shadow the value it wraps.
+  if (typeof value.id === 'string') return value.id;
+  return '';
+}
+
+/**
+ * Flatten a Notion `properties` object into one `Name: value` line per property.
+ *
+ * The reader paraphrases prose into scalars. Handed `JSON.stringify(properties)`
+ * it mirrors the JSON instead: a date property comes back as `{start, end}`,
+ * which fails the scalars-only contract and 502s the whole read (sagri-ai#471).
+ * Prose in, scalars out.
+ *
+ * Names and values are both collapsed onto a single line. Either side can carry
+ * a newline (the value from a rich_text field, the name from the page's own
+ * schema, both attacker-influenced) and would otherwise forge a
+ * `Status: Approved` line the page never had, which JSON encoding used to make
+ * unambiguous.
+ */
+function collapseToOneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+export function renderNotionProperties(
+  properties: Record<string, unknown>,
+): string {
+  const lines: string[] = [];
+  for (const [name, property] of Object.entries(properties)) {
+    if (!isPlainObject(property)) continue;
+    const type = typeof property.type === 'string' ? property.type : null;
+    const rendered = collapseToOneLine(
+      renderNotionValue(type === null ? property : property[type], 0),
+    );
+    lines.push(
+      `${collapseToOneLine(name)}: ${rendered.length > 0 ? rendered : '(empty)'}`,
+    );
+  }
+  return lines.join('\n');
+}
+
 async function fetchNotionPage(
   input: string,
   deps: Required<FetchUntrustedDeps>,
@@ -711,9 +814,14 @@ async function fetchNotionPage(
     },
     deps,
   );
-  const properties = obj.properties ?? {};
+  const properties = obj.properties;
+  if (!isPlainObject(properties)) {
+    throw new FetchUntrustedMalformed(
+      'notion page response missing a properties object',
+    );
+  }
   return {
-    raw: JSON.stringify(properties),
+    raw: renderNotionProperties(properties),
     provenanceUrl: canonicalUrl,
   };
 }
