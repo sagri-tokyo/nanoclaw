@@ -358,20 +358,14 @@ async function runFetchAsRpc<T>(
         err.httpStatus !== undefined
           ? { upstream_http_status: err.httpStatus }
           : undefined;
-      // The caller only ever gets map.message, a fixed string per code, so
-      // without this line the host log carries error_class alone and every
-      // cause collapses into one 502. A `body too large` then reads exactly
-      // like an auth failure, which is how sagri-ai#378 sat unexplained for
-      // ten days.
-      //
-      // Safe to log because every error reachable from the two methods this
-      // function serves — fetchUntrusted and fetchUntrustedList — builds its
-      // message from authored text and fixed values. Not a module-wide
-      // property: fetchJsonWrite embeds 500 bytes of upstream body in its
-      // message, and is org-action-only precisely because of things like this.
-      // Widening `method` past those two means re-checking that before
-      // trusting this line. The message stays out of the RPC reply and out of
-      // outputs_hash either way (see above).
+      // The caller only gets map.message (fixed per code), so without this
+      // log line every failure cause collapses into one opaque 502, and
+      // `body too large` reads exactly like an auth failure (sagri-ai#378).
+      // Safe here: both methods this serves (fetchUntrusted,
+      // fetchUntrustedList) build err.message from authored text and fixed
+      // values only — unlike fetchJsonWrite, which embeds upstream body and
+      // stays org-action-only for that reason. Re-check this before widening
+      // `method` past the two.
       logger.error(
         { code: err.code, message: err.message, httpStatus: err.httpStatus },
         `reader-rpc: ${method} fetch error`,
