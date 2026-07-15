@@ -512,8 +512,6 @@ describe('fetch-untrusted-list', () => {
       // 10 from page 1 + 5 from page 2; the short page ends it, so no page 3.
       expect(result.items).toHaveLength(15);
       expect(ghApi.captured.map((r) => pageOf(r.path))).toEqual([1, 2]);
-      // The regression: per_page tracked the caller's limit, so limit=50 asked
-      // GitHub for 50 pulls (~1MB) at once and tripped MAX_BODY_BYTES.
       // Asserted out here, not in the handler — startFakeServer catches a
       // throwing handler and turns it into a 500, which would swallow this.
       expect(ghApi.captured.map((r) => perPageOf(r.path))).toEqual([
@@ -682,10 +680,7 @@ describe('fetch-untrusted-list', () => {
     const ghApi = await startFakeServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       // Every row is a PR, so the issue filter rejects all of them and the
-      // limit is never reached. The ceiling has to stop it — but returning
-      // items:[] here would be a lie the caller cannot detect, identical to a
-      // repo with no issues. That silent-short-answer is the bug class this
-      // whole change exists to remove, so it must throw.
+      // limit is never reached; the ceiling has to stop it.
       res.end(
         JSON.stringify(
           Array.from({ length: 10 }, (_, i) =>
@@ -759,8 +754,7 @@ describe('fetch-untrusted-list', () => {
     const ghApi = await startFakeServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       // Every page serves the same 10 rows, so dedup rejects everything after
-      // page 1 and the limit is never reached. Returning those 10 would claim
-      // the repo has 10 open PRs; it does not, we just stopped looking.
+      // page 1 and the limit is never reached.
       res.end(
         JSON.stringify(
           Array.from({ length: 10 }, (_, i) =>
@@ -791,12 +785,10 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
-  // Every leg taking `since` takes the same guard: pr and issue compare it
-  // byte-wise against updated_at, run_list hands it to GitHub's created filter.
-  // 'yesterday' sorts above every ISO timestamp, so on the compared legs it
-  // ends the walk at row one and returns an empty list that reads exactly like
-  // an empty window. '.000Z' sorts just below the same instant and skews the
-  // boundary instead of failing.
+  // Every leg taking `since` takes the same guard; see ISO_8601_UTC for why.
+  // The two rejected spellings are the ones that fail silently rather than
+  // loudly: 'yesterday' sorts above every ISO timestamp, '.000Z' just below
+  // the same instant.
   it.each([
     ['github_pr_list', 'yesterday'],
     ['github_issue_list', 'yesterday'],
