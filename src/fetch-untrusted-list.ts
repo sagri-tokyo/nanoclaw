@@ -5,9 +5,9 @@
  * (numeric ids, urls, ISO timestamps, GitHub logins) are always surfaced raw
  * on each item.
  *
- * By default, each item's free-text fields (titles, descriptions, abstracts,
- * Notion page properties) are dropped entirely — they never reach the agent
- * and the host-side reader pipeline (`readUntrustedContent`) is not invoked.
+ * By default, each item's free-text fields (titles, descriptions, abstracts)
+ * are dropped entirely — they never reach the agent and the host-side reader
+ * pipeline (`readUntrustedContent`) is not invoked.
  * Callers that need a laundered paraphrase to rank or summarize items pass
  * `include_reader: true`; for those callers the free-text body is run through
  * the reader pipeline and the resulting `ReaderOutput` is attached as
@@ -15,6 +15,10 @@
  * always-launder behavior surfaced attacker-influenced wording in
  * `reader.intent` / `reader.extracted_data`, which the agent treated as
  * trusted context even though the prompt instructed otherwise.
+ *
+ * `notion_database_query` is the exception: it is enumeration-only and rejects
+ * `include_reader` outright, so Notion page properties are never laundered. The
+ * laundered per-row view is the `notion_page` read in `fetchUntrusted`.
  *
  * Same SSRF defences as `fetchUntrusted`: HTTPS only, public addresses only,
  * connection bound to the resolved IP. Reuses helpers from `./fetch-untrusted`.
@@ -158,7 +162,10 @@ export interface NotionDatabaseItem {
   created_time: string;
   last_edited_time: string;
   archived: boolean;
-  reader?: ReaderOutput;
+  // Enumeration-only: this adapter rejects include_reader, so a reader is never
+  // attached. Typed `never` rather than omitted so `reader` stays accessible
+  // across the ListItem union without per-member narrowing.
+  reader?: never;
 }
 
 export interface NotionSearchItem {
@@ -857,6 +864,17 @@ async function notionDatabaseQuery(
   includeReader: boolean,
 ): Promise<NotionDatabaseItem[]> {
   rejectUnknownKeys(params, new Set(['database_id', 'filter', 'limit']));
+  // Laundering the whole properties blob broke the reader's scalars-only/
+  // 200-char output contract on rich rows (a date property paraphrases back as
+  // an object, a wide row as a >200-char value), which 502'd the entire query.
+  // Callers were already forbidden to surface the per-item reader here anyway.
+  // Reject rather than ignore, so a caller asking for prose is sent to the
+  // notion_page read instead of silently receiving ids.
+  if (includeReader) {
+    paramErr(
+      'include_reader is not supported for notion_database_query; page-read each id with fetch_untrusted + notion_page for the laundered view',
+    );
+  }
   const databaseId = requireString(params, 'database_id');
   const limit = requireLimit(params, NOTION_LIMIT_MAX);
   const filter = params.filter;
@@ -892,14 +910,6 @@ async function notionDatabaseQuery(
       last_edited_time: lastEditedTime ?? '',
       archived,
     };
-    if (includeReader) {
-      const properties = page.properties ?? {};
-      item.reader = await launder({
-        raw: JSON.stringify(properties),
-        source: 'notion_page',
-        url: pageUrl,
-      });
-    }
     out.push(item);
   }
   return out;
