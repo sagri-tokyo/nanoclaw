@@ -178,7 +178,7 @@ One credential class is forwarded into the container by design, against the "cre
 
 - **Opt-in and operator-controlled.** Nothing is forwarded unless the operator sets both env vars. Enabling self-hosted telemetry is an explicit decision to accept this exposure.
 - **Dedicated path, not the operator forward-list.** It is forwarded by `buildTelemetryEnv`, so it is unaffected by the `src/env-forward.ts` denylist that refuses `*_TOKEN`/`*_SECRET` names on the general forward-list. The exception is therefore intentional, not an oversight in that guard.
-- **Low blast radius.** The header authenticates *ingest* to the telemetry collector only. A leaked value lets an attacker write or forge spans to Langfuse (observability noise, quota burn); it grants no read access to traces and no access to API keys, user data, channel auth, or the OneCLI vault.
+- **Low blast radius, when correctly scoped.** `buildTelemetryEnv` forwards whatever the operator sets and cannot check what it grants, so this rests on provisioning, not on a guard. Scoped to write/ingest-only, a leaked value lets an attacker write or forge spans to Langfuse (observability noise, quota burn) and grants no read access to traces, and no access to API keys, user data, channel auth, or the OneCLI vault. A broadly scoped collector key leaks as much as it was granted.
 
 **Residual risk (accepted knowingly):** unlike OneCLI-injected credentials, this value *is* present in the container environment and on the host `docker run` argv — visible in `ps` and `docker inspect`, the same exposure `src/env-forward.ts` warns about. Scope the collector token to write/ingest-only, treat it as low-value, and rotate it independently of OneCLI-managed secrets.
 
