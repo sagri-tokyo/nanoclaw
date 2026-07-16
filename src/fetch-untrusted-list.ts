@@ -61,8 +61,19 @@ const NOTION_LIMIT_MAX = 100;
 // A GitHub pulls item embeds full head/base repo and user objects and runs
 // ~20KB, so asking for per_page=100 returns ~2MB and trips the MAX_BODY_BYTES
 // guard before anything is parsed (sagri-ai#472). 10 keeps a pulls page near
-// 200KB, comfortably inside the cap, and issues pages are far smaller.
+// 200KB, and issues pages are far smaller.
 const GITHUB_PAGE_SIZE = 10;
+
+// 200KB of typical rows leaves a page only 1.4x under the 256 KiB default, and
+// the bound that matters is what a page may contain, not what one repo measured:
+// GitHub caps an issue/PR body at 65,536 characters, so GITHUB_PAGE_SIZE rows of
+// maximal ASCII body plus their ~20KB of surrounding fields reach ~840KB. 1 MiB
+// clears that; every other adapter keeps MAX_BODY_BYTES.
+//
+// A DoS backstop, not a correctness guarantee: a page of maximal multibyte
+// bodies could still cross it, and surfaces as a loud leg failure rather than a
+// silent truncation.
+const GITHUB_LIST_MAX_BODY_BYTES = 1024 * 1024;
 
 // How many rows we are willing to read per row the caller asked for, before
 // giving up. The issue list drops every pull_request row, and on a repo where
@@ -505,6 +516,7 @@ async function githubListPage(
       'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
     },
     deps,
+    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
   });
   let parsed: unknown;
   try {

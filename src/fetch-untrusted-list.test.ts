@@ -371,6 +371,72 @@ describe('fetch-untrusted-list', () => {
 
   // ---------- github_pr_list ----------
 
+  // Both adapters get a case: the call sites route through one page fetcher now,
+  // but they pass their own baseUrl and build, so a pulls-only test would let a
+  // regression on the issues call site through.
+  //
+  // One page of GITHUB_PAGE_SIZE rows, over the 256 KiB default. That is the
+  // page paging can still ask for, so it is what the raised cap has to carry;
+  // the pre-paging fixture of 60 rows in one response no longer occurs.
+  it.each(['github_pr_list', 'github_issue_list'] as const)(
+    '%s parses a page over the 256 KiB default body cap',
+    async (kind) => {
+      const isPullRequest = kind === 'github_pr_list';
+      const pathSegment = isPullRequest ? 'pull' : 'issues';
+      // 30 KiB a row puts a 10-row page at ~300 KiB: over the default, well
+      // under the 1 MiB list cap. Pins the raise, not the ceiling.
+      const padding = 'x'.repeat(30 * 1024);
+      const rows = Array.from({ length: 10 }, (_, index) => ({
+        number: 10 - index,
+        html_url: `https://github.com/o/r/${pathSegment}/${10 - index}`,
+        state: 'open',
+        draft: false,
+        created_at: '2024-03-01T00:00:00Z',
+        updated_at: '2024-03-05T00:00:00Z',
+        user: { login: 'alice' },
+        title: `Item ${10 - index}`,
+        body: padding,
+      }));
+      const firstPage = JSON.stringify(rows);
+      // Keeps the fixture honest if either the padding or the default moves.
+      expect(firstPage.length).toBeGreaterThan(256 * 1024);
+      expect(firstPage.length).toBeLessThan(1024 * 1024);
+
+      const ghApi = await startFakeServer((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        // Page 2 empty: a short page ends the walk, so the limit is served by
+        // the one oversized page this pins.
+        res.end(pageOf(req.path) === 1 ? firstPage : '[]');
+      });
+      try {
+        const deps = buildLocalRedirectDeps({
+          redirects: {
+            'api.github.com': { port: ghApi.port, resolveTo: '8.8.8.8' },
+          },
+        });
+        const result = await fetchUntrustedList(
+          {
+            source_type: kind,
+            params: { owner: 'o', repo: 'r', state: 'open', limit: 100 },
+          },
+          deps,
+        );
+        expect(result.items).toHaveLength(10);
+        expect(result.items[0]).toEqual({
+          number: 10,
+          url: `https://github.com/o/r/${pathSegment}/10`,
+          state: 'open',
+          author: 'alice',
+          created_at: '2024-03-01T00:00:00Z',
+          updated_at: '2024-03-05T00:00:00Z',
+          ...(isPullRequest ? { draft: false } : { labels: [] }),
+        });
+      } finally {
+        await ghApi.close();
+      }
+    },
+  );
+
   it('github_pr_list returns laundered PRs and applies since filter', async () => {
     const ghApi = await startFakeServer((req, res) => {
       expect(req.path).toContain('state=open');
