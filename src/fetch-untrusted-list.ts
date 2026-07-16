@@ -228,13 +228,13 @@ function rejectUnknownKeys(
 const MAX_LAUNDER_RAW_LENGTH = 4000;
 
 // Convicts a nested struct: JSON.stringify(properties), the blob that broke
-// prod, wraps every value in a title/rich_text array. Nesting is the
+// prod, wraps every value in a per-type envelope object. Nesting is the
 // discriminator, not parseability and not a leading brace, so '{redacted} ...'
 // prose and a flat scalar map like '{"status":"done"}' both acquit. Each is a
 // field a human sends, and a conviction costs the whole batch.
 //
-// Two gaps stay open (sagri-ai#483): an array is never examined, and a wide or
-// long-valued flat map passes. Neither is the nested blob.
+// A top-level array is never examined, so a widening to JSON.stringify(labels)
+// in githubIssueList would slip through bracket-opened (sagri-ai#483).
 function isSerializedStruct(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return false;
