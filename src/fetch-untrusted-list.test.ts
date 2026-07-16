@@ -1309,7 +1309,7 @@ describe('fetch-untrusted-list', () => {
     await expectUnlaunderableGithubDescription('a'.repeat(4001));
   });
 
-  it('launder rejects a serialized object raw before any reader call', async () => {
+  it('launder rejects a serialized struct raw before any reader call', async () => {
     // The shape that took out live Notion reads: JSON.stringify(properties).
     // Well under the length budget, still unparaphrasable into flat scalars.
     await expectUnlaunderableGithubDescription(
@@ -1373,10 +1373,7 @@ describe('fetch-untrusted-list', () => {
     await expectLaunderedGithubDescription('[WIP] guard the launder boundary');
   });
 
-  // A field that is entirely a JSON array literal stays prose: '[404]' is a
-  // human's title far more often than a serialized blob, and the guard throws
-  // for the whole batch, so a heuristic that convicts valid prose would lose
-  // real rows. Only serialized objects are rejected.
+  // See isSerializedStruct: arrays are never examined.
   it('launder accepts a raw that is entirely a JSON array literal', async () => {
     await expectLaunderedGithubDescription('[404]');
   });

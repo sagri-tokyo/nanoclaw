@@ -227,28 +227,19 @@ function rejectUnknownKeys(
 // tighter than the body cap. A chosen bound, not a derivation. sagri-ai#471.
 const MAX_LAUNDER_RAW_LENGTH = 4000;
 
-// Convicts a nested struct, which is what JSON.stringify(properties) is: every
-// key of the blob that broke prod wraps its value in a title/rich_text array.
-// Nesting is the discriminator, not parseability, and not a leading brace. See
-// launder() for why a conviction has to be this narrow.
+// Convicts a nested struct: JSON.stringify(properties), the blob that broke
+// prod, wraps every value in a title/rich_text array. Nesting is the
+// discriminator, not parseability and not a leading brace, so '{redacted} ...'
+// prose and a flat scalar map like '{"status":"done"}' both acquit. Each is a
+// field a human sends, and a conviction costs the whole batch.
 //
-// Three shapes are deliberately acquitted, each because convicting it costs a
-// batch and none is the blob:
-//   '{redacted} ...'    prose that opens a brace, so parse rather than sniff
-//   '[404]'             a field that is entirely an array literal, a human's
-//                       prose more often than a blob. The cost is real: a
-//                       widening to JSON.stringify(labels) (a string[] already
-//                       in scope in githubIssueList) slips through, short and
-//                       bracket-opened. A flat label array is nothing like the
-//                       nested blob that broke prod.
-//   '{"status":"done"}' a flat scalar map, which is a title a human types
-//
-// The flat-map acquittal is narrower than it looks. It is proven only for a
-// short map: the reader also throws above MAX_EXTRACTED_KEYS or on a value past
-// MAX_EXTRACTED_VALUE_LENGTH, and neither is nested, so a wide or long-valued
-// flat map still reaches the reader and still fails the batch there. No adapter
-// sends one today; a guard for input nothing sends would be speculative, so the
-// gap is named rather than closed (sagri-ai#483).
+// Two gaps are accepted rather than closed (sagri-ai#483), neither being the
+// nested blob: arrays are never examined, so a widening to
+// JSON.stringify(labels) (a string[] already in scope in githubIssueList)
+// slips through bracket-opened; and a wide or long-valued flat map launders
+// silently. MAX_EXTRACTED_KEYS and MAX_EXTRACTED_VALUE_LENGTH do not catch the
+// second: they bound the reader's own output, and its prompt collapses wide
+// input into flat scalars rather than echoing it back.
 function isSerializedStruct(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return false;
