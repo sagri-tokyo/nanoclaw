@@ -168,6 +168,22 @@ Each NanoClaw group gets its own OneCLI agent identity. This allows different cr
 - Any credentials matching blocked patterns
 - `.env` is shadowed with `/dev/null` in the project root mount
 
+**Documented exception: OTLP telemetry auth headers.**
+
+One credential class is forwarded into the container by design, against the "credentials never enter containers" rule above: `OTEL_EXPORTER_OTLP_HEADERS`. When the operator sets `CLAUDE_CODE_ENABLE_TELEMETRY=1` and `OTEL_EXPORTER_OTLP_ENDPOINT`, `buildTelemetryEnv()` (`src/telemetry.ts`) also forwards `OTEL_EXPORTER_OTLP_HEADERS` into the container via `-e` if it is present in the host env (it is omitted for unauthenticated collectors), so Claude Code's built-in OTel exporter can authenticate to the OTLP collector (self-hosted Langfuse). It is the only auth credential passed via `-e` rather than injected by the OneCLI gateway; contrast the GitHub-token carve-out (see `CLAUDE.md`), which is delivered as a mounted file specifically to keep it off the `docker run` argv.
+
+**Why it cannot route through OneCLI:** the gateway injects credentials by matching *outbound HTTPS requests* by host and path. The OTLP exporter runs inside Claude Code and reads its auth header from its own process environment — there is no nanoclaw-mediated request for the gateway to rewrite, so the header has to be present in the exporter's env.
+
+**Why it is accepted:**
+
+- **Opt-in and operator-controlled.** Nothing is forwarded unless the operator sets both env vars. Enabling self-hosted telemetry is an explicit decision to accept this exposure.
+- **Dedicated path, not the operator forward-list.** It is forwarded by `buildTelemetryEnv`, so it is unaffected by the `src/env-forward.ts` denylist that refuses `*_TOKEN`/`*_SECRET` names on the general forward-list. The exception is therefore intentional, not an oversight in that guard.
+- **Bounded to the collector, and full-privilege there.** A leaked value reaches the telemetry collector and nothing else: not API keys, not channel auth, not the OneCLI vault, not any application data store. On the collector it is not ingest-only. Langfuse authenticates the OTLP endpoint with the project's `pk:sk` pair over Basic auth, and the same pair authorizes the public API, so a leaked header reads, forges, and deletes every trace in the project. Scoped keys are an open Langfuse request ([#7104](https://github.com/orgs/langfuse/discussions/7104), open since 2025-06; a read-only PR closed unmerged 2026-04; checked 2026-07-16), so no provisioning narrows this today. Those traces are not neutral: `buildTelemetryEnv` stamps `enduser.id` (the triggering Slack user, or a placeholder for scheduled runs with no human trigger) and `tenant.id` onto every span, so they record who ran what, when. On the read leg that is access the operator already granted the collector by enabling self-hosted telemetry, and the header grants nothing beyond it. Forging spans against a real `enduser.id`, and deleting the history, are not covered by that choice — see the residual risk below.
+
+**Residual risk (accepted knowingly):** unlike OneCLI-injected credentials, this value *is* present in the container environment and on the host `docker run` argv — visible in `ps` and `docker inspect`, the same exposure `src/env-forward.ts` warns about. Since it cannot be scoped down, the exposure is the project's whole trace history, and deletion is the sharp end of it: irreversible, and not something rotation undoes after the fact. Rotate independently of OneCLI-managed secrets.
+
+Note which attacker the network buys you anything against. A prompt-injected agent inside the container holds the header *and* a route to the collector by construction — that is what the forward exists for — so keeping the collector off the public internet does not bind it. That control bounds the host-argv reader who has the value but not the position, and is worth having for that reason alone. Against the in-container case the mitigations are rotation, and not sending the collector anything you would not accept losing.
+
 ### 8. Kill Switch (Operator Abort)
 
 A user with channel access can stop the active agent for a channel by posting `@<assistant> stop` (or `cancel` / `abort`), the slash form `/stop`, or — in a 1:1 DM only — the bare verb `stop`. Recognition is implemented in `src/abort-trigger.ts` and the intercept runs in `src/inbound.ts` before storage so the message never reaches the container we are about to kill.
