@@ -92,6 +92,19 @@ export class FetchUntrustedMalformed extends FetchUntrustedError {
   }
 }
 
+// Thrown by the `launder()` boundary in fetch-untrusted-list.ts, which only
+// accepts one short prose field per item. None of the four codes fit: the raw
+// comes from an upstream field, not the caller's params, so `invalid_params`
+// is the least wrong rather than the right one. It is picked for the 400,
+// which tells the caller not to retry a read that cannot start working. The
+// diagnosis rides on `error_class` (see the copy table below), not the code.
+// sagri-ai#471.
+export class FetchUntrustedUnlaunderable extends FetchUntrustedError {
+  constructor(message: string) {
+    super('invalid_params', message);
+  }
+}
+
 // Single source of truth for the error_class -> Slack copy mapping. The
 // container-runner consults this table when rewriting user-facing errors.
 // Keys must match the subclass names above (the host emits
@@ -107,6 +120,8 @@ export const FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES: Readonly<
   FetchUntrustedSsrfReject:
     'ssrf reject on notion fetch, operator action required',
   FetchUntrustedMalformed: 'notion response malformed, see host log',
+  FetchUntrustedUnlaunderable:
+    'a source field could not be laundered, see host log',
   FetchUntrustedError: 'notion fetch failed, see host log',
 };
 

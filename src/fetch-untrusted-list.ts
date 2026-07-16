@@ -34,6 +34,7 @@ import {
   FetchUntrustedError,
   FetchUntrustedMalformed,
   FetchUntrustedTimeout,
+  FetchUntrustedUnlaunderable,
   fetchJsonObject,
   fetchWithRedirects,
   requireEnv,
@@ -277,11 +278,60 @@ function rejectUnknownKeys(
   }
 }
 
+// The largest real input is arxiv_search's title+abstract, near 2000 chars,
+// and nothing here enforces that: it holds because arXiv's submission form caps
+// abstracts around 1920, a convention this repo does not own. So no adapter
+// trips this today *given that limit*, which is the assumption to check first
+// if it ever fires. It is a tripwire for a future adapter widened to launder a
+// whole issue body, which is prose the shape check below would wave through.
+// The real ceiling without it is MAX_BODY_BYTES (256KB), no kind of bound on a
+// field meant to be a sentence; 4000 is ~2x the largest real input and ~64x
+// tighter than the body cap. A chosen bound, not a derivation. sagri-ai#471.
+const MAX_LAUNDER_RAW_LENGTH = 4000;
+
+// Convicts a nested struct: JSON.stringify(properties), the blob that broke
+// prod, wraps every value in a per-type envelope object. Nesting is the
+// discriminator, not parseability and not a leading brace, so '{redacted} ...'
+// prose and a flat scalar map like '{"status":"done"}' both acquit. Each is a
+// field a human sends, and a conviction costs the whole batch.
+//
+// A top-level array is never examined, so a widening to JSON.stringify(labels)
+// in githubIssueList would slip through bracket-opened (sagri-ai#483).
+function isSerializedStruct(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  // Unreachable: '{' parses only as an object. Narrows unknown for Object.values.
+  if (parsed === null || typeof parsed !== 'object') return false;
+  return Object.values(parsed).some(
+    (value) => value !== null && typeof value === 'object',
+  );
+}
+
 async function launder(args: {
   raw: string;
   source: 'web_content' | 'github_issue' | 'github_comment' | 'notion_page';
   url: string;
 }): Promise<ReaderOutput> {
+  // Guarded here, the one boundary every adapter routes through, so a widened
+  // adapter trips it without needing its own check. Both checks throw for the
+  // whole batch, so each may only convict input no honest adapter can send
+  // (sagri-ai#483). Messages carry lengths, never raw bytes.
+  if (args.raw.length > MAX_LAUNDER_RAW_LENGTH) {
+    throw new FetchUntrustedUnlaunderable(
+      `launder raw exceeds ${MAX_LAUNDER_RAW_LENGTH} chars (got ${args.raw.length})`,
+    );
+  }
+  if (isSerializedStruct(args.raw)) {
+    throw new FetchUntrustedUnlaunderable(
+      'launder raw must be prose, not a serialized struct',
+    );
+  }
   const sourceMetadata: SourceMetadata = { url: args.url };
   try {
     return await readUntrustedContent({
