@@ -233,13 +233,8 @@ const MAX_LAUNDER_RAW_LENGTH = 4000;
 // prose and a flat scalar map like '{"status":"done"}' both acquit. Each is a
 // field a human sends, and a conviction costs the whole batch.
 //
-// Two gaps are accepted rather than closed (sagri-ai#483), neither being the
-// nested blob: arrays are never examined, so a widening to
-// JSON.stringify(labels) (a string[] already in scope in githubIssueList)
-// slips through bracket-opened; and a wide or long-valued flat map launders
-// silently. MAX_EXTRACTED_KEYS and MAX_EXTRACTED_VALUE_LENGTH do not catch the
-// second: they bound the reader's own output, and its prompt collapses wide
-// input into flat scalars rather than echoing it back.
+// Two gaps stay open (sagri-ai#483): an array is never examined, and a wide or
+// long-valued flat map passes. Neither is the nested blob.
 function isSerializedStruct(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return false;
