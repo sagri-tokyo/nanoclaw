@@ -623,6 +623,18 @@ describe('reader-rpc fetch_untrusted', () => {
         details: { upstream_http_status: 500 },
       },
     });
+    // The reply is a fixed string per code, so the log is the only place the
+    // cause survives. Without it every fetch failure is one opaque 502 and
+    // 'body too large' reads exactly like an auth failure — that silence is
+    // why sagri-ai#378 went unexplained for ten days.
+    expect(loggerMock.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'fetch_failure',
+        message: expect.any(String),
+        httpStatus: 500,
+      }),
+      expect.stringContaining('fetch error'),
+    );
   });
 
   it('returns 502 fetch_failure with upstream_http_status for fetch_untrusted_list non-2xx', async () => {

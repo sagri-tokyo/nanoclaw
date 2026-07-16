@@ -58,22 +58,67 @@ const GITHUB_SEARCH_LIMIT_MAX = 30;
 const GITHUB_LIST_LIMIT_MAX = 100;
 const NOTION_LIMIT_MAX = 100;
 
-// A GitHub list page does not fit the 256 KiB default: measured against
-// sagri-tokyo/sagri-ai a `pulls` page runs ~17.5 KiB per item, so every
-// realistic `github_pr_list` / `github_issue_list` call died on the cap as an
-// opaque `fetch_failure` 502 (sagri-ai#378).
+// A GitHub pulls item embeds full head/base repo and user objects and runs
+// ~20KB, so asking for per_page=100 returns ~2MB and trips the MAX_BODY_BYTES
+// guard before anything is parsed (sagri-ai#472). 10 keeps a pulls page near
+// 200KB, and issues pages are far smaller.
+const GITHUB_PAGE_SIZE = 10;
+
+// 200KB of typical rows leaves a page only 1.4x under the 256 KiB default, and
+// the bound that matters is what a page may contain, not what one repo measured:
+// GitHub caps an issue/PR body at 65,536 characters, so GITHUB_PAGE_SIZE rows of
+// maximal ASCII body plus their ~20KB of surrounding fields reach ~840KB. 1 MiB
+// clears that; every other adapter keeps MAX_BODY_BYTES.
 //
-// Sized from the ceiling the API permits, not the traffic that happened to be
-// measured: `limit` is validated to <= 100 (GITHUB_LIST_LIMIT_MAX) before the
-// request and GitHub caps an issue/PR body at 65,536 characters, so a full page
-// of maximal ASCII bodies tops out at 100 * (65,536 + the ~20 KiB of
-// surrounding fields) = 8,601,600 bytes, about 8.2 MiB. 16 MiB clears that.
-//
-// It is a DoS backstop, not a correctness guarantee. A pathological page of 100
-// maximal multibyte bodies could still exceed it; that surfaces as a loud leg
-// failure, which is the same class of signal as any other fetch error and not a
+// A DoS backstop, not a correctness guarantee: a page of maximal multibyte
+// bodies could still cross it, and surfaces as a loud leg failure rather than a
 // silent truncation.
-const GITHUB_LIST_MAX_BODY_BYTES = 16 * 1024 * 1024;
+const GITHUB_LIST_MAX_BODY_BYTES = 1024 * 1024;
+
+// How many rows we are willing to read per row the caller asked for, before
+// giving up. The issue list drops every pull_request row, and on a repo where
+// bots open PRs around the clock those can be most of a page, so `limit` rows
+// of output can cost several times that in input. 3 covers a list that is
+// two-thirds PRs. Crossing it throws rather than returning a short list: a
+// truncated list is indistinguishable from a genuinely small one, and inventing
+// that ambiguity is the bug this file is being fixed for (sagri-ai#472, #378).
+const GITHUB_LIST_OVERSCAN = 3;
+
+// Floor under the overscan. A page is GITHUB_PAGE_SIZE rows whatever the ask,
+// so overscan alone is too coarse at small limits: limit 3 works out to a
+// single page, and one page of PR rows would exhaust an issue list before it
+// saw its first issue. Three pages give any limit room to page past a filtered
+// run.
+const GITHUB_MIN_PAGES = 3;
+
+// GitHub's exact updated_at/created_at spelling. Deliberately no milliseconds:
+// `since` is compared byte-wise against those fields, which is only sound when
+// both sides are spelled the same. '.' sorts below 'Z', so a since carrying
+// '.000Z' would sit just under the same instant and skew the boundary rather
+// than fail. Reject it and make the caller say what it means.
+const ISO_8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+function optionalSince(params: Record<string, unknown>): string | undefined {
+  const since = optionalString(params, 'since');
+  if (since === undefined) return since;
+  // The regex fixes the spelling, Date fixes the calendar. '2024-99-99T99:99:99Z'
+  // is the right shape and sorts above every real updated_at, so on its own the
+  // regex lets it end the walk at row one and return the empty list that reads
+  // exactly like an empty window. Round-tripping rejects it, along with the
+  // values Date would silently normalize instead (2024-02-30, 24:00:00). NaN
+  // first: toISOString throws on an invalid date.
+  const parsed = new Date(since);
+  if (
+    !ISO_8601_UTC.test(since) ||
+    Number.isNaN(parsed.valueOf()) ||
+    parsed.toISOString() !== since.replace('Z', '.000Z')
+  ) {
+    paramErr(
+      'since must be an ISO-8601 UTC timestamp with no milliseconds, e.g. 2026-07-15T00:00:00Z',
+    );
+  }
+  return since;
+}
 
 export type ListSourceType =
   | 'arxiv_search'
@@ -418,7 +463,7 @@ async function githubSearch(
 
 // ---------- github_pr_list / github_issue_list shared ----------
 
-interface GithubListEnvelope {
+interface GithubListRequest {
   owner: string;
   repo: string;
   state: string;
@@ -426,9 +471,9 @@ interface GithubListEnvelope {
   limit: number;
 }
 
-function readGithubListEnvelope(
+function readGithubListRequest(
   params: Record<string, unknown>,
-): GithubListEnvelope {
+): GithubListRequest {
   rejectUnknownKeys(
     params,
     new Set(['owner', 'repo', 'state', 'since', 'limit']),
@@ -439,194 +484,218 @@ function readGithubListEnvelope(
   if (!['open', 'closed', 'all'].includes(stateRaw)) {
     paramErr('state must be one of: open, closed, all');
   }
-  const since = optionalString(params, 'since');
+  // Paging makes the first row past `since` end the walk, so a malformed value
+  // does not filter — it decides. 'yesterday' sorts above every ISO timestamp
+  // and would return an empty list that reads exactly like an empty window.
+  const since = optionalSince(params);
   const limit = requireLimit(params, GITHUB_LIST_LIMIT_MAX);
   return { owner, repo, state: stateRaw, since, limit };
 }
 
-async function githubPrList(
+/**
+ * Fetches one page of a GitHub array-returning list endpoint. Rows are returned
+ * exactly as served, unfiltered: the walk ends on a short page, and that has to
+ * mean "GitHub ran out of rows", not "we dropped one".
+ */
+async function githubListPage(
+  baseUrl: string,
+  search: URLSearchParams,
+  page: number,
+  what: string,
+  token: string,
+  deps: Required<FetchUntrustedDeps>,
+): Promise<unknown[]> {
+  const paged = new URLSearchParams(search);
+  paged.set('per_page', String(GITHUB_PAGE_SIZE));
+  paged.set('page', String(page));
+  const response = await fetchWithRedirects({
+    url: `${baseUrl}?${paged.toString()}`,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
+    },
+    deps,
+    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    throw new FetchUntrustedError(
+      'fetch_failure',
+      `${what} response was not json`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new FetchUntrustedError(
+      'fetch_failure',
+      `${what} response was not an array`,
+    );
+  }
+  return parsed;
+}
+
+function readLogin(userRaw: unknown): string {
+  if (!userRaw || typeof userRaw !== 'object') return '';
+  const login = (userRaw as Record<string, unknown>).login;
+  return typeof login === 'string' ? login : '';
+}
+
+/**
+ * Walks a GitHub updated-desc list endpoint page by page until it has `limit`
+ * items, the rows run out, or `since` ends the window.
+ *
+ * `build` maps one raw row to an item, or null to drop it (unparseable, or a PR
+ * row on the issues leg). It cannot move: it runs after the `since` cutoff
+ * because a dropped row must still be able to end the walk, and before the
+ * dedup because only `build` can produce the `number` the dedup keys on.
+ * Dropped rows never reach `out`, so they cost a row of input rather than a row
+ * of the caller's `limit`.
+ */
+async function githubPagedList<
+  T extends { number: number; url: string; reader?: ReaderOutput },
+>(
+  request: GithubListRequest,
+  what: 'pulls' | 'issues',
+  deps: Required<FetchUntrustedDeps>,
+  includeReader: boolean,
+  build: (row: Record<string, unknown>) => T | null,
+): Promise<T[]> {
+  const search = new URLSearchParams({
+    state: request.state,
+    sort: 'updated',
+    direction: 'desc',
+  });
+  const url = `https://api.github.com/repos/${request.owner}/${request.repo}/${what}`;
+  const token = requireEnv('GITHUB_TOKEN');
+  const out: T[] = [];
+  // A row updated between two page fetches moves toward page 1, so a row that
+  // was on page N can reappear on page N+1. One request could not do this. The
+  // reverse — an unseen row pushed back across a boundary already read — is
+  // inherent to offset paging and needs cursors to fix.
+  const seen = new Set<number>();
+  // Scales with the ask, so a limit of 10 cannot spend a limit-of-100 budget.
+  // ponytail: at limit 100 on an active repo this bursts up to 30 sequential
+  // calls with no jitter. Add backoff if secondary-rate-limit 403s show up.
+  const maxPages = Math.max(
+    GITHUB_MIN_PAGES,
+    Math.ceil((request.limit * GITHUB_LIST_OVERSCAN) / GITHUB_PAGE_SIZE),
+  );
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await githubListPage(url, search, page, what, token, deps);
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const record = row as Record<string, unknown>;
+      // Cutoff before `build`: rows share one updated-desc sort, so the first
+      // row older than `since` proves every row after it is older too — even on
+      // the issues leg, where that row may be a PR `build` would have dropped.
+      // Stop rather than skip: paging on would walk the repo's whole history to
+      // find nothing.
+      if (
+        request.since &&
+        typeof record.updated_at === 'string' &&
+        record.updated_at < request.since
+      ) {
+        return out;
+      }
+      const item = build(record);
+      if (item === null) continue;
+      if (seen.has(item.number)) continue;
+      seen.add(item.number);
+      if (includeReader) {
+        const title = typeof record.title === 'string' ? record.title : '';
+        item.reader = await launder({
+          raw: title.length > 0 ? title : '(no title)',
+          source: 'web_content',
+          url: item.url,
+        });
+      }
+      out.push(item);
+      if (out.length >= request.limit) return out;
+    }
+    // A short page is the last page: the repo has fewer matching rows than
+    // asked for, which is an answer, not a truncation.
+    if (rows.length < GITHUB_PAGE_SIZE) return out;
+  }
+  throw new FetchUntrustedError(
+    'fetch_failure',
+    `${what} list exceeded its page ceiling before reaching limit; narrow the window with since, or lower limit`,
+  );
+}
+
+function githubPrList(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
   includeReader: boolean,
 ): Promise<GithubPrItem[]> {
-  const env = readGithubListEnvelope(params);
-  const token = requireEnv('GITHUB_TOKEN');
-  const search = new URLSearchParams({
-    state: env.state,
-    per_page: String(env.limit),
-    sort: 'updated',
-    direction: 'desc',
-  });
-  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/pulls?${search.toString()}`;
-  const response = await fetchWithRedirects({
-    url,
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
-    },
+  const request = readGithubListRequest(params);
+  return githubPagedList<GithubPrItem>(
+    request,
+    'pulls',
     deps,
-    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
-  });
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(response.body);
-  } catch {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'pulls response was not json',
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'pulls response was not an array',
-    );
-  }
-  const out: GithubPrItem[] = [];
-  for (const prRaw of parsed.slice(0, env.limit)) {
-    if (!prRaw || typeof prRaw !== 'object') continue;
-    const pr = prRaw as Record<string, unknown>;
-    if (
-      env.since &&
-      typeof pr.updated_at === 'string' &&
-      pr.updated_at < env.since
-    ) {
-      continue;
-    }
-    const number = typeof pr.number === 'number' ? pr.number : null;
-    const htmlUrl = typeof pr.html_url === 'string' ? pr.html_url : null;
-    const state = typeof pr.state === 'string' ? pr.state : null;
-    const draft = typeof pr.draft === 'boolean' ? pr.draft : false;
-    const createdAt = typeof pr.created_at === 'string' ? pr.created_at : null;
-    const updatedAt = typeof pr.updated_at === 'string' ? pr.updated_at : null;
-    const userRaw = pr.user;
-    const author =
-      userRaw && typeof userRaw === 'object'
-        ? typeof (userRaw as Record<string, unknown>).login === 'string'
-          ? ((userRaw as Record<string, unknown>).login as string)
-          : ''
-        : '';
-    if (number === null || htmlUrl === null || state === null) continue;
-    const item: GithubPrItem = {
-      number,
-      url: htmlUrl,
-      state,
-      author,
-      draft,
-      created_at: createdAt ?? '',
-      updated_at: updatedAt ?? '',
-    };
-    if (includeReader) {
-      const title = typeof pr.title === 'string' ? pr.title : '';
-      item.reader = await launder({
-        raw: title.length > 0 ? title : '(no title)',
-        source: 'web_content',
+    includeReader,
+    (pr) => {
+      const number = typeof pr.number === 'number' ? pr.number : null;
+      const htmlUrl = typeof pr.html_url === 'string' ? pr.html_url : null;
+      const state = typeof pr.state === 'string' ? pr.state : null;
+      if (number === null || htmlUrl === null || state === null) return null;
+      return {
+        number,
         url: htmlUrl,
-      });
-    }
-    out.push(item);
-  }
-  return out;
+        state,
+        author: readLogin(pr.user),
+        draft: typeof pr.draft === 'boolean' ? pr.draft : false,
+        created_at: typeof pr.created_at === 'string' ? pr.created_at : '',
+        updated_at: typeof pr.updated_at === 'string' ? pr.updated_at : '',
+      };
+    },
+  );
 }
 
-async function githubIssueList(
+function githubIssueList(
   params: Record<string, unknown>,
   deps: Required<FetchUntrustedDeps>,
   includeReader: boolean,
 ): Promise<GithubIssueItem[]> {
-  const env = readGithubListEnvelope(params);
-  const token = requireEnv('GITHUB_TOKEN');
-  const search = new URLSearchParams({
-    state: env.state,
-    per_page: String(env.limit),
-    sort: 'updated',
-    direction: 'desc',
-  });
-  const url = `https://api.github.com/repos/${env.owner}/${env.repo}/issues?${search.toString()}`;
-  const response = await fetchWithRedirects({
-    url,
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'nanoclaw-fetch-untrusted-list/1.0',
-    },
+  const request = readGithubListRequest(params);
+  return githubPagedList<GithubIssueItem>(
+    request,
+    'issues',
     deps,
-    maxBytes: GITHUB_LIST_MAX_BODY_BYTES,
-  });
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(response.body);
-  } catch {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'issues response was not json',
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new FetchUntrustedError(
-      'fetch_failure',
-      'issues response was not an array',
-    );
-  }
-  const out: GithubIssueItem[] = [];
-  for (const issueRaw of parsed.slice(0, env.limit)) {
-    if (!issueRaw || typeof issueRaw !== 'object') continue;
-    const issue = issueRaw as Record<string, unknown>;
-    // GitHub's /issues endpoint returns PRs too; filter them out.
-    if (issue.pull_request !== undefined) continue;
-    if (
-      env.since &&
-      typeof issue.updated_at === 'string' &&
-      issue.updated_at < env.since
-    ) {
-      continue;
-    }
-    const number = typeof issue.number === 'number' ? issue.number : null;
-    const htmlUrl = typeof issue.html_url === 'string' ? issue.html_url : null;
-    const state = typeof issue.state === 'string' ? issue.state : null;
-    const createdAt =
-      typeof issue.created_at === 'string' ? issue.created_at : null;
-    const updatedAt =
-      typeof issue.updated_at === 'string' ? issue.updated_at : null;
-    const userRaw = issue.user;
-    const author =
-      userRaw && typeof userRaw === 'object'
-        ? typeof (userRaw as Record<string, unknown>).login === 'string'
-          ? ((userRaw as Record<string, unknown>).login as string)
-          : ''
-        : '';
-    const labelsRaw = issue.labels;
-    const labels: string[] = Array.isArray(labelsRaw)
-      ? labelsRaw
-          .map((l) => {
-            if (!l || typeof l !== 'object') return null;
-            const name = (l as Record<string, unknown>).name;
-            return typeof name === 'string' ? name : null;
-          })
-          .filter((n): n is string => n !== null)
-      : [];
-    if (number === null || htmlUrl === null || state === null) continue;
-    const item: GithubIssueItem = {
-      number,
-      url: htmlUrl,
-      state,
-      author,
-      labels,
-      created_at: createdAt ?? '',
-      updated_at: updatedAt ?? '',
-    };
-    if (includeReader) {
-      const title = typeof issue.title === 'string' ? issue.title : '';
-      item.reader = await launder({
-        raw: title.length > 0 ? title : '(no title)',
-        source: 'web_content',
+    includeReader,
+    (issue) => {
+      // GitHub's /issues endpoint returns PRs too; drop them. `limit` counts
+      // issues that survive this filter.
+      if (issue.pull_request !== undefined) return null;
+      const number = typeof issue.number === 'number' ? issue.number : null;
+      const htmlUrl =
+        typeof issue.html_url === 'string' ? issue.html_url : null;
+      const state = typeof issue.state === 'string' ? issue.state : null;
+      if (number === null || htmlUrl === null || state === null) return null;
+      const labelsRaw = issue.labels;
+      const labels: string[] = Array.isArray(labelsRaw)
+        ? labelsRaw
+            .map((l) => {
+              if (!l || typeof l !== 'object') return null;
+              const name = (l as Record<string, unknown>).name;
+              return typeof name === 'string' ? name : null;
+            })
+            .filter((n): n is string => n !== null)
+        : [];
+      return {
+        number,
         url: htmlUrl,
-      });
-    }
-    out.push(item);
-  }
-  return out;
+        state,
+        author: readLogin(issue.user),
+        labels,
+        created_at:
+          typeof issue.created_at === 'string' ? issue.created_at : '',
+        updated_at:
+          typeof issue.updated_at === 'string' ? issue.updated_at : '',
+      };
+    },
+  );
 }
 
 // ---------- github_run_list ----------
@@ -643,7 +712,11 @@ async function githubRunList(
   const owner = requireString(params, 'owner');
   const repo = requireString(params, 'repo');
   const status = optionalString(params, 'status');
-  const since = optionalString(params, 'since');
+  // Not compared byte-wise like the other legs — this one hands `since` to
+  // GitHub's `created` filter — but it takes the same param from the same
+  // callers, so it takes the same guard. Unvalidated, `created=>=yesterday`
+  // goes to GitHub.
+  const since = optionalSince(params);
   const limit = requireLimit(params, GITHUB_LIST_LIMIT_MAX);
   const token = requireEnv('GITHUB_TOKEN');
   const search = new URLSearchParams({
