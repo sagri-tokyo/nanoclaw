@@ -238,15 +238,28 @@ const MAX_LAUNDER_RAW_LENGTH = 4000;
 // broke prod, and convicting '[404]' costs a batch. A leading brace alone is
 // not enough to convict either, so parse rather than trust it: '{redacted} ...'
 // prose has to survive.
+//
+// Nesting is the discriminator, not parseability. An upstream field is allowed
+// to be valid JSON: '{"status":"done"}' is a title a human types, and this
+// throws for the whole batch, so convicting it would lose a list over a
+// well-formed row. Every blob this guards against is a serialized struct
+// (JSON.stringify(properties) nests title/rich_text arrays under each key), so
+// require a value that is itself an object or array. A flat scalar map is
+// indistinguishable from a field someone meant to send, and rides through to
+// the reader, which handles it.
 function isSerializedObject(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return false;
+  let parsed: unknown;
   try {
-    JSON.parse(trimmed);
-    return true;
+    parsed = JSON.parse(trimmed);
   } catch {
     return false;
   }
+  if (parsed === null || typeof parsed !== 'object') return false;
+  return Object.values(parsed).some(
+    (value) => value !== null && typeof value === 'object',
+  );
 }
 
 async function launder(args: {
