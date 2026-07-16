@@ -227,27 +227,29 @@ function rejectUnknownKeys(
 // tighter than the body cap. A chosen bound, not a derivation. sagri-ai#471.
 const MAX_LAUNDER_RAW_LENGTH = 4000;
 
-// Sniffs '{' only, deliberately not '[': the shape that broke prod was a
-// serialized object (JSON.stringify(properties)), while a field that is
-// entirely a JSON array literal ('[404]') is a human's prose far more often
-// than it is a blob, and rejecting it would lose a whole batch over a
-// well-formed row. The cost is real and accepted: array serialization is
-// knowingly unguarded, so a widening to JSON.stringify(labels) (a string[]
-// already in scope in githubIssueList) would slip through short and
-// bracket-opened. A flat array of labels is nothing like the nested blob that
-// broke prod, and convicting '[404]' costs a batch. A leading brace alone is
-// not enough to convict either, so parse rather than trust it: '{redacted} ...'
-// prose has to survive.
+// Convicts a nested struct, which is what JSON.stringify(properties) is: every
+// key of the blob that broke prod wraps its value in a title/rich_text array.
+// Nesting is the discriminator, not parseability, and not a leading brace. See
+// launder() for why a conviction has to be this narrow.
 //
-// Nesting is the discriminator, not parseability. An upstream field is allowed
-// to be valid JSON: '{"status":"done"}' is a title a human types, and this
-// throws for the whole batch, so convicting it would lose a list over a
-// well-formed row. Every blob this guards against is a serialized struct
-// (JSON.stringify(properties) nests title/rich_text arrays under each key), so
-// require a value that is itself an object or array. A flat scalar map is
-// indistinguishable from a field someone meant to send, and rides through to
-// the reader, which handles it.
-function isSerializedObject(raw: string): boolean {
+// Three shapes are deliberately acquitted, each because convicting it costs a
+// batch and none is the blob:
+//   '{redacted} ...'    prose that opens a brace, so parse rather than sniff
+//   '[404]'             a field that is entirely an array literal, a human's
+//                       prose more often than a blob. The cost is real: a
+//                       widening to JSON.stringify(labels) (a string[] already
+//                       in scope in githubIssueList) slips through, short and
+//                       bracket-opened. A flat label array is nothing like the
+//                       nested blob that broke prod.
+//   '{"status":"done"}' a flat scalar map, which is a title a human types
+//
+// The flat-map acquittal is narrower than it looks. It is proven only for a
+// short map: the reader also throws above MAX_EXTRACTED_KEYS or on a value past
+// MAX_EXTRACTED_VALUE_LENGTH, and neither is nested, so a wide or long-valued
+// flat map still reaches the reader and still fails the batch there. No adapter
+// sends one today; a guard for input nothing sends would be speculative, so the
+// gap is named rather than closed (sagri-ai#483).
+function isSerializedStruct(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return false;
   let parsed: unknown;
@@ -256,6 +258,7 @@ function isSerializedObject(raw: string): boolean {
   } catch {
     return false;
   }
+  // Unreachable: '{' parses only as an object. Narrows unknown for Object.values.
   if (parsed === null || typeof parsed !== 'object') return false;
   return Object.values(parsed).some(
     (value) => value !== null && typeof value === 'object',
@@ -276,9 +279,9 @@ async function launder(args: {
       `launder raw exceeds ${MAX_LAUNDER_RAW_LENGTH} chars (got ${args.raw.length})`,
     );
   }
-  if (isSerializedObject(args.raw)) {
+  if (isSerializedStruct(args.raw)) {
     throw new FetchUntrustedUnlaunderable(
-      'launder raw must be prose, not a serialized object',
+      'launder raw must be prose, not a serialized struct',
     );
   }
   const sourceMetadata: SourceMetadata = { url: args.url };

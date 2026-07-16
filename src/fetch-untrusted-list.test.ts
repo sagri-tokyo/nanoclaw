@@ -1323,9 +1323,7 @@ describe('fetch-untrusted-list', () => {
     await expectLaunderedGithubDescription('a'.repeat(4000));
   });
 
-  // An upstream field is allowed to be valid JSON. A flat scalar map is a title
-  // a human types, and the guard throws for the whole batch, so convicting it
-  // would lose a list over a well-formed row. Only a nested struct convicts.
+  // See isSerializedStruct: only a nested struct convicts.
   it('launder accepts a flat scalar map rather than failing the batch', async () => {
     await expectLaunderedGithubDescription('{"status":"done"}');
   });
