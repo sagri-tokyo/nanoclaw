@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   classifyOrgAction,
+  GITHUB_REPO_ALLOWLIST,
   isNotionPageId,
   renderApprovalSummary,
   STAKES_HINT_VALUES,
@@ -67,6 +68,18 @@ const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
   'property',
 ]);
 
+// A target_ref that clears each action's own shape/allowlist guard, so a refuse
+// in these cases can only have come from the red line.
+const VALID_TARGET: Record<OrgActionName, string> = {
+  'notion.append_progress': HEX32,
+  'notion.write_property': HEX32,
+  'notion.create_task': HEX32,
+  'github.file_issue': GITHUB_REPO_ALLOWLIST,
+  'github.open_draft_pr': GITHUB_REPO_ALLOWLIST,
+  'slack.post_digest': 'C0AAA1111',
+  'doc.draft': HEX32,
+};
+
 describe('red-line arg classification — every consumed arg is classified', () => {
   const allConsumed = [...new Set(Object.values(CONSUMED_ARGS).flat())].sort();
 
@@ -93,15 +106,27 @@ describe('red-line arg classification — every consumed arg is classified', () 
   // above only cross-check two hand-written lists against each other, which is
   // what let three earlier names for this set ship: each was true of the members
   // someone looked at, false of one they did not, and passed membership anyway.
-  // Widening isRedLine back over all canonical_args fails here.
-  it.each([...REFUSE_EXEMPT_ARGS])(
-    'a red-line marker in %s does not refuse',
-    (arg) => {
+  //
+  // Every (action, arg) pair the write client actually consumes, not one action
+  // carrying the others as inert extras. The claim is that no exempt arg refuses
+  // on any arm, so a refuse added to one arm has to fail here. Widening
+  // isRedLine back over all canonical_args fails all of them.
+  const exemptPairs = Object.entries(CONSUMED_ARGS).flatMap(([action, args]) =>
+    args
+      .filter((arg) => REFUSE_EXEMPT_ARGS.has(arg))
+      .map((arg) => [action as OrgActionName, arg] as const),
+  );
+
+  it.each(exemptPairs)(
+    'a red-line marker in %s %s does not refuse',
+    (action, arg) => {
+      const target = VALID_TARGET[action];
       expect(
         classifyOrgAction(
           record({
-            action: 'notion.append_progress',
-            target_ref: HEX32,
+            action,
+            target_ref: target,
+            origin_channel: `slack:${target}`,
             canonical_args: { [arg]: 'mrv' },
           }),
         ),
