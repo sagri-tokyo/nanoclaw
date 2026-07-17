@@ -6,6 +6,7 @@ import {
   classifyOrgAction,
   isNotionPageId,
   renderApprovalSummary,
+  STAKES_HINT_VALUES,
   stringContainsRedLine,
   TARGET_NAMING_ARGS,
   type OrgActionName,
@@ -233,26 +234,35 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
   // cannot do this: every marker carries a non-hex letter, so a marker-bearing
   // id never survives NOTION_PAGE_ID. A slack channel id can.
   it.each(['mrv', 'carbon', 'jichitai', 'prod'])(
-    'refuses a shape-valid slack target_ref containing %s regardless of stakes_hint',
+    'refuses a shape-valid slack target_ref containing %s at every stakes_hint',
     (marker) => {
-      expect(
-        classifyOrgAction(
-          record({
-            action: 'slack.post_digest',
-            target_ref: `C${marker}1234`,
-            origin_channel: `slack:C${marker}1234`,
-            canonical_args: { text: 'clean' },
-            stakes_hint: 'safe',
-          }),
-        ),
-      ).toBe('refuse');
+      for (const stakes_hint of STAKES_HINT_VALUES) {
+        expect(
+          classifyOrgAction(
+            record({
+              action: 'slack.post_digest',
+              target_ref: `C${marker}1234`,
+              origin_channel: `slack:C${marker}1234`,
+              canonical_args: { text: 'clean' },
+              stakes_hint,
+            }),
+          ),
+        ).toBe('refuse');
+      }
     },
   );
 
   it('matches the romaji red line case-insensitively', () => {
-    expect(classifyOrgAction(record({ target_ref: `PROD-${HEX32}` }))).toBe(
-      'refuse',
-    );
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'slack.post_digest',
+          target_ref: 'CPROD1234',
+          origin_channel: 'slack:CPROD1234',
+          canonical_args: { text: 'clean' },
+        }),
+      ),
+    ).toBe('refuse');
   });
 
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
