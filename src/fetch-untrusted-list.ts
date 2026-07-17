@@ -258,6 +258,21 @@ function optionalString(
   return value;
 }
 
+// A non-id is a caller mistake, not a lookup that might fail: sagri-ai#403 was
+// months of opaque 4xx from callers passing the env var's *name*, not its value.
+const NOTION_ID = /^[0-9a-fA-F]{32}$/;
+
+function requireNotionId(
+  params: Record<string, unknown>,
+  name: string,
+): string {
+  const value = requireString(params, name);
+  if (!NOTION_ID.test(value.replace(/-/g, ''))) {
+    paramErr(`${name} must be a notion id: 32 hex digits, dashed or bare`);
+  }
+  return value;
+}
+
 function requireLimit(params: Record<string, unknown>, cap: number): number {
   const value = params.limit;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
@@ -998,7 +1013,7 @@ async function notionDatabaseQuery(
       'include_reader is not supported for notion_database_query; page-read each id with fetch_untrusted + notion_page for the laundered view',
     );
   }
-  const databaseId = requireString(params, 'database_id');
+  const databaseId = requireNotionId(params, 'database_id');
   const limit = requireLimit(params, NOTION_LIMIT_MAX);
   const filter = params.filter;
   if (filter !== undefined && !isPlainObject(filter)) {
