@@ -54,11 +54,12 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'doc.draft': ['title'],
 };
 
-// The other half of the partition: consumed but not red-line scanned. Named
-// for what the gate does to them, not for what they hold — `property` names a
-// target field and is here anyway (TARGET_NAMING_ARGS has the why), and `value`
-// is prose or a select-option token depending on the property.
-const UNSCANNED_ARGS: ReadonlySet<string> = new Set([
+// The other half of the partition: isRedLine does not scan these, so they never
+// refuse. Named for the scan, not for what they hold, because what they hold
+// varies per action and per Notion property. `text` is refuse-exempt and still
+// scanned on the digest arm for a hold, which is a different verdict on a
+// different path. TARGET_NAMING_ARGS has the why for `property`.
+const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
   'body',
@@ -70,20 +71,20 @@ describe('red-line arg classification — every consumed arg is classified', () 
   const allConsumed = [...new Set(Object.values(CONSUMED_ARGS).flat())].sort();
 
   it.each(allConsumed)(
-    '%s is classified as exactly one of target-naming or unscanned',
+    '%s is either scanned by isRedLine or exempt from it, not both',
     (arg) => {
-      const isTarget = TARGET_NAMING_ARGS.has(arg);
-      const isUnscanned = UNSCANNED_ARGS.has(arg);
+      const isScanned = TARGET_NAMING_ARGS.has(arg);
+      const isExempt = REFUSE_EXEMPT_ARGS.has(arg);
       expect(
-        isTarget !== isUnscanned,
-        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or UNSCANNED_ARGS`,
+        isScanned !== isExempt,
+        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or REFUSE_EXEMPT_ARGS`,
       ).toBe(true);
     },
   );
 
   it('classifies no arg the write client does not consume', () => {
     const classified = [
-      ...new Set([...TARGET_NAMING_ARGS, ...UNSCANNED_ARGS]),
+      ...new Set([...TARGET_NAMING_ARGS, ...REFUSE_EXEMPT_ARGS]),
     ].sort();
     expect(classified).toStrictEqual(allConsumed);
   });

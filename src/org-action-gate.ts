@@ -113,12 +113,11 @@ export function usesNotionTarget(action: string): boolean {
 }
 
 /**
- * The closed set of canonical_args that NAME a target rather than carry
- * agent-authored content. Only these are red-line scanned alongside
- * target_ref: `base: production` on github.open_draft_pr is a genuine
- * red-line target and must refuse.
+ * The closed set of canonical_args isRedLine scans alongside target_ref. They
+ * name a target rather than carry agent-authored content: `base: production` on
+ * github.open_draft_pr is a genuine red-line target and must refuse.
  *
- * Every other arg is excluded because a digest that discusses MRV is not an
+ * Every other arg is exempt because a digest that discusses MRV is not an
  * action targeting MRV. An allowlist fails open — an arg nobody classified is
  * silently un-scanned — so `org-action-gate.test.ts` closes it.
  *
