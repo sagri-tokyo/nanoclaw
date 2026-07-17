@@ -1,10 +1,16 @@
+import { readFileSync } from 'fs';
+
 import { describe, it, expect } from 'vitest';
 
 import {
   classifyOrgAction,
+  GITHUB_REPO_ALLOWLIST,
   isNotionPageId,
   renderApprovalSummary,
+  STAKES_HINT_VALUES,
   stringContainsRedLine,
+  TARGET_NAMING_ARGS,
+  type OrgActionName,
   type OrgActionRecord,
 } from './org-action-gate.js';
 
@@ -35,6 +41,292 @@ describe('stringContainsRedLine — exported red-line predicate', () => {
   });
 });
 
+// Keyed by OrgActionName so the type demands every action: a new action is a
+// compile error until its args are listed here. The tests below are what force
+// them to be classified. A flat list would take a new action silently, so keep
+// the Record.
+const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
+  'notion.append_progress': ['text'],
+  'notion.write_property': ['property', 'value'],
+  'notion.create_task': ['title'],
+  'github.file_issue': ['title', 'body'],
+  'github.open_draft_pr': ['head', 'base', 'title', 'body'],
+  'slack.post_digest': ['text'],
+  'doc.draft': ['title'],
+};
+
+// The other half of the partition: isRedLine does not scan these, so they never
+// refuse. Named for the scan, not for what they hold, because that varies per
+// action and per Notion property. Several are still read for a hold elsewhere
+// in classifyOrgAction; refuse-exempt is the only claim made here, and the test
+// below checks it. TARGET_NAMING_ARGS has why `value` is here and `property`,
+// its neighbour on the same action, is not.
+const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
+  'text',
+  'title',
+  'body',
+  'value',
+]);
+
+// Every property name in the live "Sagri AI Tasks" DB, the only schema
+// notion.write_property is aimed at today. Mirrors the table in the sagri-ai
+// CLAUDE.md; add a row here when one is added there.
+const TASKS_DB_PROPERTIES: readonly string[] = [
+  'Title',
+  'Status',
+  'Type',
+  'Priority',
+  'Source',
+  'Assigned To',
+  'Started Date',
+  'Completed Date',
+  'Results Summary',
+  'Job ID',
+  'Experiment ID',
+  'Cost Estimate USD',
+  'Failure Reason',
+  'Customer Artifact',
+  'Last Successful Poll At',
+  'Last Poll Error',
+];
+
+// A target_ref that clears each action's own shape/allowlist guard, so a refuse
+// in these cases can only have come from the red line.
+const VALID_TARGET: Record<OrgActionName, string> = {
+  'notion.append_progress': HEX32,
+  'notion.write_property': HEX32,
+  'notion.create_task': HEX32,
+  'github.file_issue': GITHUB_REPO_ALLOWLIST,
+  'github.open_draft_pr': GITHUB_REPO_ALLOWLIST,
+  'slack.post_digest': 'C0AAA1111',
+  'doc.draft': HEX32,
+};
+
+describe('red-line arg classification — every consumed arg is classified', () => {
+  const allConsumed = [...new Set(Object.values(CONSUMED_ARGS).flat())].sort();
+
+  it.each(allConsumed)(
+    '%s is either scanned by isRedLine or exempt from it, not both',
+    (arg) => {
+      const isScanned = TARGET_NAMING_ARGS.has(arg);
+      const isExempt = REFUSE_EXEMPT_ARGS.has(arg);
+      expect(
+        isScanned !== isExempt,
+        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or REFUSE_EXEMPT_ARGS`,
+      ).toBe(true);
+    },
+  );
+
+  it('classifies no arg the write client does not consume', () => {
+    const classified = [
+      ...new Set([...TARGET_NAMING_ARGS, ...REFUSE_EXEMPT_ARGS]),
+    ].sort();
+    expect(classified).toStrictEqual(allConsumed);
+  });
+
+  // REFUSE_EXEMPT_ARGS names a behavior, so check the behavior. The two tests
+  // above only cross-check two hand-written lists against each other, which is
+  // what let three earlier names for this set ship: each was true of the members
+  // someone looked at, false of one they did not, and passed membership anyway.
+  //
+  // Every (action, arg) pair the write client actually consumes, not one action
+  // carrying the others as inert extras. The claim is that no exempt arg refuses
+  // on any arm, so a refuse added to one arm has to fail here. Widening
+  // isRedLine back over all canonical_args fails all of them.
+  const exemptPairs = Object.entries(CONSUMED_ARGS).flatMap(([action, args]) =>
+    args
+      .filter((arg) => REFUSE_EXEMPT_ARGS.has(arg))
+      .map((arg) => [action as OrgActionName, arg] as const),
+  );
+
+  it.each(exemptPairs)(
+    'a red-line marker in %s %s does not refuse',
+    (action, arg) => {
+      const target = VALID_TARGET[action];
+      expect(
+        classifyOrgAction(
+          record({
+            action,
+            target_ref: target,
+            origin_channel: `slack:${target}`,
+            canonical_args: { [arg]: 'mrv' },
+          }),
+        ),
+      ).not.toBe('refuse');
+    },
+  );
+
+  // The drift guard. CONSUMED_ARGS is a hand-written mirror of the write
+  // client and rots the moment someone adds an arg. Deriving the real set from
+  // the client source is what makes the classification above binding: a new
+  // read of 'foo' in executeOrgAction fails HERE until foo is listed and
+  // classified. The validator name is unpinned on purpose — a read through a
+  // new helper must still count.
+  const READS_ARG = /\w+\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
+  const CLIENT_SOURCE = readFileSync(
+    new URL('./org-action-clients.ts', import.meta.url),
+    'utf-8',
+  );
+
+  it('mirrors the args executeOrgAction actually reads from canonical_args', () => {
+    const fromSource = [
+      ...new Set([...CLIENT_SOURCE.matchAll(READS_ARG)].map((m) => m[1])),
+    ].sort();
+    expect(fromSource).toStrictEqual(allConsumed);
+  });
+
+  // The fail-closed half, and the reason the guard above is worth anything. A
+  // regex sees one call shape: a double-quoted key, a `const args =
+  // request.canonical_args` alias, or a computed key each contribute nothing
+  // to the derived set, leaving the mirror in agreement and the arg unscanned.
+  // Account for every textual occurrence instead — one that is neither the
+  // request type nor a recognised read fails here.
+  it('accounts for every canonical_args occurrence in the write client', () => {
+    const total = [...CLIENT_SOURCE.matchAll(/canonical_args/g)].length;
+    const reads = [...CLIENT_SOURCE.matchAll(READS_ARG)].length;
+    const typeDecl = [
+      ...CLIENT_SOURCE.matchAll(/canonical_args: Record<string, unknown>/g),
+    ].length;
+    expect(
+      reads + typeDecl,
+      'unaccounted canonical_args occurrence in org-action-clients.ts: a read shape READS_ARG does not recognise, a reformatted request type, or a comment using the literal token',
+    ).toBe(total);
+  });
+});
+
+describe('classifyOrgAction — red line scopes to the target, not content', () => {
+  // ADR-0006: `property` names the Notion field to mutate, so it refuses, while
+  // `value` on the same action is content and does not. The pair below is the
+  // whole distinction, and both halves have to be asserted: the membership
+  // tests above partition cleanly either way, so moving `property` between the
+  // sets changes no test that does not name the verdict.
+  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
+    'refuses a notion.write_property whose property names %s',
+    (marker) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'notion.write_property',
+            target_ref: HEX32,
+            canonical_args: { property: `${marker} Score`, value: 'clean' },
+          }),
+        ),
+      ).toBe('refuse');
+    },
+  );
+
+  it('executes a notion.write_property whose value names a red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'notion.write_property',
+          target_ref: HEX32,
+          canonical_args: {
+            property: 'Results Summary',
+            value: 'MRV rollout complete for 自治体 partners',
+          },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  // Scanning `property` refuses no legitimate write only while no real property
+  // name carries a marker. That is a fact about a live Notion schema, not about
+  // this file, and this company's vocabulary is the marker list: an "MRV Score"
+  // or "Carbon Credits" field would make write_property refuse, and the operator
+  // would see a bare refuse with no hint that a substring in the field name did
+  // it. Fail here first.
+  it.each(TASKS_DB_PROPERTIES)(
+    'the live Tasks DB property %s does not trip the red line',
+    (property) => {
+      expect(stringContainsRedLine(property)).toBe(false);
+    },
+  );
+
+  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
+    'refuses a PR base branch naming %s (a genuine red-line target)',
+    (marker) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'github.open_draft_pr',
+            target_ref: 'sagri-tokyo/sagri-ai',
+            canonical_args: {
+              head: 'feature/x',
+              base: `${marker}-release`,
+              title: 'ok',
+              body: 'ok',
+            },
+          }),
+        ),
+      ).toBe('refuse');
+    },
+  );
+
+  it('refuses a PR head branch naming a red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: 'prod-hotfix',
+            base: 'main',
+            title: 'ok',
+            body: 'ok',
+          },
+        }),
+      ),
+    ).toBe('refuse');
+  });
+
+  it('refuses base: production — substring match is load-bearing on a branch', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: 'feature/x',
+            base: 'production',
+            title: 'ok',
+            body: 'ok',
+          },
+        }),
+      ),
+    ).toBe('refuse');
+  });
+
+  it('executes a github issue whose body discusses a red-line topic', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            title: 'Carbon model drift',
+            body: 'The MRV pipeline regressed against 自治体 baselines.',
+          },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  it('executes a meeting summary containing "product" — prod matches as a substring by design', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'notion.append_progress',
+          target_ref: HEX32,
+          canonical_args: {
+            text: 'Discussed the product roadmap and a reproducible build.',
+          },
+        }),
+      ),
+    ).toBe('execute');
+  });
+});
+
 function record(overrides: Partial<OrgActionRecord> = {}): OrgActionRecord {
   return {
     action: overrides.action ?? 'notion.append_progress',
@@ -48,29 +340,44 @@ function record(overrides: Partial<OrgActionRecord> = {}): OrgActionRecord {
 }
 
 describe('classifyOrgAction — red lines (refuse host-side)', () => {
-  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
-    'refuses a target_ref containing %s regardless of stakes_hint',
+  // The target must be shape-VALID and dirty, or the id/allowlist check
+  // refuses first and the case passes with isRedLine deleted. A notion target
+  // cannot do this: every marker carries a non-hex letter, so a marker-bearing
+  // id never survives NOTION_PAGE_ID. A slack channel id can.
+  it.each(['mrv', 'carbon', 'jichitai', 'prod'])(
+    'refuses a shape-valid slack target_ref containing %s at every stakes_hint',
     (marker) => {
-      expect(
-        classifyOrgAction(
-          record({
-            action: 'notion.append_progress',
-            target_ref: `${marker}-${HEX32}`,
-            stakes_hint: 'safe',
-          }),
-        ),
-      ).toBe('refuse');
+      for (const stakes_hint of STAKES_HINT_VALUES) {
+        expect(
+          classifyOrgAction(
+            record({
+              action: 'slack.post_digest',
+              target_ref: `C${marker}1234`,
+              origin_channel: `slack:C${marker}1234`,
+              canonical_args: { text: 'clean' },
+              stakes_hint,
+            }),
+          ),
+        ).toBe('refuse');
+      }
     },
   );
 
   it('matches the romaji red line case-insensitively', () => {
-    expect(classifyOrgAction(record({ target_ref: `PROD-${HEX32}` }))).toBe(
-      'refuse',
-    );
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'slack.post_digest',
+          target_ref: 'CPROD1234',
+          origin_channel: 'slack:CPROD1234',
+          canonical_args: { text: 'clean' },
+        }),
+      ),
+    ).toBe('refuse');
   });
 
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
-    'refuses when a canonical_args string value contains %s even on a clean target',
+    'holds a same-channel digest whose text mentions %s',
     (marker) => {
       expect(
         classifyOrgAction(
@@ -81,11 +388,44 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
             canonical_args: { text: `quarterly ${marker} rollup` },
           }),
         ),
-      ).toBe('refuse');
+      ).toBe('hold');
     },
   );
 
-  it('refuses a notion body field that names a red line on a clean target', () => {
+  it('executes a digest whose text names no red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'slack.post_digest',
+          target_ref: 'C0AAA1111',
+          origin_channel: 'slack:C0AAA1111',
+          canonical_args: { text: 'quarterly soil model rollup' },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  // The digest arm is the one place a substring false positive still bites: a
+  // digest saying "product" or "reproducible" holds for a human who will find
+  // nothing to approve. Held rather than dropped, so it is visible and cheap;
+  // pinned here so anyone tightening `prod` sees what the noise costs.
+  it.each(['product roadmap', 'a reproducible build'])(
+    'holds a same-channel digest on the substring false positive %s',
+    (text) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'slack.post_digest',
+            target_ref: 'C0AAA1111',
+            origin_channel: 'slack:C0AAA1111',
+            canonical_args: { text: `quarterly ${text} rollup` },
+          }),
+        ),
+      ).toBe('hold');
+    },
+  );
+
+  it('executes a notion body that names a red line on a clean target', () => {
     expect(
       classifyOrgAction(
         record({
@@ -94,7 +434,7 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
           canonical_args: { text: '自治体 onboarding notes' },
         }),
       ),
-    ).toBe('refuse');
+    ).toBe('execute');
   });
 });
 

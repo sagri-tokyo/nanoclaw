@@ -112,15 +112,44 @@ export function usesNotionTarget(action: string): boolean {
   return action.startsWith('notion.') || action === 'doc.draft';
 }
 
+/**
+ * The closed set of canonical_args isRedLine scans alongside target_ref
+ * (ADR-0006). They name a target rather than carry agent-authored content:
+ * `base: production` names a genuine red-line target, and `property` names the
+ * Notion field to mutate.
+ *
+ * `property` is target-naming and `value` is content even though they arrive on
+ * the same action. `value` is prose the agent can rephrase past a marker;
+ * `property` is interpolated as an object key into `properties: { [property]:
+ * ... }`, so it must string-match a live Notion schema name or the write 400s.
+ *
+ * The scan refuses a write to a red-line-named field on any page the token can
+ * reach, which is every 32-hex id, not just the Tasks DB. No Tasks DB field is
+ * one today, and `org-action-gate.test.ts` pins that; a schema that adds an
+ * "MRV Score" refuses there before an operator meets it as a bare refuse.
+ *
+ * Every other arg is exempt because a digest that discusses MRV is not an
+ * action targeting MRV. An allowlist fails open — an arg nobody classified is
+ * silently un-scanned — so `org-action-gate.test.ts` closes it.
+ *
+ * Consequence: `property` is notion's only red-line arm here. Every marker
+ * carries a non-hex letter, so none can appear in a target_ref that also passes
+ * NOTION_PAGE_ID, which leaves append_progress, create_task and doc.draft with
+ * no arm at all. Their coverage is `target_query` in org-action-handler.ts, and
+ * only when the host resolves a name; an agent holding a raw page id has none.
+ * Closing that needs an allowlist of writable targets, not a content scan
+ * (sagri-ai#547).
+ */
+export const TARGET_NAMING_ARGS: ReadonlySet<string> = new Set([
+  'head',
+  'base',
+  'property',
+]);
+
 function isRedLine(record: OrgActionRecord): boolean {
   if (stringContainsRedLine(record.target_ref)) return true;
-  // A red-line marker in a body/value field (e.g. a digest body about MRV or a
-  // Notion property value naming a jichitai) must refuse just as a red-line
-  // target does — otherwise the marker hides one level below target_ref. The
-  // scan is one level deep on purpose: every exec-class arg the write client
-  // consumes is a top-level string (`requireString`/`requireBoundedString`), so
-  // a nested object value can never reach execution and need not be scanned.
-  for (const value of Object.values(record.canonical_args)) {
+  for (const arg of TARGET_NAMING_ARGS) {
+    const value = record.canonical_args[arg];
     if (typeof value === 'string' && stringContainsRedLine(value)) return true;
   }
   return false;
@@ -164,6 +193,11 @@ export function classifyOrgAction(record: OrgActionRecord): OrgActionVerdict {
     if (record.target_ref !== originChannelId(record.origin_channel)) {
       return 'hold';
     }
+    // The one content hold. post_digest is the only action that broadcasts
+    // agent-authored prose to a room as a standalone artifact, so a red-line
+    // mention gets a human before it lands.
+    const text = record.canonical_args.text;
+    if (typeof text === 'string' && stringContainsRedLine(text)) return 'hold';
     return 'execute';
   }
 
