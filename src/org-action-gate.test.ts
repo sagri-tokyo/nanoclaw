@@ -40,10 +40,10 @@ describe('stringContainsRedLine — exported red-line predicate', () => {
   });
 });
 
-// Keyed by OrgActionName so the type requires every action: an eighth action
-// is a compile error until someone lists its args and classifies them below.
-// That exhaustiveness is the guard — a flat list would accept the new action
-// silently. Do not flatten this.
+// Keyed by OrgActionName so the type demands every action: a new action is a
+// compile error until its args are listed here. The tests below are what force
+// them to be classified. A flat list would take a new action silently, so keep
+// the Record.
 const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'notion.append_progress': ['text'],
   'notion.write_property': ['property', 'value'],
@@ -54,10 +54,13 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'doc.draft': ['title'],
 };
 
-// Not red-line scanned. `text`, `title`, `body` and `value` are agent-authored
-// prose about a topic: a digest that mentions MRV is not an action targeting
-// MRV. `property` is not prose — it names the Notion field being written, and
-// sits here only because sagri-ai#548 owns that call. See TARGET_NAMING_ARGS.
+// Not red-line scanned. `text`, `title` and `body` are agent-authored prose
+// about a topic: a digest that mentions MRV is not an action targeting MRV.
+// `value` and `property` are not prose — they are the Notion field being
+// written and the value going into it, and classifyOrgAction branches on both
+// for the lifecycle-flip hold. They sit here because the red line is about
+// naming a target, which `value` never does and `property` arguably does;
+// sagri-ai#548 owns the `property` call. See TARGET_NAMING_ARGS.
 const CONTENT_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
@@ -114,15 +117,14 @@ describe('red-line arg classification — every consumed arg is classified', () 
   // Account for every textual occurrence instead — one that is neither the
   // request type nor a recognised read fails here.
   it('accounts for every canonical_args occurrence in the write client', () => {
-    const source = CLIENT_SOURCE;
-    const total = [...source.matchAll(/canonical_args/g)].length;
-    const reads = [...source.matchAll(READS_ARG)].length;
+    const total = [...CLIENT_SOURCE.matchAll(/canonical_args/g)].length;
+    const reads = [...CLIENT_SOURCE.matchAll(READS_ARG)].length;
     const typeDecl = [
-      ...source.matchAll(/canonical_args: Record<string, unknown>/g),
+      ...CLIENT_SOURCE.matchAll(/canonical_args: Record<string, unknown>/g),
     ].length;
     expect(
       reads + typeDecl,
-      'unaccounted canonical_args occurrence in org-action-clients.ts: a read shape readsArg does not recognise, a reformatted request type, or a comment using the literal token',
+      'unaccounted canonical_args occurrence in org-action-clients.ts: a read shape READS_ARG does not recognise, a reformatted request type, or a comment using the literal token',
     ).toBe(total);
   });
 });
@@ -197,7 +199,7 @@ describe('classifyOrgAction — red line scopes to the target, not content', () 
     ).toBe('execute');
   });
 
-  it('executes a meeting summary containing "product"', () => {
+  it('executes a meeting summary containing "product" — prod matches as a substring by design', () => {
     expect(
       classifyOrgAction(
         record({
