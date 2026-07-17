@@ -260,10 +260,9 @@ function optionalString(
 
 // A non-id is a caller mistake, not a lookup that might fail: sagri-ai#403 was
 // months of opaque 4xx from callers passing the env var's *name*, not its value.
-// Returns the canonical id rather than what the caller wrote, so dash placement
-// cannot reach Notion and 404 just as opaquely. `parseNotionInput` canonicalises
-// to the same shape. `isNotionPageId` is a bare 32-hex check, not a page-vs-
-// database one: Notion gives every object kind an id from one space.
+// Returns the canonical id, not what the caller wrote, so dash placement cannot
+// reach Notion and 404 just as opaquely. `isNotionPageId` is a bare 32-hex
+// check, not a page-vs-database one: Notion ids share one space across kinds.
 function requireNotionId(
   params: Record<string, unknown>,
   name: string,
