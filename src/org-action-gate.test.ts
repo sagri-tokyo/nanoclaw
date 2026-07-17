@@ -123,7 +123,10 @@ describe('red-line arg classification — every consumed arg is classified', () 
     const typeDecl = [
       ...source.matchAll(/canonical_args: Record<string, unknown>/g),
     ].length;
-    expect(reads + typeDecl).toBe(total);
+    expect(
+      reads + typeDecl,
+      'unaccounted canonical_args occurrence in org-action-clients.ts: a read shape readsArg does not recognise, a reformatted request type, or a comment using the literal token',
+    ).toBe(total);
   });
 });
 
