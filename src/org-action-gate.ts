@@ -113,29 +113,34 @@ export function usesNotionTarget(action: string): boolean {
 }
 
 /**
- * The closed set of canonical_args isRedLine scans alongside target_ref. They
- * name a target rather than carry agent-authored content: `base: production` on
- * github.open_draft_pr is a genuine red-line target and must refuse.
+ * The closed set of canonical_args isRedLine scans alongside target_ref
+ * (ADR-0006). They name a target rather than carry agent-authored content:
+ * `base: production` names a genuine red-line target, and `property` names the
+ * Notion field to mutate.
+ *
+ * `property` is target-naming and `value` is content even though they arrive on
+ * the same action. `value` is prose the agent can rephrase past a marker;
+ * `property` is interpolated as an object key into `properties: { [property]:
+ * ... }`, so it must string-match a live Notion schema name or the write 400s.
+ * No Tasks DB property name carries a marker, so scanning it refuses no
+ * legitimate write.
  *
  * Every other arg is exempt because a digest that discusses MRV is not an
  * action targeting MRV. An allowlist fails open — an arg nobody classified is
  * silently un-scanned — so `org-action-gate.test.ts` closes it.
  *
- * `notion.write_property`'s `property` does name a target field, so it has a
- * claim to belong here, and is left out pending sagri-ai#548. Accepted risk: a
- * write to a red-line-named field (`property: "MRV Score"`) executes rather
- * than refusing.
- *
- * Consequence: notion has no red-line arm here at all. Every marker carries a
- * non-hex letter, so none can appear in a target_ref that also passes
- * NOTION_PAGE_ID. Notion's coverage is `target_query` in org-action-handler.ts,
- * and only when the host resolves a name; an agent holding a raw page id has
- * none. Closing that needs an allowlist of writable targets, not a content scan
+ * Consequence: `property` is notion's only red-line arm here. Every marker
+ * carries a non-hex letter, so none can appear in a target_ref that also passes
+ * NOTION_PAGE_ID, which leaves append_progress, create_task and doc.draft with
+ * no arm at all. Their coverage is `target_query` in org-action-handler.ts, and
+ * only when the host resolves a name; an agent holding a raw page id has none.
+ * Closing that needs an allowlist of writable targets, not a content scan
  * (sagri-ai#547).
  */
 export const TARGET_NAMING_ARGS: ReadonlySet<string> = new Set([
   'head',
   'base',
+  'property',
 ]);
 
 function isRedLine(record: OrgActionRecord): boolean {

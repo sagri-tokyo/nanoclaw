@@ -59,13 +59,13 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
 // refuse. Named for the scan, not for what they hold, because that varies per
 // action and per Notion property. Several are still read for a hold elsewhere
 // in classifyOrgAction; refuse-exempt is the only claim made here, and the test
-// below checks it. TARGET_NAMING_ARGS has the why for `property`.
+// below checks it. TARGET_NAMING_ARGS has why `value` is here and `property`,
+// its neighbour on the same action, is not.
 const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
   'body',
   'value',
-  'property',
 ]);
 
 // A target_ref that clears each action's own shape/allowlist guard, so a refuse
@@ -173,6 +173,53 @@ describe('red-line arg classification — every consumed arg is classified', () 
 });
 
 describe('classifyOrgAction — red line scopes to the target, not content', () => {
+  // ADR-0006: `property` names the Notion field to mutate, so it refuses, while
+  // `value` on the same action is content and does not. The pair below is the
+  // whole distinction, and both halves have to be asserted: the membership
+  // tests above partition cleanly either way, so moving `property` between the
+  // sets changes no test that does not name the verdict.
+  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
+    'refuses a notion.write_property whose property names %s',
+    (marker) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'notion.write_property',
+            target_ref: HEX32,
+            canonical_args: { property: `${marker} Score`, value: 'clean' },
+          }),
+        ),
+      ).toBe('refuse');
+    },
+  );
+
+  it('executes a notion.write_property whose value names a red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'notion.write_property',
+          target_ref: HEX32,
+          canonical_args: {
+            property: 'Results Summary',
+            value: 'MRV rollout complete for 自治体 partners',
+          },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  it('still holds a Status lifecycle flip, which the property scan must not eat', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'notion.write_property',
+          target_ref: HEX32,
+          canonical_args: { property: 'Status', value: 'Ready for AI' },
+        }),
+      ),
+    ).toBe('hold');
+  });
+
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
     'refuses a PR base branch naming %s (a genuine red-line target)',
     (marker) => {
