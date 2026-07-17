@@ -118,18 +118,20 @@ export function usesNotionTarget(action: string): boolean {
  * target_ref: `base: production` on github.open_draft_pr is a genuine
  * red-line target and must refuse.
  *
- * Content args are excluded because a digest that discusses MRV is not an
+ * Every other arg is excluded because a digest that discusses MRV is not an
  * action targeting MRV. An allowlist fails open — an arg nobody classified is
- * silently un-scanned — so `org-action-gate.test.ts` derives every arg the
- * write client reads and asserts each is classified target-naming or content.
+ * silently un-scanned — so `org-action-gate.test.ts` closes it.
+ *
+ * `notion.write_property`'s `property` does name a target field, so it has a
+ * claim to belong here, and is left out pending sagri-ai#548. Accepted risk: a
+ * write to a red-line-named field (`property: "MRV Score"`) executes rather
+ * than refusing.
  *
  * Consequence: notion has no red-line arm here at all. Every marker carries a
  * non-hex letter, so none can appear in a target_ref that also passes
- * NOTION_PAGE_ID, and `notion.write_property`'s `property` names a target field
- * yet stays unscanned pending sagri-ai#548 (so `property: "MRV Score"`
- * executes). Notion's coverage is `target_query` in org-action-handler.ts, and
- * only when the host resolves a name; an agent holding a raw page id has none.
- * Closing that needs an allowlist of writable targets, not a content scan
+ * NOTION_PAGE_ID. Notion's coverage is `target_query` in org-action-handler.ts,
+ * and only when the host resolves a name; an agent holding a raw page id has
+ * none. Closing that needs an allowlist of writable targets, not a content scan
  * (sagri-ai#547).
  */
 export const TARGET_NAMING_ARGS: ReadonlySet<string> = new Set([

@@ -54,14 +54,11 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'doc.draft': ['title'],
 };
 
-// Not red-line scanned. `text`, `title` and `body` are agent-authored prose
-// about a topic: a digest that mentions MRV is not an action targeting MRV.
-// `value` and `property` are not prose — they are the Notion field being
-// written and the value going into it, and classifyOrgAction branches on both
-// for the lifecycle-flip hold. They sit here because the red line is about
-// naming a target, which `value` never does and `property` arguably does;
-// sagri-ai#548 owns the `property` call. See TARGET_NAMING_ARGS.
-const CONTENT_ARGS: ReadonlySet<string> = new Set([
+// The other half of the partition: consumed but not red-line scanned. Named
+// for what the gate does to them, not for what they hold — `property` names a
+// target field and is here anyway (TARGET_NAMING_ARGS has the why), and `value`
+// is prose or a select-option token depending on the property.
+const UNSCANNED_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
   'body',
@@ -73,20 +70,20 @@ describe('red-line arg classification — every consumed arg is classified', () 
   const allConsumed = [...new Set(Object.values(CONSUMED_ARGS).flat())].sort();
 
   it.each(allConsumed)(
-    '%s is classified as exactly one of target-naming or content',
+    '%s is classified as exactly one of target-naming or unscanned',
     (arg) => {
       const isTarget = TARGET_NAMING_ARGS.has(arg);
-      const isContent = CONTENT_ARGS.has(arg);
+      const isUnscanned = UNSCANNED_ARGS.has(arg);
       expect(
-        isTarget !== isContent,
-        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or CONTENT_ARGS`,
+        isTarget !== isUnscanned,
+        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or UNSCANNED_ARGS`,
       ).toBe(true);
     },
   );
 
   it('classifies no arg the write client does not consume', () => {
     const classified = [
-      ...new Set([...TARGET_NAMING_ARGS, ...CONTENT_ARGS]),
+      ...new Set([...TARGET_NAMING_ARGS, ...UNSCANNED_ARGS]),
     ].sort();
     expect(classified).toStrictEqual(allConsumed);
   });
@@ -291,6 +288,26 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
       ),
     ).toBe('execute');
   });
+
+  // The digest arm is the one place a substring false positive still bites: a
+  // digest saying "product" or "reproducible" holds for a human who will find
+  // nothing to approve. Held rather than dropped, so it is visible and cheap;
+  // pinned here so anyone tightening `prod` sees what the noise costs.
+  it.each(['product roadmap', 'a reproducible build'])(
+    'holds a same-channel digest on the substring false positive %s',
+    (text) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'slack.post_digest',
+            target_ref: 'C0AAA1111',
+            origin_channel: 'slack:C0AAA1111',
+            canonical_args: { text: `quarterly ${text} rollup` },
+          }),
+        ),
+      ).toBe('hold');
+    },
+  );
 
   it('executes a notion body that names a red line on a clean target', () => {
     expect(
