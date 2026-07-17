@@ -118,10 +118,15 @@ export function usesNotionTarget(action: string): boolean {
  * target_ref: `base: production` on github.open_draft_pr is a genuine
  * red-line target and must refuse.
  *
- * Content args (text, title, body, value, property) are deliberately NOT
- * scanned. A digest that discusses MRV is not an action targeting MRV, and
- * scanning them refused every meeting summary containing "product" (the `prod`
- * marker matches as a substring, by design, for branch names).
+ * An allowlist fails open — an arg nobody classified is silently un-scanned.
+ * `org-action-gate.test.ts` closes that: it derives every arg the write client
+ * reads and asserts each is classified target-naming or content, so adding an
+ * arg without classifying it fails CI.
+ *
+ * `notion.write_property`'s `property` names a target field, not prose, so it
+ * has a claim to belong here. It is deliberately left unscanned pending
+ * sagri-ai#548. Accepted risk: a write to a red-line-named field (`property:
+ * "MRV Score"`) executes rather than refusing.
  *
  * Consequence worth knowing: this leaves notion with no red-line arm at all.
  * Every marker carries a non-hex letter, so a marker can never appear in a
@@ -129,10 +134,6 @@ export function usesNotionTarget(action: string): boolean {
  * `target_query` in org-action-handler.ts, and only when the host resolves a
  * name; an agent holding a raw page id has none. Closing that needs an
  * allowlist of writable targets, not a content scan (sagri-ai#547).
- *
- * An allowlist fails open, so `org-action-gate.test.ts` enumerates every arg
- * the write client consumes and asserts each is classified target-naming or
- * content. Adding an arg without classifying it fails CI.
  */
 export const TARGET_NAMING_ARGS: ReadonlySet<string> = new Set([
   'head',

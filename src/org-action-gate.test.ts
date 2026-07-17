@@ -40,15 +40,10 @@ describe('stringContainsRedLine — exported red-line predicate', () => {
   });
 });
 
-/**
- * THE safety deliverable for the target-scoped red line.
- *
- * The red line scans `target_ref` plus a closed allowlist of target-naming
- * args. An allowlist fails OPEN by construction: an arg nobody classified is
- * silently un-scanned. These tests are what closes that hole — every arg the
- * write client consumes must be named here AND classified, so adding an arg
- * without deciding whether it names a target breaks CI.
- */
+// Keyed by OrgActionName so the type requires every action: an eighth action
+// is a compile error until someone lists its args and classifies them below.
+// That exhaustiveness is the guard — a flat list would accept the new action
+// silently. Do not flatten this.
 const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'notion.append_progress': ['text'],
   'notion.write_property': ['property', 'value'],
@@ -59,8 +54,10 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
   'doc.draft': ['title'],
 };
 
-// Agent-authored prose ABOUT a topic. Deliberately not red-line scanned: a
-// digest that mentions MRV is not an action targeting MRV.
+// Not red-line scanned. `text`, `title`, `body` and `value` are agent-authored
+// prose about a topic: a digest that mentions MRV is not an action targeting
+// MRV. `property` is not prose — it names the Notion field being written, and
+// sits here only because sagri-ai#548 owns that call. See TARGET_NAMING_ARGS.
 const CONTENT_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
@@ -92,35 +89,34 @@ describe('red-line arg classification — every consumed arg is classified', () 
   });
 
   // The drift guard. CONSUMED_ARGS is a hand-written mirror of the write
-  // client, so it can rot the moment someone adds an arg. Deriving the real
-  // set from the client source is what makes the classification above binding
-  // rather than aspirational: a new read of 'foo' in executeOrgAction fails
-  // HERE until foo is listed and classified.
-  //
-  // Any validator name matches: pinning them to a `require(String|...)`
-  // alternation meant a read via a new helper contributed nothing to the
-  // derived set and passed silently.
-  const readsArg = () => /\w+\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
-  const clientSource = () =>
-    readFileSync(new URL('./org-action-clients.ts', import.meta.url), 'utf-8');
+  // client and rots the moment someone adds an arg. Deriving the real set from
+  // the client source is what makes the classification above binding: a new
+  // read of 'foo' in executeOrgAction fails HERE until foo is listed and
+  // classified. The validator name is unpinned on purpose — a read through a
+  // new helper must still count.
+  const READS_ARG = /\w+\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
+  const CLIENT_SOURCE = readFileSync(
+    new URL('./org-action-clients.ts', import.meta.url),
+    'utf-8',
+  );
 
   it('mirrors the args executeOrgAction actually reads from canonical_args', () => {
     const fromSource = [
-      ...new Set([...clientSource().matchAll(readsArg())].map((m) => m[1])),
+      ...new Set([...CLIENT_SOURCE.matchAll(READS_ARG)].map((m) => m[1])),
     ].sort();
     expect(fromSource).toStrictEqual(allConsumed);
   });
 
-  // The fail-closed half, and the reason the guard above is worth anything.
-  // A regex sees one call shape. A double-quoted key, a
-  // `const args = request.canonical_args` alias, or a computed key all
-  // contribute nothing to the derived set, so the mirror still agrees and the
-  // arg ships unscanned. Account for every textual occurrence instead: one
-  // that is neither the request type nor a recognised read fails here.
+  // The fail-closed half, and the reason the guard above is worth anything. A
+  // regex sees one call shape: a double-quoted key, a `const args =
+  // request.canonical_args` alias, or a computed key each contribute nothing
+  // to the derived set, leaving the mirror in agreement and the arg unscanned.
+  // Account for every textual occurrence instead — one that is neither the
+  // request type nor a recognised read fails here.
   it('accounts for every canonical_args occurrence in the write client', () => {
-    const source = clientSource();
+    const source = CLIENT_SOURCE;
     const total = [...source.matchAll(/canonical_args/g)].length;
-    const reads = [...source.matchAll(readsArg())].length;
+    const reads = [...source.matchAll(READS_ARG)].length;
     const typeDecl = [
       ...source.matchAll(/canonical_args: Record<string, unknown>/g),
     ].length;
@@ -201,7 +197,7 @@ describe('classifyOrgAction — red line scopes to the target, not content', () 
     ).toBe('execute');
   });
 
-  it('executes a meeting summary containing "product" — the live silent-drop bug', () => {
+  it('executes a meeting summary containing "product"', () => {
     expect(
       classifyOrgAction(
         record({
@@ -294,7 +290,7 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
     ).toBe('execute');
   });
 
-  it('no longer refuses a notion body that names a red line on a clean target', () => {
+  it('executes a notion body that names a red line on a clean target', () => {
     expect(
       classifyOrgAction(
         record({
