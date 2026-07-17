@@ -122,8 +122,11 @@ export function usesNotionTarget(action: string): boolean {
  * the same action. `value` is prose the agent can rephrase past a marker;
  * `property` is interpolated as an object key into `properties: { [property]:
  * ... }`, so it must string-match a live Notion schema name or the write 400s.
- * No Tasks DB property name carries a marker, so scanning it refuses no
- * legitimate write.
+ *
+ * The scan refuses a write to a red-line-named field on any page the token can
+ * reach, which is every 32-hex id, not just the Tasks DB. No Tasks DB field is
+ * one today, and `org-action-gate.test.ts` pins that; a schema that adds an
+ * "MRV Score" refuses there before an operator meets it as a bare refuse.
  *
  * Every other arg is exempt because a digest that discusses MRV is not an
  * action targeting MRV. An allowlist fails open — an arg nobody classified is

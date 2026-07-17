@@ -68,6 +68,28 @@ const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
   'value',
 ]);
 
+// Every property name in the live "Sagri AI Tasks" DB, the only schema
+// notion.write_property is aimed at today. Mirrors the table in the sagri-ai
+// CLAUDE.md; add a row here when one is added there.
+const TASKS_DB_PROPERTIES: readonly string[] = [
+  'Title',
+  'Status',
+  'Type',
+  'Priority',
+  'Source',
+  'Assigned To',
+  'Started Date',
+  'Completed Date',
+  'Results Summary',
+  'Job ID',
+  'Experiment ID',
+  'Cost Estimate USD',
+  'Failure Reason',
+  'Customer Artifact',
+  'Last Successful Poll At',
+  'Last Poll Error',
+];
+
 // A target_ref that clears each action's own shape/allowlist guard, so a refuse
 // in these cases can only have come from the red line.
 const VALID_TARGET: Record<OrgActionName, string> = {
@@ -208,17 +230,18 @@ describe('classifyOrgAction — red line scopes to the target, not content', () 
     ).toBe('execute');
   });
 
-  it('still holds a Status lifecycle flip, which the property scan must not eat', () => {
-    expect(
-      classifyOrgAction(
-        record({
-          action: 'notion.write_property',
-          target_ref: HEX32,
-          canonical_args: { property: 'Status', value: 'Ready for AI' },
-        }),
-      ),
-    ).toBe('hold');
-  });
+  // Scanning `property` refuses no legitimate write only while no real property
+  // name carries a marker. That is a fact about a live Notion schema, not about
+  // this file, and this company's vocabulary is the marker list: an "MRV Score"
+  // or "Carbon Credits" field would make write_property refuse, and the operator
+  // would see a bare refuse with no hint that a substring in the field name did
+  // it. Fail here first.
+  it.each(TASKS_DB_PROPERTIES)(
+    'the live Tasks DB property %s does not trip the red line',
+    (property) => {
+      expect(stringContainsRedLine(property)).toBe(false);
+    },
+  );
 
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
     'refuses a PR base branch naming %s (a genuine red-line target)',
