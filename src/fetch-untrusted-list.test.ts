@@ -150,6 +150,10 @@ async function expectMalformedSearch(
   }
 }
 
+// Bare 32-hex, the spelling the prod env var uses. Not a real database id.
+const DATABASE_ID = 'deadbeefdeadbeefdeadbeefdeadbeef';
+const DATABASE_ID_DASHED = 'deadbeef-dead-beef-dead-beefdeadbeef';
+
 const READER_RESPONSE = {
   model: 'claude-haiku-4-5',
   content: [
@@ -1031,7 +1035,7 @@ describe('fetch-untrusted-list', () => {
         {
           source_type: 'notion_database_query',
           params: {
-            database_id: 'abc',
+            database_id: DATABASE_ID,
             filter: {
               property: 'Status',
               select: { equals: 'Ready for AI' },
@@ -1056,13 +1060,68 @@ describe('fetch-untrusted-list', () => {
     }
   });
 
+  // Regression (sagri-ai#403): env-var name mistaken for its value; see requireNotionId.
+  it.each([
+    'NOTION_TASKS_DATABASE_ID',
+    '$NOTION_TASKS_DATABASE_ID',
+    '${NOTION_TASKS_DATABASE_ID}',
+  ])(
+    'notion_database_query rejects database_id %s with invalid_params',
+    async (databaseId) => {
+      await expect(
+        fetchUntrustedList({
+          source_type: 'notion_database_query',
+          params: { database_id: databaseId, limit: 5 },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_params' });
+    },
+  );
+
+  it('notion_database_query canonicalises a notion id however it is dashed', async () => {
+    const notion = await startFakeServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ results: [] }));
+    });
+    try {
+      const deps = buildLocalRedirectDeps({
+        redirects: {
+          'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
+        },
+      });
+      // The last is mis-dashed: 32 hex digits, dashes in the wrong places. It is
+      // still an id, and canonicalising means Notion never sees the mangling.
+      const spellings = [
+        DATABASE_ID_DASHED,
+        DATABASE_ID,
+        DATABASE_ID.toUpperCase(),
+        'dead-beefdeadbeefdeadbeefdeadbee-f',
+      ];
+      for (const databaseId of spellings) {
+        const result = await fetchUntrustedList(
+          {
+            source_type: 'notion_database_query',
+            params: { database_id: databaseId, limit: 5 },
+          },
+          deps,
+        );
+        expect(result.items).toEqual([]);
+      }
+      // Every spelling reaches Notion as the one canonical id.
+      expect(notion.captured.map((request) => request.path)).toEqual(
+        spellings.map(() => `/v1/databases/${DATABASE_ID}/query`),
+      );
+    } finally {
+      await notion.close();
+    }
+  });
+
   // Regression: laundering the full properties blob broke the reader's
   // scalars-only/200-char output contract on rich rows and 502'd the query.
   it('notion_database_query rejects include_reader with invalid_params', async () => {
     await expect(
       fetchUntrustedList({
         source_type: 'notion_database_query',
-        params: { database_id: 'abc', limit: 10 },
+        params: { database_id: DATABASE_ID, limit: 10 },
         include_reader: true,
       }),
     ).rejects.toMatchObject({ code: 'invalid_params' });
@@ -1072,7 +1131,11 @@ describe('fetch-untrusted-list', () => {
     await expect(
       fetchUntrustedList({
         source_type: 'notion_database_query',
-        params: { database_id: 'abc', filter: 'not-an-object', limit: 5 },
+        params: {
+          database_id: DATABASE_ID,
+          filter: 'not-an-object',
+          limit: 5,
+        },
       }),
     ).rejects.toMatchObject({ code: 'invalid_params' });
   });
@@ -1092,7 +1155,10 @@ describe('fetch-untrusted-list', () => {
         fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         ),
@@ -1118,7 +1184,10 @@ describe('fetch-untrusted-list', () => {
         await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         );
@@ -1145,7 +1214,7 @@ describe('fetch-untrusted-list', () => {
       fetchUntrustedList(
         {
           source_type: 'notion_database_query',
-          params: { database_id: 'abc', limit: 5 },
+          params: { database_id: DATABASE_ID, limit: 5 },
         },
         deps,
       ),
@@ -1491,7 +1560,10 @@ describe('fetch-untrusted-list', () => {
         await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         );
@@ -1523,7 +1595,10 @@ describe('fetch-untrusted-list', () => {
         await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         );
@@ -1551,7 +1626,7 @@ describe('fetch-untrusted-list', () => {
       await fetchUntrustedList(
         {
           source_type: 'notion_database_query',
-          params: { database_id: 'abc', limit: 5 },
+          params: { database_id: DATABASE_ID, limit: 5 },
         },
         deps,
       );
@@ -1580,7 +1655,10 @@ describe('fetch-untrusted-list', () => {
         await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         );
@@ -1615,7 +1693,10 @@ describe('fetch-untrusted-list', () => {
         await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
-            params: { database_id: 'abc', limit: 5 },
+            params: {
+              database_id: DATABASE_ID,
+              limit: 5,
+            },
           },
           deps,
         );
@@ -1662,7 +1743,7 @@ describe('fetch-untrusted-list', () => {
       const pending = fetchUntrustedList(
         {
           source_type: 'notion_database_query',
-          params: { database_id: 'abc', limit: 5 },
+          params: { database_id: DATABASE_ID, limit: 5 },
         },
         deps,
       );
@@ -1876,7 +1957,10 @@ describe('fetch-untrusted-list', () => {
       const result = await fetchUntrustedList(
         {
           source_type: 'notion_database_query',
-          params: { database_id: 'abc', limit: 10 },
+          params: {
+            database_id: DATABASE_ID,
+            limit: 10,
+          },
         },
         deps,
       );

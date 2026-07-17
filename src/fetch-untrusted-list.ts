@@ -43,7 +43,7 @@ import {
   validatePublicHttpsUrl,
 } from './fetch-untrusted.js';
 import { logger } from './logger.js';
-import { isPlainObject } from './org-action-gate.js';
+import { isNotionPageId, isPlainObject } from './org-action-gate.js';
 import {
   readUntrustedContent,
   type ReaderOutput,
@@ -256,6 +256,22 @@ function optionalString(
     paramErr(`${name} must be a non-empty string when provided`);
   }
   return value;
+}
+
+// A non-id is a caller mistake, not a lookup that might fail: sagri-ai#403 was
+// months of opaque 4xx from callers passing the env var's *name*, not its value.
+// Returns the canonical id, not what the caller wrote, so dash placement cannot
+// reach Notion and 404 just as opaquely. `isNotionPageId` is a bare 32-hex
+// check, not a page-vs-database one: Notion ids share one space across kinds.
+function requireNotionId(
+  params: Record<string, unknown>,
+  name: string,
+): string {
+  const canonical = requireString(params, name).replace(/-/g, '').toLowerCase();
+  if (!isNotionPageId(canonical)) {
+    paramErr(`${name} must be a notion id: 32 hex digits, dashed or bare`);
+  }
+  return canonical;
 }
 
 function requireLimit(params: Record<string, unknown>, cap: number): number {
@@ -998,7 +1014,7 @@ async function notionDatabaseQuery(
       'include_reader is not supported for notion_database_query; page-read each id with fetch_untrusted + notion_page for the laundered view',
     );
   }
-  const databaseId = requireString(params, 'database_id');
+  const databaseId = requireNotionId(params, 'database_id');
   const limit = requireLimit(params, NOTION_LIMIT_MAX);
   const filter = params.filter;
   if (filter !== undefined && !isPlainObject(filter)) {
