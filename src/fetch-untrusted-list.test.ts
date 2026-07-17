@@ -1077,7 +1077,7 @@ describe('fetch-untrusted-list', () => {
     },
   );
 
-  it('notion_database_query accepts a notion id dashed or bare', async () => {
+  it('notion_database_query canonicalises a notion id however it is dashed', async () => {
     const notion = await startFakeServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ results: [] }));
@@ -1088,7 +1088,15 @@ describe('fetch-untrusted-list', () => {
           'api.notion.com': { port: notion.port, resolveTo: '8.8.8.8' },
         },
       });
-      for (const databaseId of [DATABASE_ID_DASHED, DATABASE_ID]) {
+      // The last is mis-dashed: 32 hex digits, dashes in the wrong places. It is
+      // still an id, and canonicalising means Notion never sees the mangling.
+      const spellings = [
+        DATABASE_ID_DASHED,
+        DATABASE_ID,
+        DATABASE_ID.toUpperCase(),
+        'dead-beefdeadbeefdeadbeefdeadbee-f',
+      ];
+      for (const databaseId of spellings) {
         const result = await fetchUntrustedList(
           {
             source_type: 'notion_database_query',
@@ -1098,12 +1106,10 @@ describe('fetch-untrusted-list', () => {
         );
         expect(result.items).toEqual([]);
       }
-      // Both spellings reach Notion exactly as the caller wrote them: the guard
-      // validates, it does not canonicalize.
-      expect(notion.captured.map((request) => request.path)).toEqual([
-        `/v1/databases/${DATABASE_ID_DASHED}/query`,
-        `/v1/databases/${DATABASE_ID}/query`,
-      ]);
+      // Every spelling reaches Notion as the one canonical id.
+      expect(notion.captured.map((request) => request.path)).toEqual(
+        spellings.map(() => `/v1/databases/${DATABASE_ID}/query`),
+      );
     } finally {
       await notion.close();
     }

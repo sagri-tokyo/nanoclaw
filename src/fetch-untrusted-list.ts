@@ -43,7 +43,7 @@ import {
   validatePublicHttpsUrl,
 } from './fetch-untrusted.js';
 import { logger } from './logger.js';
-import { isPlainObject } from './org-action-gate.js';
+import { isNotionPageId, isPlainObject } from './org-action-gate.js';
 import {
   readUntrustedContent,
   type ReaderOutput,
@@ -260,17 +260,19 @@ function optionalString(
 
 // A non-id is a caller mistake, not a lookup that might fail: sagri-ai#403 was
 // months of opaque 4xx from callers passing the env var's *name*, not its value.
-const NOTION_ID = /^[0-9a-fA-F]{32}$/;
-
+// Returns the canonical id rather than what the caller wrote, so dash placement
+// cannot reach Notion and 404 just as opaquely. `parseNotionInput` canonicalises
+// to the same shape. `isNotionPageId` is a bare 32-hex check, not a page-vs-
+// database one: Notion gives every object kind an id from one space.
 function requireNotionId(
   params: Record<string, unknown>,
   name: string,
 ): string {
-  const value = requireString(params, name);
-  if (!NOTION_ID.test(value.replace(/-/g, ''))) {
+  const canonical = requireString(params, name).replace(/-/g, '').toLowerCase();
+  if (!isNotionPageId(canonical)) {
     paramErr(`${name} must be a notion id: 32 hex digits, dashed or bare`);
   }
-  return value;
+  return canonical;
 }
 
 function requireLimit(params: Record<string, unknown>, cap: number): number {
