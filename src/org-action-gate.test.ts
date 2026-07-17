@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+
 import { describe, it, expect } from 'vitest';
 
 import {
@@ -5,6 +7,8 @@ import {
   isNotionPageId,
   renderApprovalSummary,
   stringContainsRedLine,
+  TARGET_NAMING_ARGS,
+  type OrgActionName,
   type OrgActionRecord,
 } from './org-action-gate.js';
 
@@ -32,6 +36,163 @@ describe('stringContainsRedLine — exported red-line predicate', () => {
 
   it('passes an ordinary page name', () => {
     expect(stringContainsRedLine('Soil Model Task')).toBe(false);
+  });
+});
+
+/**
+ * THE safety deliverable for the target-scoped red line.
+ *
+ * The red line scans `target_ref` plus a closed allowlist of target-naming
+ * args. An allowlist fails OPEN by construction: an arg nobody classified is
+ * silently un-scanned. These tests are what closes that hole — every arg the
+ * write client consumes must be named here AND classified, so adding an arg
+ * without deciding whether it names a target breaks CI.
+ */
+const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
+  'notion.append_progress': ['text'],
+  'notion.write_property': ['property', 'value'],
+  'notion.create_task': ['title'],
+  'github.file_issue': ['title', 'body'],
+  'github.open_draft_pr': ['head', 'base', 'title', 'body'],
+  'slack.post_digest': ['text'],
+  'doc.draft': ['title'],
+};
+
+// Agent-authored prose ABOUT a topic. Deliberately not red-line scanned: a
+// digest that mentions MRV is not an action targeting MRV.
+const CONTENT_ARGS: ReadonlySet<string> = new Set([
+  'text',
+  'title',
+  'body',
+  'value',
+  'property',
+]);
+
+describe('red-line arg classification — every consumed arg is classified', () => {
+  const allConsumed = [
+    ...new Set(Object.values(CONSUMED_ARGS).flat()),
+  ].sort();
+
+  it.each(allConsumed)(
+    '%s is classified as exactly one of target-naming or content',
+    (arg) => {
+      const isTarget = TARGET_NAMING_ARGS.has(arg);
+      const isContent = CONTENT_ARGS.has(arg);
+      expect(
+        isTarget !== isContent,
+        `arg "${arg}" must be in exactly one of TARGET_NAMING_ARGS or CONTENT_ARGS`,
+      ).toBe(true);
+    },
+  );
+
+  it('classifies no arg the write client does not consume', () => {
+    const classified = [
+      ...new Set([...TARGET_NAMING_ARGS, ...CONTENT_ARGS]),
+    ].sort();
+    expect(classified).toStrictEqual(allConsumed);
+  });
+
+  // The drift guard. CONSUMED_ARGS is a hand-written mirror of the write
+  // client, so it can rot the moment someone adds an arg. Deriving the real
+  // set from the client source is what makes the classification above binding
+  // rather than aspirational: a new `requireString(...,'foo')` in
+  // executeOrgAction fails HERE until foo is listed and classified.
+  it('mirrors the args executeOrgAction actually reads from canonical_args', () => {
+    const source = readFileSync(
+      new URL('./org-action-clients.ts', import.meta.url),
+      'utf-8',
+    );
+    const pattern =
+      /require(?:String|BoundedString|BranchName)\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
+    const fromSource = [
+      ...new Set([...source.matchAll(pattern)].map((m) => m[1])),
+    ].sort();
+    expect(fromSource).toStrictEqual(allConsumed);
+  });
+});
+
+describe('classifyOrgAction — red line scopes to the target, not content', () => {
+  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
+    'refuses a PR base branch naming %s (a genuine red-line target)',
+    (marker) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'github.open_draft_pr',
+            target_ref: 'sagri-tokyo/sagri-ai',
+            canonical_args: {
+              head: 'feature/x',
+              base: `${marker}-release`,
+              title: 'ok',
+              body: 'ok',
+            },
+          }),
+        ),
+      ).toBe('refuse');
+    },
+  );
+
+  it('refuses a PR head branch naming a red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: 'prod-hotfix',
+            base: 'main',
+            title: 'ok',
+            body: 'ok',
+          },
+        }),
+      ),
+    ).toBe('refuse');
+  });
+
+  it('refuses base: production — substring match is load-bearing on a branch', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.open_draft_pr',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            head: 'feature/x',
+            base: 'production',
+            title: 'ok',
+            body: 'ok',
+          },
+        }),
+      ),
+    ).toBe('refuse');
+  });
+
+  it('executes a github issue whose body discusses a red-line topic', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'github.file_issue',
+          target_ref: 'sagri-tokyo/sagri-ai',
+          canonical_args: {
+            title: 'Carbon model drift',
+            body: 'The MRV pipeline regressed against 自治体 baselines.',
+          },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  it('executes a meeting summary containing "product" — the live silent-drop bug', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'notion.append_progress',
+          target_ref: HEX32,
+          canonical_args: {
+            text: 'Discussed the product roadmap and a reproducible build.',
+          },
+        }),
+      ),
+    ).toBe('execute');
   });
 });
 
@@ -69,8 +230,13 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
     );
   });
 
+  // Was: 'refuses when a canonical_args string value contains %s even on a
+  // clean target'. That behavior inverted — a digest is agent-authored prose,
+  // so a red-line mention no longer refuses. It holds for a human instead:
+  // post_digest is the only action that broadcasts agent prose to a room as a
+  // standalone artifact.
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
-    'refuses when a canonical_args string value contains %s even on a clean target',
+    'holds a same-channel digest whose text mentions %s',
     (marker) => {
       expect(
         classifyOrgAction(
@@ -81,11 +247,28 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
             canonical_args: { text: `quarterly ${marker} rollup` },
           }),
         ),
-      ).toBe('refuse');
+      ).toBe('hold');
     },
   );
 
-  it('refuses a notion body field that names a red line on a clean target', () => {
+  it('executes a digest whose text names no red line', () => {
+    expect(
+      classifyOrgAction(
+        record({
+          action: 'slack.post_digest',
+          target_ref: 'C0AAA1111',
+          origin_channel: 'slack:C0AAA1111',
+          canonical_args: { text: 'quarterly soil model rollup' },
+        }),
+      ),
+    ).toBe('execute');
+  });
+
+  // Was: 'refuses a notion body field that names a red line on a clean
+  // target'. Renamed, not dropped: the contract inverted. A red line in a
+  // notion body is agent-authored content, not a target, so a clean target
+  // now executes. Only slack.post_digest holds on red-line content.
+  it('no longer refuses a notion body that names a red line on a clean target', () => {
     expect(
       classifyOrgAction(
         record({
@@ -94,7 +277,7 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
           canonical_args: { text: '自治体 onboarding notes' },
         }),
       ),
-    ).toBe('refuse');
+    ).toBe('execute');
   });
 });
 

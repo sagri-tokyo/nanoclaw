@@ -112,15 +112,30 @@ export function usesNotionTarget(action: string): boolean {
   return action.startsWith('notion.') || action === 'doc.draft';
 }
 
+/**
+ * The closed set of canonical_args that NAME a target rather than carry
+ * agent-authored content. Only these are red-line scanned alongside
+ * target_ref: `base: production` on github.open_draft_pr is a genuine
+ * red-line target and must refuse.
+ *
+ * Content args (text, title, body, value, property) are deliberately NOT
+ * scanned. A digest that discusses MRV is not an action targeting MRV, and
+ * scanning them refused every meeting summary containing "product" (the `prod`
+ * marker matches as a substring, by design, for branch names).
+ *
+ * An allowlist fails open, so `org-action-gate.test.ts` enumerates every arg
+ * the write client consumes and asserts each is classified target-naming or
+ * content. Adding an arg without classifying it fails CI.
+ */
+export const TARGET_NAMING_ARGS: ReadonlySet<string> = new Set([
+  'head',
+  'base',
+]);
+
 function isRedLine(record: OrgActionRecord): boolean {
   if (stringContainsRedLine(record.target_ref)) return true;
-  // A red-line marker in a body/value field (e.g. a digest body about MRV or a
-  // Notion property value naming a jichitai) must refuse just as a red-line
-  // target does — otherwise the marker hides one level below target_ref. The
-  // scan is one level deep on purpose: every exec-class arg the write client
-  // consumes is a top-level string (`requireString`/`requireBoundedString`), so
-  // a nested object value can never reach execution and need not be scanned.
-  for (const value of Object.values(record.canonical_args)) {
+  for (const arg of TARGET_NAMING_ARGS) {
+    const value = record.canonical_args[arg];
     if (typeof value === 'string' && stringContainsRedLine(value)) return true;
   }
   return false;
@@ -164,6 +179,11 @@ export function classifyOrgAction(record: OrgActionRecord): OrgActionVerdict {
     if (record.target_ref !== originChannelId(record.origin_channel)) {
       return 'hold';
     }
+    // The one content hold. post_digest is the only action that broadcasts
+    // agent-authored prose to a room as a standalone artifact, so a red-line
+    // mention gets a human before it lands.
+    const text = record.canonical_args.text;
+    if (typeof text === 'string' && stringContainsRedLine(text)) return 'hold';
     return 'execute';
   }
 
