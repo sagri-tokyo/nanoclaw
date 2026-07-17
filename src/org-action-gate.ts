@@ -127,8 +127,8 @@ export function usesNotionTarget(action: string): boolean {
  * Every marker carries a non-hex letter, so a marker can never appear in a
  * target_ref that also passes NOTION_PAGE_ID. Notion's red-line coverage is
  * `target_query` in org-action-handler.ts, and only when the host resolves a
- * name; an agent holding a raw page id has none. Closing that needs a writable
- * -target allowlist, not a content scan (sagri-ai#542).
+ * name; an agent holding a raw page id has none. Closing that needs an
+ * allowlist of writable targets, not a content scan (sagri-ai#547).
  *
  * An allowlist fails open, so `org-action-gate.test.ts` enumerates every arg
  * the write client consumes and asserts each is classified target-naming or
