@@ -55,10 +55,10 @@ const CONSUMED_ARGS: Record<OrgActionName, readonly string[]> = {
 };
 
 // The other half of the partition: isRedLine does not scan these, so they never
-// refuse. Named for the scan, not for what they hold, because what they hold
-// varies per action and per Notion property. `text` is refuse-exempt and still
-// scanned on the digest arm for a hold, which is a different verdict on a
-// different path. TARGET_NAMING_ARGS has the why for `property`.
+// refuse. Named for the scan, not for what they hold, because that varies per
+// action and per Notion property. Several are still read for a hold elsewhere
+// in classifyOrgAction; refuse-exempt is the only claim made here, and the test
+// below checks it. TARGET_NAMING_ARGS has the why for `property`.
 const REFUSE_EXEMPT_ARGS: ReadonlySet<string> = new Set([
   'text',
   'title',
@@ -88,6 +88,26 @@ describe('red-line arg classification — every consumed arg is classified', () 
     ].sort();
     expect(classified).toStrictEqual(allConsumed);
   });
+
+  // REFUSE_EXEMPT_ARGS names a behavior, so check the behavior. The two tests
+  // above only cross-check two hand-written lists against each other, which is
+  // what let three earlier names for this set ship: each was true of the members
+  // someone looked at, false of one they did not, and passed membership anyway.
+  // Widening isRedLine back over all canonical_args fails here.
+  it.each([...REFUSE_EXEMPT_ARGS])(
+    'a red-line marker in %s does not refuse',
+    (arg) => {
+      expect(
+        classifyOrgAction(
+          record({
+            action: 'notion.append_progress',
+            target_ref: HEX32,
+            canonical_args: { [arg]: 'mrv' },
+          }),
+        ),
+      ).not.toBe('refuse');
+    },
+  );
 
   // The drift guard. CONSUMED_ARGS is a hand-written mirror of the write
   // client and rots the moment someone adds an arg. Deriving the real set from
