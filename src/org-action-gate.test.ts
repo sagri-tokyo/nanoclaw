@@ -69,9 +69,7 @@ const CONTENT_ARGS: ReadonlySet<string> = new Set([
 ]);
 
 describe('red-line arg classification — every consumed arg is classified', () => {
-  const allConsumed = [
-    ...new Set(Object.values(CONSUMED_ARGS).flat()),
-  ].sort();
+  const allConsumed = [...new Set(Object.values(CONSUMED_ARGS).flat())].sort();
 
   it.each(allConsumed)(
     '%s is classified as exactly one of target-naming or content',
@@ -95,19 +93,37 @@ describe('red-line arg classification — every consumed arg is classified', () 
   // The drift guard. CONSUMED_ARGS is a hand-written mirror of the write
   // client, so it can rot the moment someone adds an arg. Deriving the real
   // set from the client source is what makes the classification above binding
-  // rather than aspirational: a new `requireString(...,'foo')` in
-  // executeOrgAction fails HERE until foo is listed and classified.
+  // rather than aspirational: a new read of 'foo' in executeOrgAction fails
+  // HERE until foo is listed and classified.
+  //
+  // Any validator name matches: pinning them to a `require(String|...)`
+  // alternation meant a read via a new helper contributed nothing to the
+  // derived set and passed silently.
+  const readsArg = () => /\w+\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
+  const clientSource = () =>
+    readFileSync(new URL('./org-action-clients.ts', import.meta.url), 'utf-8');
+
   it('mirrors the args executeOrgAction actually reads from canonical_args', () => {
-    const source = readFileSync(
-      new URL('./org-action-clients.ts', import.meta.url),
-      'utf-8',
-    );
-    const pattern =
-      /require(?:String|BoundedString|BranchName)\(\s*(?:request\.)?canonical_args,\s*'([^']+)'/g;
     const fromSource = [
-      ...new Set([...source.matchAll(pattern)].map((m) => m[1])),
+      ...new Set([...clientSource().matchAll(readsArg())].map((m) => m[1])),
     ].sort();
     expect(fromSource).toStrictEqual(allConsumed);
+  });
+
+  // The fail-closed half, and the reason the guard above is worth anything.
+  // A regex sees one call shape. A double-quoted key, a
+  // `const args = request.canonical_args` alias, or a computed key all
+  // contribute nothing to the derived set, so the mirror still agrees and the
+  // arg ships unscanned. Account for every textual occurrence instead: one
+  // that is neither the request type nor a recognised read fails here.
+  it('accounts for every canonical_args occurrence in the write client', () => {
+    const source = clientSource();
+    const total = [...source.matchAll(/canonical_args/g)].length;
+    const reads = [...source.matchAll(readsArg())].length;
+    const typeDecl = [
+      ...source.matchAll(/canonical_args: Record<string, unknown>/g),
+    ].length;
+    expect(reads + typeDecl).toBe(total);
   });
 });
 
@@ -209,14 +225,20 @@ function record(overrides: Partial<OrgActionRecord> = {}): OrgActionRecord {
 }
 
 describe('classifyOrgAction — red lines (refuse host-side)', () => {
-  it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
-    'refuses a target_ref containing %s regardless of stakes_hint',
+  // The target must be shape-VALID and dirty, or the id/allowlist check
+  // refuses first and the case passes with isRedLine deleted. A notion target
+  // cannot do this: every marker carries a non-hex letter, so a marker-bearing
+  // id never survives NOTION_PAGE_ID. A slack channel id can.
+  it.each(['mrv', 'carbon', 'jichitai', 'prod'])(
+    'refuses a shape-valid slack target_ref containing %s regardless of stakes_hint',
     (marker) => {
       expect(
         classifyOrgAction(
           record({
-            action: 'notion.append_progress',
-            target_ref: `${marker}-${HEX32}`,
+            action: 'slack.post_digest',
+            target_ref: `C${marker}1234`,
+            origin_channel: `slack:C${marker}1234`,
+            canonical_args: { text: 'clean' },
             stakes_hint: 'safe',
           }),
         ),
@@ -230,11 +252,6 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
     );
   });
 
-  // Was: 'refuses when a canonical_args string value contains %s even on a
-  // clean target'. That behavior inverted — a digest is agent-authored prose,
-  // so a red-line mention no longer refuses. It holds for a human instead:
-  // post_digest is the only action that broadcasts agent prose to a room as a
-  // standalone artifact.
   it.each(['mrv', 'carbon', 'jichitai', '自治体', 'prod'])(
     'holds a same-channel digest whose text mentions %s',
     (marker) => {
@@ -264,10 +281,6 @@ describe('classifyOrgAction — red lines (refuse host-side)', () => {
     ).toBe('execute');
   });
 
-  // Was: 'refuses a notion body field that names a red line on a clean
-  // target'. Renamed, not dropped: the contract inverted. A red line in a
-  // notion body is agent-authored content, not a target, so a clean target
-  // now executes. Only slack.post_digest holds on red-line content.
   it('no longer refuses a notion body that names a red line on a clean target', () => {
     expect(
       classifyOrgAction(
