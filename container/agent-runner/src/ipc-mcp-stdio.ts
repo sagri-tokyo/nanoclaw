@@ -578,7 +578,9 @@ source_type values and required params:
 
 github_pr_list and github_issue_list page internally. When one cannot reach \`limit\` within its page budget it fails rather than return a short list, because a short list is indistinguishable from a small repo. Narrow the window with \`since\`, or lower \`limit\`. github_run_list does not page and carries no such guarantee.
 • notion_database_query  — { database_id, filter? (Notion filter JSON), limit: number (1..100) }
-• notion_search          — { query: string, object_kind: 'page'|'database', limit: number (1..100) }`,
+• notion_search          — { query: string, object_kind: 'page'|'database', limit: number (1..100) }
+
+\`database_id\` is the id itself, 32 hex digits dashed or bare, and is rejected with invalid_params if it is not. Pass the value, not the name of a variable holding it: a tool argument is not shell, so nothing expands it.`,
   {
     source_type: z
       .enum([
