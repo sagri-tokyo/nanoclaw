@@ -74,6 +74,43 @@ export interface OrgActionRecord {
 
 export type OrgActionVerdict = 'execute' | 'hold' | 'refuse';
 
+/**
+ * Why an org-action was refused. Carried back to the caller so a refusal is
+ * observable instead of a silent drop (sagri-tokyo/nanoclaw#541). The
+ * classifier-side reasons come from `driveOrgActionRequest`; the request-side
+ * reasons come from the IPC drain's own validation before the handler runs.
+ */
+export type OrgActionRefuseReason =
+  | 'red_line_target'
+  | 'target_unresolved'
+  | 'target_resolve_error'
+  | 'classified_refuse'
+  | 'invalid_request'
+  | 'no_handler'
+  | 'unresolved_channel';
+
+/**
+ * The observable result of driving one org-action. Unlike the bare
+ * `OrgActionVerdict`, this is what the host returns to the container so the
+ * agent can tell a refusal from a success: a `refuse` MUST NOT read as done
+ * (sagri-tokyo/nanoclaw#541 — the data-loss bug where a refused write was
+ * logged `ok` and the agent proceeded as if it had succeeded).
+ *
+ * Serialized to the container as JSON; the container's mirror of this type
+ * lives in container/agent-runner/src/org-action-response.ts (separate build
+ * root, cannot share a module). Keep the two in sync when adding a variant.
+ *
+ * `unknown` is not a classifier verdict: the drain synthesizes it when the
+ * handler throws, because a throw from inside the execute path is an ambiguous
+ * outcome (the write may have landed before the error). It must NOT read as
+ * either success or a clean refusal.
+ */
+export type OrgActionResult =
+  | { kind: 'execute' }
+  | { kind: 'hold'; token: string }
+  | { kind: 'refuse'; reason: OrgActionRefuseReason }
+  | { kind: 'unknown' };
+
 export const GITHUB_REPO_ALLOWLIST = 'sagri-tokyo/sagri-ai';
 const NOTION_PAGE_ID = /^[0-9a-fA-F]{32}$/;
 const SLACK_CHANNEL_ID = /^C[A-Za-z0-9]{7,21}$/;

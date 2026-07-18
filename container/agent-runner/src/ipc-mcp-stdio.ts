@@ -7,15 +7,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
-import { ORG_ACTION_SUBMITTED_MESSAGE } from './org-action-messages.js';
+import { renderOrgActionResult } from './org-action-messages.js';
+import { awaitOrgActionResult } from './org-action-response.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const ORG_ACTION_RESPONSES_DIR = path.join(IPC_DIR, 'org-action-responses');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -640,7 +643,7 @@ server.tool(
 
 The host re-classifies every request authoritatively — your stakes_hint is advisory only and is NEVER trusted for the decision. A safe action runs immediately host-side; a gated action is held and an approver is notified.
 
-IMPORTANT: a gated action returns "submitted; held pending approval — do not proceed". Treat it as a BLOCKER: surface it upward and do NOT start any dependent work on the assumption it succeeded. The host posts the result asynchronously once an approver acts.
+IMPORTANT: this tool BLOCKS until the host returns its verdict and reports which of three outcomes happened. "Executed" means the action is done. "Held pending approval" is a BLOCKER — surface it upward and do NOT start dependent work; the host posts the eventual result once an approver acts. "Refused" means the action did NOT happen — never record it as done. An error or timeout is also NOT a success.
 
 action must be one of the fixed seven:
 • notion.append_progress  — append a progress block to an existing page
@@ -689,8 +692,10 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
       ),
   },
   async (args) => {
+    const requestId = randomUUID();
     const data = {
       type: 'org_action',
+      request_id: requestId,
       action: args.action,
       target_ref: args.target_ref,
       target_query: args.target_query,
@@ -704,11 +709,18 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
 
     writeIpcFile(TASKS_DIR, data);
 
+    // Block on the host's verdict (nanoclaw#541); awaitOrgActionResult is
+    // fail-closed, so a timeout or malformed verdict throws.
+    const result = await awaitOrgActionResult(
+      ORG_ACTION_RESPONSES_DIR,
+      requestId,
+    );
+
     return {
       content: [
         {
           type: 'text' as const,
-          text: ORG_ACTION_SUBMITTED_MESSAGE,
+          text: renderOrgActionResult(result),
         },
       ],
     };

@@ -58,6 +58,8 @@ import {
   stringContainsRedLine,
   usesNotionTarget,
   type OrgActionRecord,
+  type OrgActionRefuseReason,
+  type OrgActionResult,
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
@@ -134,9 +136,9 @@ interface ResolvedTarget {
 
 /**
  * Resolve a Notion page NAME to a page id host-side, before classification.
- * Returns the (possibly rewritten) input plus the resolved title, or null when
- * resolution refuses. Fail-closed: a red-line query, a zero/multi-match search,
- * or any resolver error returns null (refuse), never a best guess.
+ * Returns the (possibly rewritten) input plus the resolved title, or a refuse
+ * reason when resolution refuses (nanoclaw#541). Fail-closed: a red-line query,
+ * a zero/multi-match search, or any resolver error refuses, never a best guess.
  *
  * target_query is honored only for a notion-class action whose target_ref is
  * not already a valid id; it is ignored for github and slack actions and when
@@ -146,7 +148,7 @@ async function resolveTargetIfNeeded(
   input: OrgActionRequestInput,
   ctx: OrgActionRequestContext,
   deps: OrgActionGateDeps,
-): Promise<ResolvedTarget | null> {
+): Promise<ResolvedTarget | { refuse: OrgActionRefuseReason }> {
   if (!usesNotionTarget(input.action)) return { input };
   if (isNotionPageId(input.target_ref)) return { input };
 
@@ -160,7 +162,7 @@ async function resolveTargetIfNeeded(
       { action: input.action, sourceGroup: ctx.sourceGroup },
       'org-action refused host-side: target_query is a red line (no Notion call)',
     );
-    return null;
+    return { refuse: 'red_line_target' };
   }
 
   let resolution: NotionTargetResolution;
@@ -171,7 +173,7 @@ async function resolveTargetIfNeeded(
       { action: input.action, sourceGroup: ctx.sourceGroup, err },
       'org-action refused host-side: Notion target resolution errored',
     );
-    return null;
+    return { refuse: 'target_resolve_error' };
   }
 
   if (resolution.kind === 'unresolved') {
@@ -183,7 +185,7 @@ async function resolveTargetIfNeeded(
       },
       'org-action refused host-side: Notion target unresolved (zero or many matches)',
     );
-    return null;
+    return { refuse: 'target_unresolved' };
   }
 
   return {
@@ -258,16 +260,18 @@ function addMs(iso: string, ms: number): string {
  * Drain one `org_action` request. Re-classifies host-side; executes a safe
  * action immediately, holds a gated one (row + Slack prompt, no effect), or
  * refuses a red-line / out-of-allowlist / malformed one (no row, no effect).
+ *
+ * Returns the observable OrgActionResult (nanoclaw#541) instead of void.
  */
 export async function driveOrgActionRequest(
   input: OrgActionRequestInput,
   ctx: OrgActionRequestContext,
   deps: OrgActionGateDeps,
-): Promise<void> {
+): Promise<OrgActionResult> {
   // Resolve a Notion page NAME to an id host-side (fail-closed) before the
   // authoritative classify re-validates the resolved id's shape + red line.
   const resolved = await resolveTargetIfNeeded(input, ctx, deps);
-  if (!resolved) return;
+  if ('refuse' in resolved) return { kind: 'refuse', reason: resolved.refuse };
   const resolvedInput = resolved.input;
 
   const record = toClassifierRecord(
@@ -286,7 +290,7 @@ export async function driveOrgActionRequest(
       },
       'org-action refused host-side (red line / allowlist / id shape)',
     );
-    return;
+    return { kind: 'refuse', reason: 'classified_refuse' };
   }
 
   if (verdict === 'execute') {
@@ -299,7 +303,7 @@ export async function driveOrgActionRequest(
       { action: resolvedInput.action, target_ref: resolvedInput.target_ref },
       'org-action executed host-side (safe)',
     );
-    return;
+    return { kind: 'execute' };
   }
 
   const token = (deps.mintToken ?? defaultMintToken)();
@@ -333,6 +337,7 @@ export async function driveOrgActionRequest(
     },
     'org-action held pending approval',
   );
+  return { kind: 'hold', token };
 }
 
 function renderApprovalPrompt(token: string, summary: string): string {

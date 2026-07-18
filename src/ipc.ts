@@ -6,7 +6,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -18,6 +18,8 @@ import {
   isReversibility,
   isStakesHint,
   isStringArray,
+  type OrgActionRefuseReason,
+  type OrgActionResult,
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
@@ -56,6 +58,46 @@ function emitIpcAction(
   });
 }
 
+const ORG_ACTION_RESPONSES_SUBDIR = 'org-action-responses';
+// request_id is container-supplied and becomes a filename, so it is a
+// path-traversal vector. Only a canonical UUID is accepted; anything else is
+// treated as "no correlation id" and no response is written.
+const REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function toRequestId(value: unknown): string | undefined {
+  return typeof value === 'string' && REQUEST_ID_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
+/**
+ * Write the org-action result back into the requesting group's own IPC
+ * namespace so the container's `org_action` tool can read the verdict and
+ * relay it to the agent (nanoclaw#541). The group folder is the trusted
+ * directory-derived identity, never container-supplied, so a container can
+ * only ever receive a response addressed to itself. Idempotent per requestId;
+ * atomic write (temp then rename) so the poller never reads a partial file.
+ */
+function writeOrgActionResponse(
+  sourceGroup: string,
+  requestId: string,
+  result: OrgActionResult,
+): void {
+  if (!REQUEST_ID_PATTERN.test(requestId)) {
+    throw new Error(`org-action response: invalid request id "${requestId}"`);
+  }
+  const responsesDir = path.join(
+    resolveGroupIpcPath(sourceGroup),
+    ORG_ACTION_RESPONSES_SUBDIR,
+  );
+  fs.mkdirSync(responsesDir, { recursive: true });
+  const target = path.join(responsesDir, `${requestId}.json`);
+  const tempPath = `${target}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(result));
+  fs.renameSync(tempPath, target);
+}
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -89,7 +131,7 @@ export interface IpcDeps {
     },
     sourceGroup: string,
     chatJid: string,
-  ) => Promise<void>;
+  ) => Promise<OrgActionResult>;
   /**
    * Optional override for the action-record sink. Defaults to
    * `logger.action`. Exists so tests can observe emitted records via an
@@ -254,6 +296,7 @@ export async function processTaskIpc(
     stakes_hint?: string;
     citation_refs?: unknown;
     canonical_args?: unknown;
+    request_id?: unknown;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -691,12 +734,30 @@ export async function processTaskIpc(
       break;
 
     case 'org_action': {
+      // request_id lets the container correlate a synchronous verdict back to
+      // this request (nanoclaw#541).
+      const requestId = toRequestId(data.request_id);
+      // The audit reject and the container-facing refuse response are a
+      // mandatory pair: skip the response write and the awaiting tool hangs to
+      // its timeout. Bind them so a branch can never emit one without the other.
+      const reject = (
+        errorClass: string,
+        reason: OrgActionRefuseReason,
+      ): void => {
+        emitReject('ipc_org_action', errorClass);
+        if (requestId) {
+          writeOrgActionResponse(sourceGroup, requestId, {
+            kind: 'refuse',
+            reason,
+          });
+        }
+      };
       if (!deps.onOrgAction) {
         logger.warn(
           { sourceGroup },
           'org_action received but no handler is wired',
         );
-        emitReject('ipc_org_action', 'Unauthorized');
+        reject('Unauthorized', 'no_handler');
         break;
       }
       if (
@@ -706,7 +767,7 @@ export async function processTaskIpc(
         typeof data.stakes_hint !== 'string'
       ) {
         logger.warn({ sourceGroup }, 'Invalid org_action — missing fields');
-        emitReject('ipc_org_action', 'MissingRequiredField');
+        reject('MissingRequiredField', 'invalid_request');
         break;
       }
       // reversibility/stakes_hint are closed enums; an out-of-set value must be
@@ -721,7 +782,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Invalid org_action — reversibility/stakes_hint outside the allowed set',
         );
-        emitReject('ipc_org_action', 'InvalidPayload');
+        reject('InvalidPayload', 'invalid_request');
         break;
       }
       const reversibility: Reversibility = data.reversibility;
@@ -734,7 +795,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Invalid org_action — canonical_args must be a non-array object',
         );
-        emitReject('ipc_org_action', 'InvalidPayload');
+        reject('InvalidPayload', 'invalid_request');
         break;
       }
       const canonicalArgs: Record<string, unknown> = data.canonical_args;
@@ -746,7 +807,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Invalid org_action — citation_refs must be a string array',
         );
-        emitReject('ipc_org_action', 'InvalidPayload');
+        reject('InvalidPayload', 'invalid_request');
         break;
       }
       const citationRefs: string[] = data.citation_refs ?? [];
@@ -762,7 +823,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Invalid org_action — target_query must be a string',
         );
-        emitReject('ipc_org_action', 'InvalidPayload');
+        reject('InvalidPayload', 'invalid_request');
         break;
       }
       const targetQuery: string | undefined = data.target_query;
@@ -780,32 +841,65 @@ export async function processTaskIpc(
           { sourceGroup },
           'org_action: source group not resolvable to a chat jid',
         );
-        emitReject('ipc_org_action', 'TargetGroupNotRegistered');
+        reject('TargetGroupNotRegistered', 'unresolved_channel');
         break;
       }
-      await deps.onOrgAction(
-        {
-          action: data.action,
-          target_ref: data.target_ref,
-          target_query: targetQuery,
-          reversibility,
-          stakes_hint: stakesHint,
-          citation_refs: citationRefs,
-          canonical_args: canonicalArgs,
-        },
-        sourceGroup,
-        chatJid,
-      );
+      let result: OrgActionResult;
+      try {
+        result = await deps.onOrgAction(
+          {
+            action: data.action,
+            target_ref: data.target_ref,
+            target_query: targetQuery,
+            reversibility,
+            stakes_hint: stakesHint,
+            citation_refs: citationRefs,
+            canonical_args: canonicalArgs,
+          },
+          sourceGroup,
+          chatJid,
+        );
+      } catch (err) {
+        // A host-side throw is an AMBIGUOUS outcome, not a refusal: a throw from
+        // inside the execute path can happen after the write already landed
+        // server-side, so telling the agent "did NOT happen" would invite a
+        // duplicate write (the inverse of the nanoclaw#541 bug). Audit it as an
+        // error, relay `unknown` so the agent verifies before retrying, and
+        // propagate so the drain loop still quarantines the task.
+        const errorClass =
+          err instanceof Error ? err.constructor.name : 'Error';
+        emitIpcAction(sink, {
+          level: 'error',
+          session_id: sourceGroup,
+          trigger_source: sourceGroup,
+          tool: 'ipc_org_action',
+          inputs_hash: inputsHash,
+          outputs_hash: hashFailureOutput({ error_class: errorClass }),
+          duration_ms: Date.now() - ipcStart,
+          outcome: 'error',
+          error_class: errorClass,
+          group: sourceGroup,
+        });
+        if (requestId) {
+          writeOrgActionResponse(sourceGroup, requestId, { kind: 'unknown' });
+        }
+        throw err;
+      }
+      if (requestId) {
+        writeOrgActionResponse(sourceGroup, requestId, result);
+      }
+      // `rejected` requires a non-empty error_class per the action-record schema.
+      const refused = result.kind === 'refuse';
       emitIpcAction(sink, {
-        level: 'info',
+        level: refused ? 'warn' : 'info',
         session_id: sourceGroup,
         trigger_source: sourceGroup,
         tool: 'ipc_org_action',
         inputs_hash: inputsHash,
         outputs_hash: hashPayload(data.action),
         duration_ms: Date.now() - ipcStart,
-        outcome: 'ok',
-        error_class: null,
+        outcome: refused ? 'rejected' : 'ok',
+        error_class: refused ? 'OrgActionRefused' : null,
         group: sourceGroup,
       });
       break;

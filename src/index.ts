@@ -1168,7 +1168,7 @@ async function main(): Promise<void> {
       // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
       // see the separation-of-duty scope note in org-action-handler.ts;
       // user-level dual control is not enforced.
-      await driveOrgActionRequest(
+      return await driveOrgActionRequest(
         {
           action: record.action,
           target_ref: record.target_ref,

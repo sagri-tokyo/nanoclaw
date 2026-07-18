@@ -1,22 +1,39 @@
 import { describe, it, expect } from 'vitest';
 
-import { ORG_ACTION_SUBMITTED_MESSAGE } from './org-action-messages.js';
+import { renderOrgActionResult } from './org-action-messages.js';
 
-describe('org_action submitted message', () => {
-  it('is neutral and never asserts the action is held', () => {
-    expect(ORG_ACTION_SUBMITTED_MESSAGE).not.toMatch(/held pending approval —/);
-    expect(ORG_ACTION_SUBMITTED_MESSAGE.startsWith('submitted')).toBe(true);
+describe('renderOrgActionResult', () => {
+  it('tells the agent a refused action did NOT happen and names the reason', () => {
+    const text = renderOrgActionResult({
+      kind: 'refuse',
+      reason: 'red_line_target',
+    });
+    expect(text).toContain('REFUSED');
+    expect(text).toContain('red_line_target');
+    expect(text).toMatch(/did NOT happen/i);
+    expect(text).not.toContain('Executed');
   });
 
-  it('conditions the do-not-proceed instruction on being notified of a hold', () => {
-    expect(ORG_ACTION_SUBMITTED_MESSAGE).toContain(
-      'If you are notified that it is held pending approval, do not proceed with dependent work',
-    );
+  it('reports an executed action as done', () => {
+    const text = renderOrgActionResult({ kind: 'execute' });
+    expect(text).toContain('Executed');
+    expect(text).toContain('done');
+    expect(text).not.toContain('REFUSED');
   });
 
-  it('tells the agent the host executes or reports asynchronously', () => {
-    expect(ORG_ACTION_SUBMITTED_MESSAGE).toContain(
-      'The host will execute it (or report the result) asynchronously',
-    );
+  it('marks a held action a blocker and warns against dependent work', () => {
+    const text = renderOrgActionResult({ kind: 'hold', token: 'T'.repeat(43) });
+    expect(text).toContain('BLOCKER');
+    expect(text).toMatch(/do NOT start any dependent work/i);
+    expect(text).not.toContain('REFUSED');
+  });
+
+  it('tells the agent an unknown outcome is neither success nor failure', () => {
+    const text = renderOrgActionResult({ kind: 'unknown' });
+    expect(text).toContain('UNKNOWN');
+    expect(text).toMatch(/verify/i);
+    expect(text).toMatch(/not assume either success or failure/i);
+    expect(text).not.toContain('REFUSED');
+    expect(text).not.toContain('Executed');
   });
 });

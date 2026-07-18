@@ -170,6 +170,85 @@ describe('driveOrgActionRequest — safe vs gated', () => {
   });
 });
 
+describe('driveOrgActionRequest — observable result (nanoclaw#541)', () => {
+  const ctx = {
+    sourceGroup: 'g',
+    chatJid: 'slack:C0AAA1111',
+    requesterGroup: 'g',
+  };
+  const safe = {
+    action: 'notion.append_progress',
+    target_ref: HEX32,
+    reversibility: 'reversible' as const,
+    stakes_hint: 'safe' as const,
+    citation_refs: [],
+    canonical_args: { text: 'hi' },
+  };
+
+  it('returns execute for a safe action', async () => {
+    const { deps } = makeDeps();
+    const result = await driveOrgActionRequest(safe, ctx, deps);
+    expect(result).toEqual({ kind: 'execute' });
+  });
+
+  it('returns hold with the minted token for a gated action', async () => {
+    const { deps } = makeDeps();
+    const result = await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      ctx,
+      deps,
+    );
+    expect(result).toEqual({ kind: 'hold', token: TOKEN });
+  });
+
+  it('returns refuse/classified_refuse for a red-line target', async () => {
+    const { deps } = makeDeps();
+    const result = await driveOrgActionRequest(
+      { ...safe, action: 'notion.write_property', target_ref: `prod-${HEX32}` },
+      ctx,
+      deps,
+    );
+    expect(result).toEqual({ kind: 'refuse', reason: 'classified_refuse' });
+  });
+
+  it('returns refuse/red_line_target for a red-line target_query', async () => {
+    const { deps } = makeDeps();
+    const result = await driveOrgActionRequest(
+      {
+        ...safe,
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'carbon MRV rollout',
+      },
+      ctx,
+      deps,
+    );
+    expect(result).toEqual({ kind: 'refuse', reason: 'red_line_target' });
+  });
+
+  it('returns refuse/target_unresolved when the name has no single match', async () => {
+    const { deps } = makeDeps();
+    const result = await driveOrgActionRequest(
+      {
+        ...safe,
+        action: 'notion.write_property',
+        target_ref: '',
+        target_query: 'Some Task',
+      },
+      ctx,
+      deps,
+    );
+    expect(result).toEqual({ kind: 'refuse', reason: 'target_unresolved' });
+  });
+});
+
 describe('driveOrgActionRequest — host-side Notion target resolution', () => {
   const ctx = {
     sourceGroup: 'g',
@@ -376,7 +455,7 @@ describe('driveOrgActionRequest — host-side Notion target resolution', () => {
 function seedGated(
   deps: OrgActionGateDeps,
   requesterGroup = 'g',
-): Promise<void> {
+): Promise<unknown> {
   return driveOrgActionRequest(
     {
       action: 'notion.write_property',
