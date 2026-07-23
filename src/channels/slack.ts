@@ -352,7 +352,14 @@ export class SlackChannel implements Channel {
     opts?: SendOptions,
   ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    const threadTs = opts?.threadId ?? this.lastThreadTs.get(jid);
+    if (opts?.topLevel && opts.threadId) {
+      throw new Error(
+        'SendOptions.topLevel and threadId are mutually exclusive',
+      );
+    }
+    const threadTs = opts?.topLevel
+      ? undefined
+      : (opts?.threadId ?? this.lastThreadTs.get(jid));
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });

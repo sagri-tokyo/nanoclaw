@@ -1187,6 +1187,36 @@ describe('SlackChannel', () => {
         thread_ts: '1700000000.999',
       });
     });
+
+    it('posts top-level when topLevel is set, ignoring the live lastThreadTs', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ ts: '1700000000.999', text: 'unrelated' }),
+      );
+      await channel.sendMessage('slack:C0123456789', 'cron output', {
+        topLevel: true,
+      });
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'cron output',
+        thread_ts: undefined,
+      });
+    });
+
+    it('rejects topLevel and threadId together', async () => {
+      const channel = new SlackChannel(createTestOpts());
+      await channel.connect();
+
+      await expect(
+        channel.sendMessage('slack:C0123456789', 'contradiction', {
+          topLevel: true,
+          threadId: '1700000000.111',
+        }),
+      ).rejects.toThrow('mutually exclusive');
+    });
   });
 
   // --- ownsJid ---

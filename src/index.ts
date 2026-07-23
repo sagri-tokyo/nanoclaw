@@ -1122,7 +1122,8 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      // topLevel: cron output has no message to reply to (see SendOptions.topLevel).
+      if (text) await channel.sendMessage(jid, text, { topLevel: true });
     },
   });
   startIpcWatcher({
