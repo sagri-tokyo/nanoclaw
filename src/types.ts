@@ -157,6 +157,11 @@ export interface TaskRunLog {
 // threads in one channel are active or queued).
 export interface SendOptions {
   threadId?: string;
+  // Force a top-level channel post, bypassing the lastThreadTs fallback. Set by
+  // senders that reply to no message (scheduled-task cron output) so they don't
+  // staple onto whichever human last spoke in the channel (sagri-ai#371).
+  // Mutually exclusive with threadId.
+  topLevel?: boolean;
 }
 
 export interface Channel {
