@@ -237,7 +237,7 @@ export class SlackChannel implements Channel {
       const jid = `slack:${msg.channel}`;
 
       // Last-resort fallback only: ingestion isn't gated on the per-group
-      // queue, so a slower reply must anchor via its own SendOptions.threadId —
+      // queue, so a slower reply must anchor via its own SendOptions.target —
       // a faster concurrent request can overwrite this map in real time.
       const threadTs = (msg as GenericMessageEvent).thread_ts;
       if (threadTs) {
@@ -352,14 +352,12 @@ export class SlackChannel implements Channel {
     opts?: SendOptions,
   ): Promise<void> {
     const channelId = jid.replace(/^slack:/, '');
-    if (opts?.topLevel && opts.threadId) {
-      throw new Error(
-        'SendOptions.topLevel and threadId are mutually exclusive',
-      );
-    }
-    const threadTs = opts?.topLevel
-      ? undefined
-      : (opts?.threadId ?? this.lastThreadTs.get(jid));
+    const threadTs =
+      opts?.target?.kind === 'topLevel'
+        ? undefined
+        : opts?.target?.kind === 'thread'
+          ? opts.target.id
+          : this.lastThreadTs.get(jid);
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text, threadTs });
