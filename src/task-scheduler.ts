@@ -86,15 +86,28 @@ export function isSilentResult(result: string): boolean {
     .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
 }
 
+// A scheduled-task agent reports failure by making its whole reply a single
+// `ERROR: ` line (the closed-set literal convention from
+// sagri-tokyo/sagri-ai#465). `formatErrorWrap` keys its Slack footer on this
+// shape, and `runTask` keys the `task_run_logs` status on it so a reported
+// failure never logs status=success (sagri-tokyo/sagri-ai#504). A multi-line
+// reply that merely starts with `ERROR: ` is narration, not a reported
+// failure.
+export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
+
+export function isErrorReply(result: string): boolean {
+  const trimmed = result.trim();
+  return !trimmed.includes('\n') && trimmed.startsWith('ERROR: ');
+}
+
 export function formatErrorWrap(
   result: string,
   opts: { runId: string; runbookUrl?: string | null; now?: Date },
 ): string {
-  const trimmed = result.trim();
-  const lines = trimmed.split('\n');
-  if (lines.length !== 1 || !trimmed.startsWith('ERROR: ')) {
+  if (!isErrorReply(result)) {
     return result;
   }
+  const trimmed = result.trim();
   const timestamp = (opts.now ?? new Date()).toISOString();
   const footer = `↳ run ${opts.runId} · ${timestamp}${opts.runbookUrl ? ` · runbook → ${opts.runbookUrl}` : ''}`;
   return `${trimmed}\n${footer}`;
@@ -416,6 +429,15 @@ async function runTask(
     error = err instanceof Error ? err.message : String(err);
     errorClass = err instanceof Error ? err.constructor.name : 'Error';
     logger.error({ taskId: task.id, error }, 'Task failed');
+  }
+
+  if (error === null && result !== null && isErrorReply(result)) {
+    // The container exited cleanly but the agent reported failure via the
+    // single-line ERROR: reply convention. Without this, the tick logs
+    // status=success / outcome=ok and every monitor built on
+    // task_run_logs.status reads green (sagri-tokyo/sagri-ai#504).
+    error = result.trim();
+    errorClass = AGENT_ERROR_REPLY_CLASS;
   }
 
   const durationMs = Date.now() - startTime;

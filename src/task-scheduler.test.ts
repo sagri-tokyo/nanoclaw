@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  getRecentTaskRunStatuses,
   getTaskById,
   logTaskRun,
 } from './db.js';
@@ -12,9 +13,11 @@ import type { RegisteredGroup, ScheduledTask } from './types.js';
 import {
   _resetSchedulerLoopForTests,
   _runTaskForTests,
+  AGENT_ERROR_REPLY_CLASS,
   classifyContainerError,
   computeNextRun,
   formatErrorWrap,
+  isErrorReply,
   isSilentResult,
   shouldPostFailure,
   slackTextForError,
@@ -848,5 +851,174 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
     const task = makeTask({ id: 'cap-none' });
     delete (task as { capability_profile?: unknown }).capability_profile;
     expect(await capturedProfileFor(task)).toBe('operator');
+  });
+});
+
+describe('isErrorReply', () => {
+  it('matches a single-line ERROR reply', () => {
+    expect(isErrorReply('ERROR: GitHub fetch failed')).toBe(true);
+  });
+
+  it('matches with surrounding whitespace', () => {
+    expect(isErrorReply('  ERROR: Notion query failed\n')).toBe(true);
+  });
+
+  it('does not match a multi-line reply starting with ERROR', () => {
+    expect(isErrorReply('ERROR: first leg\ningested 3 items')).toBe(false);
+  });
+
+  it('does not match a normal reply mentioning ERROR mid-text', () => {
+    expect(isErrorReply('Recovered from ERROR: transient timeout')).toBe(false);
+  });
+
+  it('does not match a reply without the trailing space', () => {
+    expect(isErrorReply('ERROR:GitHub fetch failed')).toBe(false);
+  });
+});
+
+describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+    const base = {
+      id: 'error-reply',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-05-15T00:00:00.000Z',
+      ...overrides,
+    };
+    createTask(base);
+    return getTaskById(base.id) as ScheduledTask;
+  }
+
+  function makeGroup(folder: string): RegisteredGroup {
+    return {
+      name: folder,
+      folder,
+      trigger: '@bot',
+      added_at: '2026-05-15T00:00:00.000Z',
+    };
+  }
+
+  function fakeRunner(output: ContainerOutput) {
+    return async (
+      _group: RegisteredGroup,
+      _input: unknown,
+      _onProcess: unknown,
+      onOutput?: (output: ContainerOutput) => Promise<void>,
+    ): Promise<ContainerOutput> => {
+      if (onOutput) await onOutput(output);
+      return output;
+    };
+  }
+
+  async function runWith(
+    task: ScheduledTask,
+    output: ContainerOutput,
+  ): Promise<void> {
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      },
+      fakeRunner(output),
+    );
+  }
+
+  it('logs status=error when a clean container exit carries an ERROR: reply', async () => {
+    const task = makeTask({ id: 'error-reply-status' });
+    await runWith(task, {
+      status: 'success',
+      result: 'ERROR: GitHub fetch failed',
+    });
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
+  });
+
+  it('emits outcome=error with error_class AgentErrorReply on an ERROR: reply', async () => {
+    const writes: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(typeof chunk === 'string' ? chunk : chunk.toString());
+        return true;
+      });
+    try {
+      const task = makeTask({ id: 'error-reply-action' });
+      await runWith(task, {
+        status: 'success',
+        result: 'ERROR: GitHub fetch failed',
+      });
+      const records = writes
+        .map((w) => w.trim())
+        .filter((w) => w.startsWith('{') && w.includes('"trigger"'))
+        .map((w) => JSON.parse(w));
+      expect(records.length).toBe(1);
+      expect(records[0]).toMatchObject({
+        level: 'error',
+        session_id: 'error-reply-action',
+        outcome: 'error',
+        error_class: AGENT_ERROR_REPLY_CLASS,
+      });
+    } finally {
+      stdoutSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('logs status=success for a normal reply', async () => {
+    const task = makeTask({ id: 'normal-reply' });
+    await runWith(task, {
+      status: 'success',
+      result: 'Ingested 3 items into the wiki.',
+    });
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['success']);
+  });
+
+  it('logs status=success for a multi-line reply that starts with ERROR', async () => {
+    // The #465 convention is a whole-reply single-line literal; a multi-line
+    // reply is narration, not a reported failure.
+    const task = makeTask({ id: 'multiline-reply' });
+    await runWith(task, {
+      status: 'success',
+      result: 'ERROR: partial leg\nbut the Notion leg ingested 2 items',
+    });
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['success']);
+  });
+
+  it('keeps the container error_class when the container itself failed', async () => {
+    const task = makeTask({
+      id: 'container-error',
+      failure_post_threshold: 99,
+    });
+    await runWith(task, {
+      status: 'error',
+      result: null,
+      error: 'Container exited with code 1',
+    });
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
   });
 });
