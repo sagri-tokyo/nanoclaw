@@ -152,16 +152,15 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
-// Options for an outbound send. `threadId` pins the reply to a specific thread
-// (more reliable than a channel's "most recent thread" heuristic when multiple
-// threads in one channel are active or queued).
+// Options for an outbound send. `target` picks the reply anchor: a specific
+// thread id (more reliable than a channel's "most recent thread" heuristic
+// when multiple threads in one channel are active or queued), or an explicit
+// top-level post that bypasses the lastThreadTs fallback — used by senders
+// that reply to no message (scheduled-task cron output) so they don't staple
+// onto whichever human last spoke in the channel (sagri-ai#371). Absent
+// `target` falls back to the channel's lastThreadTs.
 export interface SendOptions {
-  threadId?: string;
-  // Force a top-level channel post, bypassing the lastThreadTs fallback. Set by
-  // senders that reply to no message (scheduled-task cron output) so they don't
-  // staple onto whichever human last spoke in the channel (sagri-ai#371).
-  // Mutually exclusive with threadId.
-  topLevel?: boolean;
+  target?: { kind: 'thread'; id: string } | { kind: 'topLevel' };
 }
 
 export interface Channel {

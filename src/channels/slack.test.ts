@@ -1150,7 +1150,7 @@ describe('SlackChannel', () => {
   // --- reply thread anchoring under concurrency (sagri-ai#368) ---
 
   describe('reply thread anchoring', () => {
-    it('anchors to the explicit SendOptions.threadId, not the live lastThreadTs a faster request overwrote', async () => {
+    it('anchors to the explicit SendOptions.target thread, not the live lastThreadTs a faster request overwrote', async () => {
       const channel = new SlackChannel(createTestOpts());
       await channel.connect();
 
@@ -1162,7 +1162,7 @@ describe('SlackChannel', () => {
 
       // The slow request's reply carries its own trigger ts as the anchor.
       await channel.sendMessage('slack:C0123456789', 'slow reply', {
-        threadId: '1700000000.111',
+        target: { kind: 'thread', id: '1700000000.111' },
       });
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
@@ -1196,7 +1196,7 @@ describe('SlackChannel', () => {
         createMessageEvent({ ts: '1700000000.999', text: 'unrelated' }),
       );
       await channel.sendMessage('slack:C0123456789', 'cron output', {
-        topLevel: true,
+        target: { kind: 'topLevel' },
       });
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
@@ -1204,18 +1204,6 @@ describe('SlackChannel', () => {
         text: 'cron output',
         thread_ts: undefined,
       });
-    });
-
-    it('rejects topLevel and threadId together', async () => {
-      const channel = new SlackChannel(createTestOpts());
-      await channel.connect();
-
-      await expect(
-        channel.sendMessage('slack:C0123456789', 'contradiction', {
-          topLevel: true,
-          threadId: '1700000000.111',
-        }),
-      ).rejects.toThrow('mutually exclusive');
     });
   });
 
@@ -1575,7 +1563,7 @@ describe('SlackChannel', () => {
       });
     });
 
-    it('sendMessage prefers opts.threadId over the channel lastThreadTs', async () => {
+    it('sendMessage prefers opts.target thread over the channel lastThreadTs', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
       await channel.connect();
@@ -1587,7 +1575,7 @@ describe('SlackChannel', () => {
       currentApp().client.chat.postMessage.mockClear();
 
       await channel.sendMessage('slack:C0123456789', 'reply', {
-        threadId: 'BBB.111',
+        target: { kind: 'thread', id: 'BBB.111' },
       });
 
       expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith(

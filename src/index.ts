@@ -572,7 +572,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 runId: interactiveRunId,
                 now: new Date(),
               }),
-              targetThreadId ? { threadId: targetThreadId } : undefined,
+              targetThreadId
+                ? { target: { kind: 'thread', id: targetThreadId } }
+                : undefined,
             );
             outputSentToUser = true;
           }
@@ -1122,8 +1124,11 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      // topLevel: cron output has no message to reply to (see SendOptions.topLevel).
-      if (text) await channel.sendMessage(jid, text, { topLevel: true });
+      // topLevel: cron output has no message to reply to (see SendOptions.target).
+      if (text)
+        await channel.sendMessage(jid, text, {
+          target: { kind: 'topLevel' },
+        });
     },
   });
   startIpcWatcher({
