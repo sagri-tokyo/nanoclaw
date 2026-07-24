@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { _initTestDatabase, createTask, setRegisteredGroup } from './db.js';
+import {
+  _initTestDatabase,
+  createTask,
+  getTaskOutcomesSince,
+  setRegisteredGroup,
+} from './db.js';
 import { processTaskIpc, type IpcDeps } from './ipc.js';
 import type { RegisteredGroup, SendOptions } from './types.js';
 
@@ -104,6 +109,52 @@ describe('task_outcome IPC drain', () => {
     await drain(RECORD);
     await drain({ ...RECORD, timestamp: '2026-07-24T02:00:00.000Z' });
     expect(sent).toHaveLength(1);
+  });
+
+  it('retries the post on the next tick when the first post throws', async () => {
+    let attempts = 0;
+    deps.sendMessage = async (
+      jid: string,
+      text: string,
+      options?: SendOptions,
+    ) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('slack down');
+      sent.push({ jid, text, options });
+    };
+    await expect(drain(RECORD)).rejects.toThrow('slack down');
+    expect(sent).toEqual([]);
+    // The failed post committed no dedupe row, so the next tick sees the
+    // outcome as still-new and posts it rather than dropping it as a repeat.
+    await drain({ ...RECORD, timestamp: '2026-07-24T02:00:00.000Z' });
+    expect(sent).toEqual([
+      {
+        jid: 'slack:C0AAA1111',
+        text: 'exp-001 — submitted',
+        options: { target: { kind: 'topLevel' } },
+      },
+    ]);
+  });
+
+  it('refreshes a deduped repeat into the run window without reposting', async () => {
+    await drain({
+      ...RECORD,
+      status: 'failed',
+      error_class: 'skill_failed_transient',
+    });
+    await drain({
+      ...RECORD,
+      status: 'failed',
+      error_class: 'skill_failed',
+      timestamp: '2026-07-24T05:00:00.000Z',
+    });
+    expect(sent).toHaveLength(1);
+    expect(
+      getTaskOutcomesSince(
+        'dsm-experiment-submitter',
+        '2026-07-24T00:00:00.000Z',
+      ),
+    ).toEqual([{ status: 'failed', error_class: 'skill_failed' }]);
   });
 
   it('posts again when the status changes for the same entity', async () => {

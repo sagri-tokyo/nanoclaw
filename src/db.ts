@@ -847,17 +847,52 @@ function previousRunCutoff(taskId: string): string {
  * where the scheduler reads a structured run's status from.
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
+  const isNew = taskOutcomeIsNew(row.task_id, row.entity_id, row.status);
+  commitTaskOutcome(row);
+  return isNew;
+}
+
+/**
+ * Read-only half of {@link recordTaskOutcome}: would this `(task_id,
+ * entity_id, status)` be news if recorded now? True when no row exists, or a
+ * row exists but was last recorded before the previous run's window — the same
+ * "post only what a prior run did not already report" rule the atomic version
+ * decides.
+ *
+ * Split out so the host can decide-then-post-then-commit: the dedupe row is
+ * written only after the Slack post resolves, so a post that throws leaves no
+ * row and the next tick retries rather than dropping the outcome as an
+ * already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as a separate read
+ * because the IPC drain is single-threaded — nothing else touches this key
+ * between the peek and the commit.
+ */
+export function taskOutcomeIsNew(
+  taskId: string,
+  entityId: string,
+  status: string,
+): boolean {
   const existing = db
     .prepare(
-      `SELECT id, recorded_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT recorded_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(row.task_id, row.entity_id, row.status) as
-    | { id: number; recorded_at: string }
-    | undefined;
+    .get(taskId, entityId, status) as { recorded_at: string } | undefined;
+  if (!existing) return true;
+  return existing.recorded_at < previousRunCutoff(taskId);
+}
+
+/**
+ * Write half of {@link recordTaskOutcome}: upsert the row, refreshing
+ * `recorded_at`/`error_class`/`detail` on a repeat so the record stays inside
+ * the current run's window where the scheduler reads a structured run's status.
+ */
+export function commitTaskOutcome(row: TaskOutcomeRow): void {
+  const existing = db
+    .prepare(
+      `SELECT id FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+    )
+    .get(row.task_id, row.entity_id, row.status) as { id: number } | undefined;
 
   if (existing) {
-    const reportedOnPreviousRun =
-      existing.recorded_at >= previousRunCutoff(row.task_id);
     db.prepare(
       `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ? WHERE id = ?`,
     ).run(
@@ -866,7 +901,7 @@ export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
       row.recorded_at,
       existing.id,
     );
-    return !reportedOnPreviousRun;
+    return;
   }
 
   db.prepare(
@@ -883,7 +918,6 @@ export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
     row.group_folder,
     row.recorded_at,
   );
-  return true;
 }
 
 /**

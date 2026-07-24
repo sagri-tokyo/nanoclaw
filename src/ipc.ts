@@ -6,10 +6,11 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import {
+  commitTaskOutcome,
   createTask,
   deleteTask,
   getTaskById,
-  recordTaskOutcome,
+  taskOutcomeIsNew,
   updateTask,
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -871,12 +872,16 @@ export async function processTaskIpc(
         emitReject('ipc_task_outcome', 'TargetGroupNotRegistered');
         break;
       }
-      const isNew = recordTaskOutcome({
-        ...outcome,
-        group_folder: sourceGroup,
-        recorded_at: new Date().toISOString(),
-      });
+      const isNew = taskOutcomeIsNew(
+        outcome.task_id,
+        outcome.entity_id,
+        outcome.status,
+      );
       if (isNew) {
+        // Post before committing the dedupe row. If the post throws, the outer
+        // watcher moves this file to ipc/errors and no row is written, so the
+        // next tick re-derives isNew and retries rather than dropping the
+        // outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105).
         // Cron output replies to no message, so it must not staple onto
         // whichever human last spoke in the channel (sagri-ai#371).
         await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
@@ -893,6 +898,15 @@ export async function processTaskIpc(
           'task_outcome already posted for this status on the previous run; dropping the repeat',
         );
       }
+      // Reached only after a successful post (isNew) or with no post at all
+      // (repeat). The repeat still commits to refresh recorded_at into the
+      // current run's window, which is where the scheduler reads a structured
+      // run's status from.
+      commitTaskOutcome({
+        ...outcome,
+        group_folder: sourceGroup,
+        recorded_at: new Date().toISOString(),
+      });
       emitIpcAction(sink, {
         level: 'info',
         session_id: outcome.task_id,
