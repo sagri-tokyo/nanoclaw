@@ -890,7 +890,7 @@ export async function processTaskIpc(
             entityId: outcome.entity_id,
             status: outcome.status,
           },
-          'task_outcome already posted for this status; dropping the repeat',
+          'task_outcome already posted for this status on the previous run; dropping the repeat',
         );
       }
       emitIpcAction(sink, {

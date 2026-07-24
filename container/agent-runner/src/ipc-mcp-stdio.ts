@@ -13,8 +13,10 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { ORG_ACTION_SUBMITTED_MESSAGE } from './org-action-messages.js';
 import {
+  parseTaskOutcome,
   TASK_OUTCOME_ERROR_CLASSES,
   TASK_OUTCOME_RECORDED_MESSAGE,
+  TASK_OUTCOME_REJECTED_MESSAGES,
   TASK_OUTCOME_STATUSES,
 } from './task-outcome-contract.js';
 
@@ -741,7 +743,7 @@ error_class is REQUIRED for failed / rejected / stalled and FORBIDDEN otherwise.
       .string()
       .min(1)
       .describe(
-        'Constrained id for the thing this outcome is about (e.g. experiment_id). Never prose. Use the literal "unknown" when the id could not be established.',
+        'Constrained id for the thing this outcome is about (e.g. experiment_id). Must match /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/ — no spaces, never prose. Use the literal "unknown" when the id could not be established.',
       ),
     status: z.enum(TASK_OUTCOME_STATUSES),
     error_class: z
@@ -754,7 +756,7 @@ error_class is REQUIRED for failed / rejected / stalled and FORBIDDEN otherwise.
       .record(z.string(), z.string())
       .optional()
       .describe(
-        'Optional constrained scalars for the audit record (e.g. {"job_id": "...", "page_id": "..."}). Ids and enum-ish tokens only — no sentences, no messages, max 8 entries.',
+        'Optional constrained scalars for the audit record (e.g. {"job_id": "...", "page_id": "..."}). Ids and enum-ish tokens only — no sentences, no messages, max 8 entries. Keys match /^[a-z][a-z0-9_]{0,31}$/, values /^[A-Za-z0-9][A-Za-z0-9._:\\/-]{0,127}$/.',
       ),
   },
   async (args) => {
@@ -765,13 +767,34 @@ error_class is REQUIRED for failed / rejected / stalled and FORBIDDEN otherwise.
       );
     }
 
-    writeIpcFile(TASKS_DIR, {
-      type: 'task_outcome',
+    // The zod schema above is a shape gate, not the contract: it cannot express
+    // the id constraints, the detail limits, or the status/error_class pairing
+    // rule that the host enforces on drain. Re-validate here so this call never
+    // answers `recorded` for a record the host will drop — a false `recorded`
+    // ends the run with no outcome for the entity, which the host then reads as
+    // a crashed tick.
+    const parsed = parseTaskOutcome({
       task_id: taskId,
       entity_id: args.entity_id,
       status: args.status,
       error_class: args.error_class,
       detail: args.detail,
+    });
+    if (!parsed.ok) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: TASK_OUTCOME_REJECTED_MESSAGES[parsed.error_class],
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'task_outcome',
+      ...parsed.record,
       groupFolder,
       timestamp: new Date().toISOString(),
     });

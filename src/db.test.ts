@@ -994,6 +994,92 @@ describe('task outcome dedupe store', () => {
     ).toBe(false);
   });
 
+  // Runs are the unit dedupe collapses over: a job that stays `submitted` for
+  // twenty consecutive ticks is one piece of news, but the same status
+  // returning after the task ran without reporting it is a new one. Keyed on
+  // existence alone, the second outage of a task's life would never post.
+  function seedTask(): void {
+    createTask({
+      id: 'dsm-experiment-submitter',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Poll and report.',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-07-24T01:00:00.000Z',
+      status: 'active',
+      created_at: '2026-07-24T00:00:00.000Z',
+      reply_mode: 'structured',
+    });
+  }
+
+  function finishRun(runAt: string): void {
+    logTaskRun({
+      task_id: 'dsm-experiment-submitter',
+      run_at: runAt,
+      duration_ms: 100,
+      status: 'success',
+      result: 'ok',
+      error: null,
+    });
+  }
+
+  it('collapses a repeat reported on the run right after it', () => {
+    seedTask();
+    recordTaskOutcome(outcome({ recorded_at: '2026-07-24T01:00:00.000Z' }));
+    finishRun('2026-07-24T01:01:00.000Z');
+    recordTaskOutcome(outcome({ recorded_at: '2026-07-24T02:00:00.000Z' }));
+    finishRun('2026-07-24T02:01:00.000Z');
+    expect(
+      recordTaskOutcome(outcome({ recorded_at: '2026-07-24T03:00:00.000Z' })),
+    ).toBe(false);
+  });
+
+  it('posts the same status again when it returns after runs that did not report it', () => {
+    const outage = (recordedAt: string) =>
+      outcome({
+        entity_id: 'unknown',
+        status: 'failed',
+        error_class: 'upstream_query_failed',
+        recorded_at: recordedAt,
+      });
+
+    seedTask();
+    expect(recordTaskOutcome(outage('2026-07-24T01:00:00.000Z'))).toBe(true);
+    finishRun('2026-07-24T01:01:00.000Z');
+    expect(recordTaskOutcome(outage('2026-07-24T02:00:00.000Z'))).toBe(false);
+    finishRun('2026-07-24T02:01:00.000Z');
+    // Two runs recover; the upstream is healthy so neither reports the outage.
+    finishRun('2026-07-24T03:01:00.000Z');
+    finishRun('2026-07-24T04:01:00.000Z');
+    expect(recordTaskOutcome(outage('2026-07-24T05:00:00.000Z'))).toBe(true);
+  });
+
+  it('refreshes error_class on a collapsed repeat so the run window sees the latest', () => {
+    recordTaskOutcome(
+      outcome({
+        status: 'failed',
+        error_class: 'skill_failed_transient',
+        recorded_at: '2026-07-24T01:00:00.000Z',
+      }),
+    );
+    recordTaskOutcome(
+      outcome({
+        status: 'failed',
+        error_class: 'skill_failed',
+        recorded_at: '2026-07-24T02:00:00.000Z',
+      }),
+    );
+    expect(
+      getTaskOutcomesSince(
+        'dsm-experiment-submitter',
+        '2026-07-24T02:00:00.000Z',
+      ),
+    ).toEqual([{ status: 'failed', error_class: 'skill_failed' }]);
+  });
+
   it('treats a status change for the same entity as a new record', () => {
     recordTaskOutcome(outcome());
     expect(

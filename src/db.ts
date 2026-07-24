@@ -815,28 +815,60 @@ export function getRecentTaskRunStatuses(
 }
 
 /**
- * Record one structured task outcome. Returns true when this is the first time
- * the `(task_id, entity_id, status)` key has been seen — the host posts only
- * on that first record, so a task that re-reports an unchanged status on every
- * tick produces exactly one Slack line.
+ * End of the run before last for `taskId`, or `''` when the task has run fewer
+ * than twice. `task_run_logs.run_at` is stamped when a run finishes, so the row
+ * at offset 1 is the end of run N-2 while run N is still in flight: everything
+ * recorded at or after it belongs to run N-1 or run N.
+ */
+function previousRunCutoff(taskId: string): string {
+  const row = db
+    .prepare(
+      `SELECT run_at FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC, id DESC LIMIT 1 OFFSET 1`,
+    )
+    .get(taskId) as { run_at: string } | undefined;
+  return row?.run_at ?? '';
+}
+
+/**
+ * Record one structured task outcome. Returns true when the host should post
+ * it, which is whenever the same `(task_id, entity_id, status)` was not already
+ * reported on the previous run. A job that stays `submitted` across twenty
+ * consecutive ticks therefore still produces exactly one Slack line, because
+ * each tick's record lands one run after the last.
  *
- * A repeat refreshes `recorded_at` rather than being dropped: the scheduler
- * keys a structured run's status on the outcomes recorded during that run, and
- * a deduped repeat still proves the run reported something.
+ * The window is what keeps dedupe from becoming permanent silence. Keyed on
+ * existence alone, the first `upstream_query_failed` would be the only outage
+ * a task ever reported, a quiet tick's `none — complete` line would post once
+ * for the lifetime of the database, and an entity that legitimately re-enters a
+ * status in a later run would never be heard from again. A repeat that follows
+ * a gap — a recovery, a re-submission, a later outage — is news, and posts.
+ *
+ * A repeat refreshes the row rather than inserting beside it: the key stays
+ * unique so the table grows with entities handled, not with ticks, and the
+ * refreshed `recorded_at` keeps the record inside the current run's window,
+ * which is where the scheduler reads a structured run's status from.
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
   const existing = db
     .prepare(
-      `SELECT id FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT id, recorded_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(row.task_id, row.entity_id, row.status) as { id: number } | undefined;
+    .get(row.task_id, row.entity_id, row.status) as
+    | { id: number; recorded_at: string }
+    | undefined;
 
   if (existing) {
-    db.prepare(`UPDATE task_outcomes SET recorded_at = ? WHERE id = ?`).run(
+    const reportedOnPreviousRun =
+      existing.recorded_at >= previousRunCutoff(row.task_id);
+    db.prepare(
+      `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ? WHERE id = ?`,
+    ).run(
+      row.error_class,
+      row.detail === null ? null : JSON.stringify(row.detail),
       row.recorded_at,
       existing.id,
     );
-    return false;
+    return !reportedOnPreviousRun;
   }
 
   db.prepare(
