@@ -28,9 +28,18 @@ import {
   type StakesHint,
 } from './org-action-gate.js';
 import { parseTaskOutcome, renderTaskOutcome } from './task-outcome.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, SendOptions } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
+
+function chatJidForGroupFolder(
+  registeredGroups: Record<string, RegisteredGroup>,
+  folder: string,
+): string | undefined {
+  return Object.entries(registeredGroups).find(
+    ([, group]) => group.folder === folder,
+  )?.[0];
+}
 
 function emitIpcAction(
   sink: ActionSink,
@@ -64,7 +73,11 @@ function emitIpcAction(
 }
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    options?: SendOptions,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -782,13 +795,7 @@ export async function processTaskIpc(
       const targetQuery: string | undefined = data.target_query;
       // The chat jid that owns the source group is where the approval prompt
       // posts. For main, fall back to the requesting group's own jid.
-      let chatJid: string | undefined;
-      for (const [jid, group] of Object.entries(registeredGroups)) {
-        if (group.folder === sourceGroup) {
-          chatJid = jid;
-          break;
-        }
-      }
+      const chatJid = chatJidForGroupFolder(registeredGroups, sourceGroup);
       if (!chatJid) {
         logger.warn(
           { sourceGroup },
@@ -840,13 +847,22 @@ export async function processTaskIpc(
         break;
       }
       const outcome = parsed.record;
-      let chatJid: string | undefined;
-      for (const [jid, group] of Object.entries(registeredGroups)) {
-        if (group.folder === sourceGroup) {
-          chatJid = jid;
-          break;
-        }
+      // `task_id` reaches the container as an env var but arrives here inside a
+      // file the container writes, so it is a claim, not a fact. Only the
+      // directory the file was drained from is verified. Without this check a
+      // group could stamp another group's task id onto a record and either turn
+      // that task's next run red or burn its dedupe key so the real outcome
+      // never posts.
+      const task = getTaskById(outcome.task_id);
+      if (!task || task.group_folder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, taskId: outcome.task_id },
+          'task_outcome: task_id is unknown or belongs to another group',
+        );
+        emitReject('ipc_task_outcome', 'TaskNotOwnedBySourceGroup');
+        break;
       }
+      const chatJid = chatJidForGroupFolder(registeredGroups, sourceGroup);
       if (!chatJid) {
         logger.warn(
           { sourceGroup },
@@ -861,7 +877,11 @@ export async function processTaskIpc(
         recorded_at: new Date().toISOString(),
       });
       if (isNew) {
-        await deps.sendMessage(chatJid, renderTaskOutcome(outcome));
+        // Cron output replies to no message, so it must not staple onto
+        // whichever human last spoke in the channel (sagri-ai#371).
+        await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
+          target: { kind: 'topLevel' },
+        });
       } else {
         logger.debug(
           {

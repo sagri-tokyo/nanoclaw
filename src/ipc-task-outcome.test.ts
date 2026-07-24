@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { _initTestDatabase, setRegisteredGroup } from './db.js';
+import { _initTestDatabase, createTask, setRegisteredGroup } from './db.js';
 import { processTaskIpc, type IpcDeps } from './ipc.js';
-import type { RegisteredGroup } from './types.js';
+import type { RegisteredGroup, SendOptions } from './types.js';
 
 const SOURCE_GROUP: RegisteredGroup = {
   name: 'Dev',
@@ -12,8 +12,25 @@ const SOURCE_GROUP: RegisteredGroup = {
 };
 
 let groups: Record<string, RegisteredGroup>;
-let sent: Array<{ jid: string; text: string }>;
+let sent: Array<{ jid: string; text: string; options?: SendOptions }>;
 let deps: IpcDeps;
+
+function registerTask(id: string, groupFolder: string): void {
+  createTask({
+    id,
+    group_folder: groupFolder,
+    chat_jid: 'slack:C0AAA1111',
+    prompt: 'Poll and report.',
+    script: null,
+    schedule_type: 'cron',
+    schedule_value: '*/15 * * * *',
+    context_mode: 'isolated',
+    next_run: '2026-07-24T01:00:00.000Z',
+    status: 'active',
+    created_at: '2026-07-24T00:00:00.000Z',
+    reply_mode: 'structured',
+  });
+}
 
 const RECORD = {
   type: 'task_outcome',
@@ -41,10 +58,11 @@ beforeEach(() => {
   _initTestDatabase();
   groups = { 'slack:C0AAA1111': SOURCE_GROUP };
   setRegisteredGroup('slack:C0AAA1111', SOURCE_GROUP);
+  registerTask('dsm-experiment-submitter', 'slack_sagri-ai-dev');
   sent = [];
   deps = {
-    sendMessage: async (jid: string, text: string) => {
-      sent.push({ jid, text });
+    sendMessage: async (jid: string, text: string, options?: SendOptions) => {
+      sent.push({ jid, text, options });
     },
     registeredGroups: () => groups,
     registerGroup: () => {},
@@ -59,7 +77,11 @@ describe('task_outcome IPC drain', () => {
   it('posts the host-rendered line to the source group chat', async () => {
     await drain(RECORD);
     expect(sent).toEqual([
-      { jid: 'slack:C0AAA1111', text: 'exp-001 — submitted' },
+      {
+        jid: 'slack:C0AAA1111',
+        text: 'exp-001 — submitted',
+        options: { target: { kind: 'topLevel' } },
+      },
     ]);
   });
 
@@ -73,6 +95,7 @@ describe('task_outcome IPC drain', () => {
       {
         jid: 'slack:C0AAA1111',
         text: 'exp-001 — failed [skill_failed_transient]',
+        options: { target: { kind: 'topLevel' } },
       },
     ]);
   });
@@ -129,6 +152,17 @@ describe('task_outcome IPC drain', () => {
   it('rejects a record from a group with no registered chat jid', async () => {
     groups = {};
     await drain(RECORD);
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects a task_id that matches no registered task', async () => {
+    await drain({ ...RECORD, task_id: 'no-such-task' });
+    expect(sent).toEqual([]);
+  });
+
+  it('rejects a task_id owned by another group', async () => {
+    registerTask('other-groups-task', 'slack_other');
+    await drain({ ...RECORD, task_id: 'other-groups-task' });
     expect(sent).toEqual([]);
   });
 });

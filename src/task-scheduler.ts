@@ -481,21 +481,19 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
-  if (task.reply_mode === 'structured') {
-    if (error === null) {
-      // ponytail: reads the outcomes the IPC watcher drained during this run.
-      // The watcher polls every IPC_POLL_INTERVAL (1s) and the container is
-      // only closed TASK_CLOSE_DELAY_MS (10s) after the agent's last tool
-      // call, so a record written by the tick is drained well before this
-      // point. If that margin ever shrinks, correlate on a run id written by
-      // the host instead of on the drain timestamp.
-      const derived = deriveStructuredRunError(
-        getTaskOutcomesSince(task.id, new Date(startTime).toISOString()),
-      );
-      if (derived) {
-        error = derived.error;
-        errorClass = derived.error_class;
-      }
+  if (task.reply_mode === 'structured' && error === null) {
+    // Reads the outcomes the IPC watcher drained during this run. The watcher
+    // polls every IPC_POLL_INTERVAL (1s) and the container is only closed
+    // TASK_CLOSE_DELAY_MS (10s) after the agent's last tool call, so a record
+    // written by the tick is drained well before this point. If that margin
+    // ever shrinks, correlate on a run id written by the host instead of on
+    // the drain timestamp.
+    const derived = deriveStructuredRunError(
+      getTaskOutcomesSince(task.id, new Date(startTime).toISOString()),
+    );
+    if (derived) {
+      error = derived.error;
+      errorClass = derived.error_class;
     }
   } else if (error === null && result !== null && isErrorReply(result)) {
     // The container exited cleanly but the agent reported failure via the

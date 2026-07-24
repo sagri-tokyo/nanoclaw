@@ -1054,4 +1054,24 @@ describe('task outcome dedupe store', () => {
       ),
     ).toEqual([]);
   });
+
+  it("drops a deleted task's outcomes so a re-registered id still posts", () => {
+    createTask({
+      id: 'dsm-experiment-submitter',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Poll and report.',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-07-24T01:00:00.000Z',
+      status: 'active',
+      created_at: '2026-07-24T00:00:00.000Z',
+      reply_mode: 'structured',
+    });
+    recordTaskOutcome(outcome());
+    deleteTask('dsm-experiment-submitter');
+    expect(recordTaskOutcome(outcome())).toBe(true);
+  });
 });

@@ -744,8 +744,12 @@ export function updateTask(
 }
 
 export function deleteTask(id: string): void {
-  // Delete child records first (FK constraint)
+  // Delete child records first (FK constraint). Outcomes go too: their
+  // uniqueness key is (task_id, entity_id, status), so a row surviving its task
+  // would silently swallow the first post of a task later registered under the
+  // same id.
   db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
+  db.prepare('DELETE FROM task_outcomes WHERE task_id = ?').run(id);
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
