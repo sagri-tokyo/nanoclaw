@@ -14,6 +14,7 @@ import {
   getDueTasks,
   getRecentTaskRunStatuses,
   getTaskById,
+  getTaskOutcomesSince,
   logTaskRun,
   updateTask,
   updateTaskAfterRun,
@@ -98,6 +99,46 @@ export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
   return !trimmed.includes('\n') && trimmed.startsWith('ERROR: ');
+}
+
+// A `structured` task has no ERROR: line to key on — its reply never reaches
+// chat at all — so the run's `task_run_logs` status comes from the
+// `report_outcome` records the tick emitted. Silence is a failure, not a pass:
+// a tick that reported nothing either crashed before reporting or skipped the
+// contract, and logging it green is the exact blind spot sagri-ai#504 closed
+// for text mode.
+export const NO_TASK_OUTCOME_ERROR_CLASS = 'NoTaskOutcomeReported';
+export const TASK_OUTCOME_FAILURE_ERROR_CLASS = 'TaskOutcomeFailure';
+
+const RUN_FAILING_OUTCOME_STATUSES: ReadonlySet<string> = new Set([
+  'failed',
+  'stalled',
+]);
+
+/**
+ * Derive the run-level error for a `structured` task from the outcomes it
+ * recorded during the run, or null when the run is a success. `rejected` is
+ * NOT a run failure: a refusal (injection, failed extraction) is the tick
+ * doing its job, and the record itself is the operator-visible signal.
+ */
+export function deriveStructuredRunError(
+  outcomes: Array<{ status: string; error_class: string | null }>,
+): { error: string; error_class: string } | null {
+  if (outcomes.length === 0) {
+    return {
+      error: 'Structured task recorded no outcome for this run',
+      error_class: NO_TASK_OUTCOME_ERROR_CLASS,
+    };
+  }
+  const failure = outcomes.find((outcome) =>
+    RUN_FAILING_OUTCOME_STATUSES.has(outcome.status),
+  );
+  if (!failure) return null;
+  const suffix = failure.error_class ? ` [${failure.error_class}]` : '';
+  return {
+    error: `Structured task reported ${failure.status}${suffix}`,
+    error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
+  };
 }
 
 export function formatErrorWrap(
@@ -340,6 +381,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
+        taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
@@ -354,15 +396,13 @@ async function runTask(
             now: new Date(),
           });
         if (streamedOutput.result) {
+          // Posting the reply is deferred until after the runner returns so
+          // the decision can read the `task_outcomes` this run recorded. The
+          // IPC watcher drains those records on its own 1s timer, so a record
+          // the tick wrote may not be visible at stream time — only once the
+          // container has closed is it guaranteed drained. See the reply-post
+          // block below.
           result = streamedOutput.result;
-          if (isSilentResult(streamedOutput.result)) {
-            logger.debug(
-              { taskId: task.id },
-              'Scheduled task produced silent-result marker; skipping chat post',
-            );
-          } else {
-            await deps.sendMessage(task.chat_jid, wrap(streamedOutput.result));
-          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
@@ -431,7 +471,81 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
-  if (error === null && result !== null && isErrorReply(result)) {
+  // Reads the outcomes the IPC watcher drained during this run. The watcher
+  // polls every IPC_POLL_INTERVAL (1s) and the container is only closed
+  // TASK_CLOSE_DELAY_MS (10s) after the agent's last tool call, so a record
+  // written by the tick is drained well before this point. If that margin
+  // ever shrinks, correlate on a run id written by the host instead of on
+  // the drain timestamp. This single read feeds both the reply-post decision
+  // and the structured run-status derivation below.
+  const runOutcomes = getTaskOutcomesSince(
+    task.id,
+    new Date(startTime).toISOString(),
+  );
+
+  try {
+    if (result !== null) {
+      if (task.reply_mode === 'structured') {
+        // The reply is not the transport in this mode — `report_outcome`
+        // records are. Log the text so a prompt regression is still
+        // debuggable, but never post it.
+        logger.info(
+          { taskId: task.id, reply: result },
+          'Structured reply mode; agent reply not posted to chat',
+        );
+      } else if (runOutcomes.length > 0) {
+        // This text-mode tick already routed its operator lines through the
+        // `task_outcome` channel, which the host renders and posts. Posting
+        // the agent's prose too would duplicate them. A record whose post was
+        // collapsed as a previous-run repeat still refreshed its `recorded_at`
+        // into this run's window, so it counts here — the operator already saw
+        // that line, so the host still owns the reply.
+        logger.debug(
+          { taskId: task.id },
+          'task_outcome recorded this run; not posting agent prose',
+        );
+      } else if (isSilentResult(result)) {
+        logger.debug(
+          { taskId: task.id },
+          'Scheduled task produced silent-result marker; skipping chat post',
+        );
+      } else {
+        await deps.sendMessage(
+          task.chat_jid,
+          formatErrorWrap(result, {
+            runId: task.id,
+            runbookUrl: task.runbook_url,
+            now: new Date(),
+          }),
+        );
+      }
+    }
+  } catch (postErr) {
+    // A failed reply post must still fall through to logTaskRun /
+    // updateTaskAfterRun below; otherwise a Slack outage leaves next_run
+    // stale and the scheduler re-runs the task every poll. Only surface the
+    // post failure when the run itself succeeded — a genuine run failure the
+    // main catch already recorded keeps its own class.
+    const postError =
+      postErr instanceof Error ? postErr.message : String(postErr);
+    logger.error(
+      { taskId: task.id, error: postError },
+      'Failed to post scheduled task reply',
+    );
+    if (error === null) {
+      error = postError;
+      errorClass =
+        postErr instanceof Error ? postErr.constructor.name : 'Error';
+    }
+  }
+
+  if (task.reply_mode === 'structured' && error === null) {
+    const derived = deriveStructuredRunError(runOutcomes);
+    if (derived) {
+      error = derived.error;
+      errorClass = derived.error_class;
+    }
+  } else if (error === null && result !== null && isErrorReply(result)) {
     // The container exited cleanly but the agent reported failure via the
     // single-line ERROR: reply convention. Without this, the tick logs
     // status=success / outcome=ok and every monitor built on

@@ -139,6 +139,23 @@ export interface ScheduledTask {
   runbook_url?: string | null;
   failure_post_threshold?: number;
   capability_profile?: CapabilityProfile;
+  reply_mode?: ReplyMode;
+}
+
+// How a scheduled task's outcome reaches chat. `text` (the default) posts the
+// agent's final message verbatim — the legacy path, where prose the model
+// writes IS the Slack post. `structured` suppresses that post entirely and
+// posts only host-rendered lines built from `report_outcome` records.
+export type ReplyMode = 'text' | 'structured';
+
+export interface TaskOutcomeRow {
+  task_id: string;
+  entity_id: string;
+  status: string;
+  error_class: string | null;
+  detail: Record<string, string> | null;
+  group_folder: string;
+  recorded_at: string;
 }
 
 export interface TaskRunLog {

@@ -87,6 +87,12 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  /**
+   * Scheduled-task row id. Forwarded to the container so the `report_outcome`
+   * tool can stamp records with a host-authored task id instead of trusting
+   * the model to repeat one. Absent for interactive runs.
+   */
+  taskId?: string;
   assistantName?: string;
   script?: string;
   /**

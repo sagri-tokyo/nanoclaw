@@ -34,6 +34,10 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  // Scheduled-task row id, forwarded so `report_outcome` records correlate to
+  // the task without the model authoring the id. Absent for interactive runs,
+  // where the tool refuses.
+  taskId?: string;
   assistantName?: string;
   script?: string;
   // Per-task capability profile (sagri-ai#312). Forwarded by the host via the
@@ -522,6 +526,7 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            NANOCLAW_TASK_ID: containerInput.taskId ?? '',
           },
         },
       },

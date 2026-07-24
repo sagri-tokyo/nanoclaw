@@ -11,6 +11,7 @@ import {
   _computeInitialNextRun,
   _parseArgs,
   _validateScheduleValue,
+  _validateTaskId,
   upsertTask,
 } from './register-task.ts';
 
@@ -61,6 +62,29 @@ describe('schedule value validation', () => {
   it('accepts once with any schedule value', () => {
     const error = _validateScheduleValue('once', '');
     expect(error).toBeNull();
+  });
+});
+
+describe('task id validation', () => {
+  it('accepts a live task id', () => {
+    expect(_validateTaskId('dsm-experiment-poller')).toBeNull();
+  });
+
+  it('rejects an id containing whitespace', () => {
+    expect(_validateTaskId('bad id')).toBe(
+      'invalid_task_id: bad id must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$',
+    );
+  });
+
+  it('rejects an id longer than 64 characters', () => {
+    const tooLong = 'a'.repeat(65);
+    expect(_validateTaskId(tooLong)).toBe(
+      `invalid_task_id: ${tooLong} must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`,
+    );
+  });
+
+  it('accepts an id at the 64-character boundary', () => {
+    expect(_validateTaskId('a'.repeat(64))).toBeNull();
   });
 });
 
@@ -514,9 +538,9 @@ describe('parseArgs (strict --capability-profile semantics)', () => {
     'isolated',
   ];
 
-  it('defaults to operator when the flag is omitted (fail-closed)', () => {
+  it('leaves capabilityProfile undefined when the flag is omitted', () => {
     const parsed = _parseArgs(baseArgs);
-    expect(parsed.capabilityProfile).toBe('operator');
+    expect(parsed.capabilityProfile).toBeUndefined();
   });
 
   it('captures --capability-profile trusted-writer', () => {
@@ -624,6 +648,55 @@ describe('register-task capability_profile handling', () => {
       'trusted-writer',
     );
   });
+
+  it('preserves an existing trusted-writer profile when the flag is omitted on update', () => {
+    upsertTask({
+      id: 'cap-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    upsertTask({
+      id: 'cap-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt only.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('cap-preserve')!.capability_profile).toBe(
+      'trusted-writer',
+    );
+  });
+
+  it('downgrades to operator when the flag is explicit on update', () => {
+    upsertTask({
+      id: 'cap-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    upsertTask({
+      id: 'cap-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'operator',
+    });
+    expect(getTaskById('cap-downgrade')!.capability_profile).toBe('operator');
+  });
 });
 
 describe('prompt file handling', () => {
@@ -656,5 +729,166 @@ describe('prompt file handling', () => {
     fs.writeFileSync(emptyPath, '   \n  ');
     const content = fs.readFileSync(emptyPath, 'utf-8').trim();
     expect(content).toBe('');
+  });
+});
+
+describe('parseArgs (strict --reply-mode semantics)', () => {
+  const baseArgs = [
+    '--id',
+    't1',
+    '--group-folder',
+    'slack_main',
+    '--chat-jid',
+    'C123@slack',
+    '--prompt-file',
+    '/tmp/prompt.md',
+    '--schedule-type',
+    'cron',
+    '--schedule-value',
+    '*/15 * * * *',
+    '--context-mode',
+    'isolated',
+  ];
+
+  it('leaves replyMode undefined when the flag is omitted', () => {
+    expect(_parseArgs(baseArgs).replyMode).toBeUndefined();
+  });
+
+  it('captures --reply-mode structured', () => {
+    expect(
+      _parseArgs([...baseArgs, '--reply-mode', 'structured']).replyMode,
+    ).toBe('structured');
+  });
+
+  it('captures --reply-mode text', () => {
+    expect(_parseArgs([...baseArgs, '--reply-mode', 'text']).replyMode).toBe(
+      'text',
+    );
+  });
+
+  it('rejects an unknown --reply-mode value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode', 'json'])).toThrow(
+      '--reply-mode must be one of text, structured (got json)',
+    );
+  });
+
+  it('rejects an empty --reply-mode value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode', ''])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+
+  it('rejects a trailing --reply-mode with no value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode'])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+});
+
+describe('register-task reply_mode handling', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('defaults reply_mode to text on create when omitted', () => {
+    upsertTask({
+      id: 'reply-default',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('reply-default')!.reply_mode).toBe('text');
+  });
+
+  it('persists reply_mode structured on create', () => {
+    upsertTask({
+      id: 'reply-structured',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Poll and report.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    expect(getTaskById('reply-structured')!.reply_mode).toBe('structured');
+  });
+
+  it('overwrites reply_mode when a new value is provided on update', () => {
+    upsertTask({
+      id: 'reply-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'text',
+    });
+    upsertTask({
+      id: 'reply-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    expect(getTaskById('reply-overwrite')!.reply_mode).toBe('structured');
+  });
+
+  it('preserves an existing structured reply_mode when the flag is omitted on update', () => {
+    upsertTask({
+      id: 'reply-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    upsertTask({
+      id: 'reply-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt only.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('reply-preserve')!.reply_mode).toBe('structured');
+  });
+
+  it('downgrades to text when the flag is explicit on update', () => {
+    upsertTask({
+      id: 'reply-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    upsertTask({
+      id: 'reply-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'text',
+    });
+    expect(getTaskById('reply-downgrade')!.reply_mode).toBe('text');
   });
 });
