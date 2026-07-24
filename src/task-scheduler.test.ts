@@ -1199,6 +1199,37 @@ describe('structured reply mode', () => {
     expect(sent).toEqual([]);
   });
 
+  it('still logs the run and advances next_run when the reply post throws', async () => {
+    const task = makeStructuredTask({
+      id: 'text-post-throws',
+      reply_mode: 'text',
+    });
+    const originalNextRun = task.next_run;
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': group() }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {
+          throw new Error('slack is down');
+        },
+      },
+      runnerEmitting('exp-001 done'),
+    );
+    expect(getRecentTaskRunStatuses('text-post-throws', 1)).toEqual(['error']);
+    const after = getTaskById('text-post-throws') as ScheduledTask;
+    expect(after.next_run).not.toBeNull();
+    expect(new Date(after.next_run!).getTime()).toBeGreaterThan(
+      new Date(originalNextRun!).getTime(),
+    );
+  });
+
   it('logs the run as a success when a structured task recorded a terminal outcome', async () => {
     const task = makeStructuredTask({ id: 'structured-ok' });
     await run(

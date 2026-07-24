@@ -483,40 +483,59 @@ async function runTask(
     new Date(startTime).toISOString(),
   );
 
-  if (result !== null) {
-    if (task.reply_mode === 'structured') {
-      // The reply is not the transport in this mode — `report_outcome`
-      // records are. Log the text so a prompt regression is still
-      // debuggable, but never post it.
-      logger.info(
-        { taskId: task.id, reply: result },
-        'Structured reply mode; agent reply not posted to chat',
-      );
-    } else if (runOutcomes.length > 0) {
-      // This text-mode tick already routed its operator lines through the
-      // `task_outcome` channel, which the host renders and posts. Posting the
-      // agent's prose too would duplicate them. A record whose post was
-      // collapsed as a previous-run repeat still refreshed its `recorded_at`
-      // into this run's window, so it counts here — the operator already saw
-      // that line, so the host still owns the reply.
-      logger.debug(
-        { taskId: task.id },
-        'task_outcome recorded this run; not posting agent prose',
-      );
-    } else if (isSilentResult(result)) {
-      logger.debug(
-        { taskId: task.id },
-        'Scheduled task produced silent-result marker; skipping chat post',
-      );
-    } else {
-      await deps.sendMessage(
-        task.chat_jid,
-        formatErrorWrap(result, {
-          runId: task.id,
-          runbookUrl: task.runbook_url,
-          now: new Date(),
-        }),
-      );
+  try {
+    if (result !== null) {
+      if (task.reply_mode === 'structured') {
+        // The reply is not the transport in this mode — `report_outcome`
+        // records are. Log the text so a prompt regression is still
+        // debuggable, but never post it.
+        logger.info(
+          { taskId: task.id, reply: result },
+          'Structured reply mode; agent reply not posted to chat',
+        );
+      } else if (runOutcomes.length > 0) {
+        // This text-mode tick already routed its operator lines through the
+        // `task_outcome` channel, which the host renders and posts. Posting
+        // the agent's prose too would duplicate them. A record whose post was
+        // collapsed as a previous-run repeat still refreshed its `recorded_at`
+        // into this run's window, so it counts here — the operator already saw
+        // that line, so the host still owns the reply.
+        logger.debug(
+          { taskId: task.id },
+          'task_outcome recorded this run; not posting agent prose',
+        );
+      } else if (isSilentResult(result)) {
+        logger.debug(
+          { taskId: task.id },
+          'Scheduled task produced silent-result marker; skipping chat post',
+        );
+      } else {
+        await deps.sendMessage(
+          task.chat_jid,
+          formatErrorWrap(result, {
+            runId: task.id,
+            runbookUrl: task.runbook_url,
+            now: new Date(),
+          }),
+        );
+      }
+    }
+  } catch (postErr) {
+    // A failed reply post must still fall through to logTaskRun /
+    // updateTaskAfterRun below; otherwise a Slack outage leaves next_run
+    // stale and the scheduler re-runs the task every poll. Only surface the
+    // post failure when the run itself succeeded — a genuine run failure the
+    // main catch already recorded keeps its own class.
+    const postError =
+      postErr instanceof Error ? postErr.message : String(postErr);
+    logger.error(
+      { taskId: task.id, error: postError },
+      'Failed to post scheduled task reply',
+    );
+    if (error === null) {
+      error = postError;
+      errorClass =
+        postErr instanceof Error ? postErr.constructor.name : 'Error';
     }
   }
 
