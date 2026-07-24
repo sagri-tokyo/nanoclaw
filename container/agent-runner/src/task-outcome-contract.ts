@@ -4,15 +4,15 @@
  * Declared here rather than imported from the host `src/` tree because the
  * container image only ships `container/agent-runner/src`, and the host's
  * `tsconfig` pins `rootDir` to `src/` so the host cannot import this file
- * either. The copy is deliberate; `task-outcome-contract.test.ts` runs both
- * validators over one payload corpus and fails on any disagreement.
+ * either. `parseTaskOutcome` below is a verbatim copy of the host's so the two
+ * can be diffed; `task-outcome-contract.test.ts` runs both over one payload
+ * corpus and fails on any disagreement.
  *
- * The host stays authoritative — it re-validates every record on drain. This
+ * The host stays authoritative and re-validates every record on drain. This
  * copy exists so the tool never answers `recorded` for a payload the host will
  * drop: the agent believes it reported, moves on, and the run ends with no
- * outcome for that entity, which the run-status derivation then reads as a
- * crashed tick. `parseTaskOutcome` below is a verbatim copy of the host's, so a
- * reviewer can diff the two functions.
+ * outcome for that entity, which the run-status derivation reads as a crashed
+ * tick.
  */
 
 export const TASK_OUTCOME_STATUSES = [

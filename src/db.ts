@@ -836,17 +836,15 @@ function previousRunCutoff(taskId: string): string {
  * consecutive ticks therefore still produces exactly one Slack line, because
  * each tick's record lands one run after the last.
  *
- * The window is what keeps dedupe from becoming permanent silence. Keyed on
- * existence alone, the first `upstream_query_failed` would be the only outage
- * a task ever reported, a quiet tick's `none — complete` line would post once
- * for the lifetime of the database, and an entity that legitimately re-enters a
- * status in a later run would never be heard from again. A repeat that follows
- * a gap — a recovery, a re-submission, a later outage — is news, and posts.
+ * The window is what keeps dedupe from becoming permanent silence: keyed on
+ * existence alone, only the first outage of a task's life would ever post. A
+ * repeat that follows a gap (a recovery, a re-submission, a later outage) is
+ * news.
  *
- * A repeat refreshes the row rather than inserting beside it: the key stays
- * unique so the table grows with entities handled, not with ticks, and the
- * refreshed `recorded_at` keeps the record inside the current run's window,
- * which is where the scheduler reads a structured run's status from.
+ * A repeat refreshes the row rather than inserting beside it, so the table
+ * grows with entities handled rather than with ticks, and the refreshed
+ * `recorded_at` keeps the record inside the current run's window, which is
+ * where the scheduler reads a structured run's status from.
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
   const existing = db
