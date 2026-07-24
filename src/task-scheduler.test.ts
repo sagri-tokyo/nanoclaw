@@ -1146,6 +1146,59 @@ describe('structured reply mode', () => {
     expect(sent).toEqual(['exp-001 done']);
   });
 
+  it('suppresses the prose reply for a text-mode task that recorded an outcome', async () => {
+    const task = makeStructuredTask({
+      id: 'text-with-outcome',
+      reply_mode: 'text',
+    });
+    const sent: string[] = [];
+    await run(
+      task,
+      runnerEmitting('exp-001 done', () =>
+        outcome('text-with-outcome', 'exp-001', 'complete'),
+      ),
+      sent,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it('suppresses the prose reply when the only outcome was a collapsed previous-run repeat', async () => {
+    const task = makeStructuredTask({
+      id: 'text-collapsed',
+      reply_mode: 'text',
+    });
+    // Seed the record as if a prior run already posted it, before this run's
+    // window. The tick re-records it, which collapses as a repeat (isNew
+    // false) but refreshes recorded_at into this run's window.
+    recordTaskOutcome({
+      task_id: 'text-collapsed',
+      entity_id: 'exp-001',
+      status: 'complete',
+      error_class: null,
+      detail: null,
+      group_folder: 'slack_main',
+      recorded_at: '2000-01-01T00:00:00.000Z',
+    });
+    const sent: string[] = [];
+    await run(
+      task,
+      runnerEmitting('exp-001 done', () => {
+        const isNew = recordTaskOutcome({
+          task_id: 'text-collapsed',
+          entity_id: 'exp-001',
+          status: 'complete',
+          error_class: null,
+          detail: null,
+          group_folder: 'slack_main',
+          recorded_at: new Date().toISOString(),
+        });
+        expect(isNew).toBe(false);
+      }),
+      sent,
+    );
+    expect(sent).toEqual([]);
+  });
+
   it('logs the run as a success when a structured task recorded a terminal outcome', async () => {
     const task = makeStructuredTask({ id: 'structured-ok' });
     await run(
