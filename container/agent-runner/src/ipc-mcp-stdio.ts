@@ -12,6 +12,11 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { ORG_ACTION_SUBMITTED_MESSAGE } from './org-action-messages.js';
+import {
+  TASK_OUTCOME_ERROR_CLASSES,
+  TASK_OUTCOME_RECORDED_MESSAGE,
+  TASK_OUTCOME_STATUSES,
+} from './task-outcome-contract.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -711,6 +716,68 @@ target_ref is a constrained id (Notion 32-hex page/DB id | repo slug | Slack cha
           text: ORG_ACTION_SUBMITTED_MESSAGE,
         },
       ],
+    };
+  },
+);
+
+server.tool(
+  'report_outcome',
+  `Record the outcome of ONE entity this scheduled task handled (a Notion page, an experiment, a job). The host renders the operator-facing line and decides whether to post it; you never write that line yourself.
+
+Call this once per entity, then stop. Do not restate the outcome in your reply, do not summarise, do not narrate — the record IS the report, and anything you add to your final message is noise the host has to suppress.
+
+Every field is a closed enum or a constrained id. There is no free-text field, by design.
+
+status:
+• submitted — work was handed off and is now running elsewhere (e.g. a Batch job)
+• complete  — the entity reached its terminal success state
+• failed    — the work was attempted and did not succeed
+• rejected  — the entity was refused before any work started (injection, extraction, validation)
+• stalled   — escalated after repeated inconclusive polls
+
+error_class is REQUIRED for failed / rejected / stalled and FORBIDDEN otherwise.`,
+  {
+    entity_id: z
+      .string()
+      .min(1)
+      .describe(
+        'Constrained id for the thing this outcome is about (e.g. experiment_id). Never prose. Use the literal "unknown" when the id could not be established.',
+      ),
+    status: z.enum(TASK_OUTCOME_STATUSES),
+    error_class: z
+      .enum(TASK_OUTCOME_ERROR_CLASSES)
+      .optional()
+      .describe(
+        'Required for failed/rejected/stalled, forbidden otherwise. Pick the closest class; do not invent one.',
+      ),
+    detail: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        'Optional constrained scalars for the audit record (e.g. {"job_id": "...", "page_id": "..."}). Ids and enum-ish tokens only — no sentences, no messages, max 8 entries.',
+      ),
+  },
+  async (args) => {
+    const taskId = process.env.NANOCLAW_TASK_ID;
+    if (!taskId) {
+      throw new Error(
+        'report_outcome: NANOCLAW_TASK_ID is not set — this tool is only available to scheduled tasks',
+      );
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'task_outcome',
+      task_id: taskId,
+      entity_id: args.entity_id,
+      status: args.status,
+      error_class: args.error_class,
+      detail: args.detail,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: TASK_OUTCOME_RECORDED_MESSAGE }],
     };
   },
 );

@@ -12,6 +12,7 @@ import {
   PendingActionRow,
   RegisteredGroup,
   ScheduledTask,
+  TaskOutcomeRow,
   TaskRunLog,
 } from './types.js';
 
@@ -56,7 +57,8 @@ function createSchema(database: Database.Database): void {
       created_at TEXT NOT NULL,
       runbook_url TEXT,
       failure_post_threshold INTEGER NOT NULL DEFAULT 2,
-      capability_profile TEXT NOT NULL DEFAULT 'operator'
+      capability_profile TEXT NOT NULL DEFAULT 'operator',
+      reply_mode TEXT NOT NULL DEFAULT 'text'
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -111,6 +113,21 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_pending_actions_state
       ON pending_actions(state, expires_at);
+
+    CREATE TABLE IF NOT EXISTS task_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error_class TEXT,
+      detail TEXT,
+      group_folder TEXT NOT NULL,
+      recorded_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_outcomes_key
+      ON task_outcomes(task_id, entity_id, status);
+    CREATE INDEX IF NOT EXISTS idx_task_outcomes_recent
+      ON task_outcomes(task_id, recorded_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -232,6 +249,25 @@ function createSchema(database: Database.Database): void {
   try {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN capability_profile TEXT NOT NULL DEFAULT 'operator'`,
+    );
+  } catch (error) {
+    if (
+      !(
+        error instanceof Error &&
+        error.message.includes('duplicate column name')
+      )
+    ) {
+      throw error;
+    }
+  }
+
+  // Add reply_mode column if it doesn't exist (migration for existing DBs).
+  // Existing and new rows default to 'text', which keeps the legacy
+  // post-the-final-message behaviour until a task is explicitly flipped to
+  // 'structured' via `register-task --reply-mode`.
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'text'`,
     );
   } catch (error) {
     if (
@@ -595,8 +631,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url, failure_post_threshold, capability_profile)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, runbook_url, failure_post_threshold, capability_profile, reply_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -613,6 +649,7 @@ export function createTask(
     task.runbook_url ?? null,
     task.failure_post_threshold ?? 2,
     task.capability_profile ?? 'operator',
+    task.reply_mode ?? 'text',
   );
 }
 
@@ -650,6 +687,7 @@ export function updateTask(
       | 'runbook_url'
       | 'failure_post_threshold'
       | 'capability_profile'
+      | 'reply_mode'
     >
   >,
 ): void {
@@ -691,6 +729,10 @@ export function updateTask(
   if (updates.capability_profile !== undefined) {
     fields.push('capability_profile = ?');
     values.push(updates.capability_profile);
+  }
+  if (updates.reply_mode !== undefined) {
+    fields.push('reply_mode = ?');
+    values.push(updates.reply_mode);
   }
 
   if (fields.length === 0) return;
@@ -766,6 +808,67 @@ export function getRecentTaskRunStatuses(
     )
     .all(taskId, limit) as Array<{ status: 'success' | 'error' }>;
   return rows.map((row) => row.status);
+}
+
+/**
+ * Record one structured task outcome. Returns true when this is the first time
+ * the `(task_id, entity_id, status)` key has been seen — the host posts only
+ * on that first record, so a task that re-reports an unchanged status on every
+ * tick produces exactly one Slack line.
+ *
+ * A repeat refreshes `recorded_at` rather than being dropped: the scheduler
+ * keys a structured run's status on the outcomes recorded during that run, and
+ * a deduped repeat still proves the run reported something.
+ */
+export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
+  const existing = db
+    .prepare(
+      `SELECT id FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+    )
+    .get(row.task_id, row.entity_id, row.status) as { id: number } | undefined;
+
+  if (existing) {
+    db.prepare(`UPDATE task_outcomes SET recorded_at = ? WHERE id = ?`).run(
+      row.recorded_at,
+      existing.id,
+    );
+    return false;
+  }
+
+  db.prepare(
+    `
+    INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    row.task_id,
+    row.entity_id,
+    row.status,
+    row.error_class,
+    row.detail === null ? null : JSON.stringify(row.detail),
+    row.group_folder,
+    row.recorded_at,
+  );
+  return true;
+}
+
+/**
+ * Statuses recorded for `taskId` at or after `sinceIso`, oldest-first. The
+ * scheduler uses this to derive a structured run's `task_run_logs` status,
+ * which in that mode cannot be read off the reply text.
+ */
+export function getTaskOutcomesSince(
+  taskId: string,
+  sinceIso: string,
+): Array<{ status: string; error_class: string | null }> {
+  return db
+    .prepare(
+      `SELECT status, error_class FROM task_outcomes WHERE task_id = ? AND recorded_at >= ? ORDER BY recorded_at, id`,
+    )
+    .all(taskId, sinceIso) as Array<{
+    status: string;
+    error_class: string | null;
+  }>;
 }
 
 // --- Router state accessors ---

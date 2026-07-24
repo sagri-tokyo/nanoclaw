@@ -5,7 +5,13 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  recordTaskOutcome,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import {
   hashFailureOutput,
@@ -21,6 +27,7 @@ import {
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
+import { parseTaskOutcome, renderTaskOutcome } from './task-outcome.js';
 import { RegisteredGroup } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
@@ -254,6 +261,13 @@ export async function processTaskIpc(
     stakes_hint?: string;
     citation_refs?: unknown;
     canonical_args?: unknown;
+    // For task_outcome. Typed `unknown` on purpose: the shape is decided by
+    // `parseTaskOutcome`, not by the caller's claim about it.
+    task_id?: unknown;
+    entity_id?: unknown;
+    status?: unknown;
+    error_class?: unknown;
+    detail?: unknown;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -803,6 +817,69 @@ export async function processTaskIpc(
         tool: 'ipc_org_action',
         inputs_hash: inputsHash,
         outputs_hash: hashPayload(data.action),
+        duration_ms: Date.now() - ipcStart,
+        outcome: 'ok',
+        error_class: null,
+        group: sourceGroup,
+      });
+      break;
+    }
+
+    case 'task_outcome': {
+      // Same discipline as org_action: every field is a closed enum or a
+      // constrained id, and anything outside the set is a hard reject. A
+      // coerced value would put model-authored bytes straight into the Slack
+      // line this channel exists to keep host-rendered.
+      const parsed = parseTaskOutcome(data);
+      if (!parsed.ok) {
+        logger.warn(
+          { sourceGroup, taskId: data.task_id },
+          'Invalid task_outcome — payload outside the allowed shape',
+        );
+        emitReject('ipc_task_outcome', parsed.error_class);
+        break;
+      }
+      const outcome = parsed.record;
+      let chatJid: string | undefined;
+      for (const [jid, group] of Object.entries(registeredGroups)) {
+        if (group.folder === sourceGroup) {
+          chatJid = jid;
+          break;
+        }
+      }
+      if (!chatJid) {
+        logger.warn(
+          { sourceGroup },
+          'task_outcome: source group not resolvable to a chat jid',
+        );
+        emitReject('ipc_task_outcome', 'TargetGroupNotRegistered');
+        break;
+      }
+      const isNew = recordTaskOutcome({
+        ...outcome,
+        group_folder: sourceGroup,
+        recorded_at: new Date().toISOString(),
+      });
+      if (isNew) {
+        await deps.sendMessage(chatJid, renderTaskOutcome(outcome));
+      } else {
+        logger.debug(
+          {
+            sourceGroup,
+            taskId: outcome.task_id,
+            entityId: outcome.entity_id,
+            status: outcome.status,
+          },
+          'task_outcome already posted for this status; dropping the repeat',
+        );
+      }
+      emitIpcAction(sink, {
+        level: 'info',
+        session_id: outcome.task_id,
+        trigger_source: sourceGroup,
+        tool: 'ipc_task_outcome',
+        inputs_hash: inputsHash,
+        outputs_hash: hashPayload(outcome.status),
         duration_ms: Date.now() - ipcStart,
         outcome: 'ok',
         error_class: null,

@@ -17,7 +17,7 @@ import {
   updateTask,
 } from '../src/db.ts';
 import { logger } from '../src/logger.ts';
-import { CapabilityProfile, ScheduledTask } from '../src/types.ts';
+import { CapabilityProfile, ReplyMode, ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
 const EXIT_BAD_ARGS = 4;
@@ -31,6 +31,7 @@ interface RegisterTaskArgs {
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
   capabilityProfile: CapabilityProfile;
+  replyMode: ReplyMode;
   runbookUrl?: string;
   postAfterFails?: number;
 }
@@ -39,6 +40,8 @@ const CAPABILITY_PROFILES: ReadonlyArray<CapabilityProfile> = [
   'operator',
   'trusted-writer',
 ];
+
+const REPLY_MODES: ReadonlyArray<ReplyMode> = ['text', 'structured'];
 
 export interface UpsertTaskInput {
   id: string;
@@ -54,6 +57,13 @@ export interface UpsertTaskInput {
    * tokens. A defined value overwrites the row's profile on update.
    */
   capabilityProfile?: CapabilityProfile;
+  /**
+   * How the task's outcome reaches chat. `undefined` stores `text` on create
+   * (the legacy post-the-final-message path) and leaves the existing row
+   * untouched on update, so adding the column changes no live task until one
+   * is explicitly registered as `structured`.
+   */
+  replyMode?: ReplyMode;
   /**
    * `undefined` leaves the existing row's `runbook_url` untouched on update
    * and stores `null` on create. A non-empty string is persisted as-is.
@@ -88,6 +98,7 @@ function parseArgs(args: string[]): RegisterTaskArgs {
     scheduleValue: '',
     contextMode: 'isolated',
     capabilityProfile: 'operator',
+    replyMode: 'text',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -128,6 +139,16 @@ function parseArgs(args: string[]): RegisterTaskArgs {
           );
         }
         result.capabilityProfile = raw as CapabilityProfile;
+        break;
+      }
+      case '--reply-mode': {
+        const raw = args[++i];
+        if (raw === undefined || !REPLY_MODES.includes(raw as ReplyMode)) {
+          throw new RegisterTaskArgError(
+            `--reply-mode must be one of ${REPLY_MODES.join(', ')} (got ${raw ?? '<missing>'})`,
+          );
+        }
+        result.replyMode = raw as ReplyMode;
         break;
       }
       case '--runbook-url': {
@@ -244,6 +265,9 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     if (input.capabilityProfile !== undefined) {
       taskUpdates.capability_profile = input.capabilityProfile;
     }
+    if (input.replyMode !== undefined) {
+      taskUpdates.reply_mode = input.replyMode;
+    }
     updateTask(input.id, taskUpdates);
     return 'updated';
   }
@@ -263,6 +287,7 @@ export function upsertTask(input: UpsertTaskInput): 'created' | 'updated' {
     runbook_url: input.runbookUrl ?? null,
     failure_post_threshold: input.postAfterFails,
     capability_profile: input.capabilityProfile ?? 'operator',
+    reply_mode: input.replyMode ?? 'text',
   });
   return 'created';
 }
@@ -336,6 +361,7 @@ export async function run(args: string[]): Promise<void> {
     scheduleValue: parsed.scheduleValue,
     contextMode: parsed.contextMode,
     capabilityProfile: parsed.capabilityProfile,
+    replyMode: parsed.replyMode,
     runbookUrl: parsed.runbookUrl,
     postAfterFails: parsed.postAfterFails,
   });
@@ -355,6 +381,7 @@ export async function run(args: string[]): Promise<void> {
     SCHEDULE_VALUE: parsed.scheduleValue,
     CONTEXT_MODE: parsed.contextMode,
     CAPABILITY_PROFILE: parsed.capabilityProfile,
+    REPLY_MODE: parsed.replyMode,
     ACTION: action,
     STATUS: 'success',
     LOG: 'logs/setup.log',

@@ -14,6 +14,7 @@ import {
   getDueTasks,
   getRecentTaskRunStatuses,
   getTaskById,
+  getTaskOutcomesSince,
   logTaskRun,
   updateTask,
   updateTaskAfterRun,
@@ -98,6 +99,46 @@ export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
   return !trimmed.includes('\n') && trimmed.startsWith('ERROR: ');
+}
+
+// A `structured` task has no ERROR: line to key on — its reply never reaches
+// chat at all — so the run's `task_run_logs` status comes from the
+// `report_outcome` records the tick emitted. Silence is a failure, not a pass:
+// a tick that reported nothing either crashed before reporting or skipped the
+// contract, and logging it green is the exact blind spot sagri-ai#504 closed
+// for text mode.
+export const NO_TASK_OUTCOME_ERROR_CLASS = 'NoTaskOutcomeReported';
+export const TASK_OUTCOME_FAILURE_ERROR_CLASS = 'TaskOutcomeFailure';
+
+const RUN_FAILING_OUTCOME_STATUSES: ReadonlySet<string> = new Set([
+  'failed',
+  'stalled',
+]);
+
+/**
+ * Derive the run-level error for a `structured` task from the outcomes it
+ * recorded during the run, or null when the run is a success. `rejected` is
+ * NOT a run failure: a refusal (injection, failed extraction) is the tick
+ * doing its job, and the record itself is the operator-visible signal.
+ */
+export function deriveStructuredRunError(
+  outcomes: Array<{ status: string; error_class: string | null }>,
+): { error: string; error_class: string } | null {
+  if (outcomes.length === 0) {
+    return {
+      error: 'Structured task recorded no outcome for this run',
+      error_class: NO_TASK_OUTCOME_ERROR_CLASS,
+    };
+  }
+  const failure = outcomes.find((outcome) =>
+    RUN_FAILING_OUTCOME_STATUSES.has(outcome.status),
+  );
+  if (!failure) return null;
+  const suffix = failure.error_class ? ` [${failure.error_class}]` : '';
+  return {
+    error: `Structured task reported ${failure.status}${suffix}`,
+    error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
+  };
 }
 
 export function formatErrorWrap(
@@ -340,6 +381,7 @@ async function runTask(
         chatJid: task.chat_jid,
         isMain,
         isScheduledTask: true,
+        taskId: task.id,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
@@ -355,7 +397,15 @@ async function runTask(
           });
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          if (isSilentResult(streamedOutput.result)) {
+          if (task.reply_mode === 'structured') {
+            // The reply is not the transport in this mode — `report_outcome`
+            // records are. Log the text so a prompt regression is still
+            // debuggable, but never post it.
+            logger.info(
+              { taskId: task.id, reply: streamedOutput.result },
+              'Structured reply mode; agent reply not posted to chat',
+            );
+          } else if (isSilentResult(streamedOutput.result)) {
             logger.debug(
               { taskId: task.id },
               'Scheduled task produced silent-result marker; skipping chat post',
@@ -431,7 +481,23 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
-  if (error === null && result !== null && isErrorReply(result)) {
+  if (task.reply_mode === 'structured') {
+    if (error === null) {
+      // ponytail: reads the outcomes the IPC watcher drained during this run.
+      // The watcher polls every IPC_POLL_INTERVAL (1s) and the container is
+      // only closed TASK_CLOSE_DELAY_MS (10s) after the agent's last tool
+      // call, so a record written by the tick is drained well before this
+      // point. If that margin ever shrinks, correlate on a run id written by
+      // the host instead of on the drain timestamp.
+      const derived = deriveStructuredRunError(
+        getTaskOutcomesSince(task.id, new Date(startTime).toISOString()),
+      );
+      if (derived) {
+        error = derived.error;
+        errorClass = derived.error_class;
+      }
+    }
+  } else if (error === null && result !== null && isErrorReply(result)) {
     // The container exited cleanly but the agent reported failure via the
     // single-line ERROR: reply convention. Without this, the tick logs
     // status=success / outcome=ok and every monitor built on

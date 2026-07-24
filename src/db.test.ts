@@ -18,8 +18,11 @@ import {
   storeChatMetadata,
   storeMessage,
   updateTask,
+  recordTaskOutcome,
+  getTaskOutcomesSince,
 } from './db.js';
 import { formatMessages } from './router.js';
+import type { TaskOutcomeRow } from './types.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -959,5 +962,96 @@ describe('getRecentTaskRunStatuses', () => {
     logRun('t', 'error', '2026-05-15T00:00:00.000Z');
     logRun('other', 'success', '2026-05-15T00:05:00.000Z');
     expect(getRecentTaskRunStatuses('t', 5)).toEqual(['error']);
+  });
+});
+
+describe('task outcome dedupe store', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function outcome(overrides: Partial<TaskOutcomeRow> = {}): TaskOutcomeRow {
+    return {
+      task_id: 'dsm-experiment-submitter',
+      entity_id: 'exp-001',
+      status: 'submitted',
+      error_class: null,
+      detail: null,
+      group_folder: 'slack_main',
+      recorded_at: '2026-07-24T01:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('reports the first record of a key as newly recorded', () => {
+    expect(recordTaskOutcome(outcome())).toBe(true);
+  });
+
+  it('reports a repeat of the same (task, entity, status) as already recorded', () => {
+    recordTaskOutcome(outcome());
+    expect(
+      recordTaskOutcome(outcome({ recorded_at: '2026-07-24T02:00:00.000Z' })),
+    ).toBe(false);
+  });
+
+  it('treats a status change for the same entity as a new record', () => {
+    recordTaskOutcome(outcome());
+    expect(
+      recordTaskOutcome(
+        outcome({
+          status: 'complete',
+          recorded_at: '2026-07-24T02:00:00.000Z',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('treats the same status for a different entity as a new record', () => {
+    recordTaskOutcome(outcome());
+    expect(recordTaskOutcome(outcome({ entity_id: 'exp-002' }))).toBe(true);
+  });
+
+  it('treats the same status for a different task as a new record', () => {
+    recordTaskOutcome(outcome());
+    expect(recordTaskOutcome(outcome({ task_id: 'dsm-poller' }))).toBe(true);
+  });
+
+  it('returns the statuses recorded for a task at or after a timestamp', () => {
+    recordTaskOutcome(outcome({ recorded_at: '2026-07-24T01:00:00.000Z' }));
+    recordTaskOutcome(
+      outcome({
+        entity_id: 'exp-002',
+        status: 'failed',
+        error_class: 'skill_failed',
+        recorded_at: '2026-07-24T03:00:00.000Z',
+      }),
+    );
+    expect(
+      getTaskOutcomesSince(
+        'dsm-experiment-submitter',
+        '2026-07-24T02:00:00.000Z',
+      ),
+    ).toEqual([{ status: 'failed', error_class: 'skill_failed' }]);
+  });
+
+  it('refreshes recorded_at on a deduped repeat so the current run still sees it', () => {
+    recordTaskOutcome(outcome({ recorded_at: '2026-07-24T01:00:00.000Z' }));
+    recordTaskOutcome(outcome({ recorded_at: '2026-07-24T03:00:00.000Z' }));
+    expect(
+      getTaskOutcomesSince(
+        'dsm-experiment-submitter',
+        '2026-07-24T02:00:00.000Z',
+      ),
+    ).toEqual([{ status: 'submitted', error_class: null }]);
+  });
+
+  it('excludes other tasks from the window query', () => {
+    recordTaskOutcome(outcome({ task_id: 'dsm-poller' }));
+    expect(
+      getTaskOutcomesSince(
+        'dsm-experiment-submitter',
+        '2026-07-24T00:00:00.000Z',
+      ),
+    ).toEqual([]);
   });
 });

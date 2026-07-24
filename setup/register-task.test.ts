@@ -658,3 +658,117 @@ describe('prompt file handling', () => {
     expect(content).toBe('');
   });
 });
+
+describe('parseArgs (strict --reply-mode semantics)', () => {
+  const baseArgs = [
+    '--id',
+    't1',
+    '--group-folder',
+    'slack_main',
+    '--chat-jid',
+    'C123@slack',
+    '--prompt-file',
+    '/tmp/prompt.md',
+    '--schedule-type',
+    'cron',
+    '--schedule-value',
+    '*/15 * * * *',
+    '--context-mode',
+    'isolated',
+  ];
+
+  it('defaults to text when the flag is omitted', () => {
+    expect(_parseArgs(baseArgs).replyMode).toBe('text');
+  });
+
+  it('captures --reply-mode structured', () => {
+    expect(
+      _parseArgs([...baseArgs, '--reply-mode', 'structured']).replyMode,
+    ).toBe('structured');
+  });
+
+  it('captures --reply-mode text', () => {
+    expect(_parseArgs([...baseArgs, '--reply-mode', 'text']).replyMode).toBe(
+      'text',
+    );
+  });
+
+  it('rejects an unknown --reply-mode value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode', 'json'])).toThrow(
+      '--reply-mode must be one of text, structured (got json)',
+    );
+  });
+
+  it('rejects an empty --reply-mode value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode', ''])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+
+  it('rejects a trailing --reply-mode with no value', () => {
+    expect(() => _parseArgs([...baseArgs, '--reply-mode'])).toThrow(
+      RegisterTaskArgError,
+    );
+  });
+});
+
+describe('register-task reply_mode handling', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  afterEach(() => {
+    _closeDatabase();
+  });
+
+  it('defaults reply_mode to text on create when omitted', () => {
+    upsertTask({
+      id: 'reply-default',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Do work.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('reply-default')!.reply_mode).toBe('text');
+  });
+
+  it('persists reply_mode structured on create', () => {
+    upsertTask({
+      id: 'reply-structured',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Poll and report.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    expect(getTaskById('reply-structured')!.reply_mode).toBe('structured');
+  });
+
+  it('overwrites reply_mode when a new value is provided on update', () => {
+    upsertTask({
+      id: 'reply-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'text',
+    });
+    upsertTask({
+      id: 'reply-overwrite',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    expect(getTaskById('reply-overwrite')!.reply_mode).toBe('structured');
+  });
+});

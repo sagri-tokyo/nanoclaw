@@ -6,6 +6,7 @@ import {
   getRecentTaskRunStatuses,
   getTaskById,
   logTaskRun,
+  recordTaskOutcome,
 } from './db.js';
 import { HTTP_STATUS_529_ERROR_CLASS } from './container-runner.js';
 import type { ContainerInput, ContainerOutput } from './container-runner.js';
@@ -16,12 +17,15 @@ import {
   AGENT_ERROR_REPLY_CLASS,
   classifyContainerError,
   computeNextRun,
+  deriveStructuredRunError,
   formatErrorWrap,
   isErrorReply,
   isSilentResult,
+  NO_TASK_OUTCOME_ERROR_CLASS,
   shouldPostFailure,
   slackTextForError,
   startSchedulerLoop,
+  TASK_OUTCOME_FAILURE_ERROR_CLASS,
 } from './task-scheduler.js';
 
 describe('task scheduler', () => {
@@ -1020,5 +1024,244 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
       error: 'Container exited with code 1',
     });
     expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
+  });
+});
+
+describe('structured reply mode', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function makeStructuredTask(
+    overrides: Partial<ScheduledTask> = {},
+  ): ScheduledTask {
+    const base = {
+      id: 'structured-task',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Poll and report.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-07-24T00:00:00.000Z',
+      reply_mode: 'structured' as const,
+      ...overrides,
+    };
+    createTask(base);
+    return getTaskById(base.id) as ScheduledTask;
+  }
+
+  function group(): RegisteredGroup {
+    return {
+      name: 'slack_main',
+      folder: 'slack_main',
+      trigger: '@bot',
+      added_at: '2026-07-24T00:00:00.000Z',
+    };
+  }
+
+  function runnerEmitting(
+    result: string,
+    onRun?: () => void,
+  ): (
+    group: RegisteredGroup,
+    input: unknown,
+    onProcess: unknown,
+    onOutput?: (output: ContainerOutput) => Promise<void>,
+  ) => Promise<ContainerOutput> {
+    const output: ContainerOutput = { status: 'success', result };
+    return async (_group, _input, _onProcess, onOutput) => {
+      onRun?.();
+      if (onOutput) await onOutput(output);
+      return output;
+    };
+  }
+
+  async function run(
+    task: ScheduledTask,
+    runner: ReturnType<typeof runnerEmitting>,
+    sent: string[],
+  ): Promise<void> {
+    await _runTaskForTests(
+      task,
+      {
+        registeredGroups: () => ({ 'C123@slack': group() }),
+        getSessions: () => ({}),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
+      },
+      runner,
+    );
+  }
+
+  function outcome(
+    taskId: string,
+    entityId: string,
+    status: string,
+    errorClass: string | null = null,
+  ) {
+    recordTaskOutcome({
+      task_id: taskId,
+      entity_id: entityId,
+      status,
+      error_class: errorClass,
+      detail: null,
+      group_folder: 'slack_main',
+      recorded_at: new Date().toISOString(),
+    });
+  }
+
+  it('does not post the agent reply for a structured task', async () => {
+    const task = makeStructuredTask();
+    const sent: string[] = [];
+    await run(
+      task,
+      runnerEmitting(
+        'Both writes succeeded. Returning the terminal result.',
+        () => outcome('structured-task', 'exp-001', 'complete'),
+      ),
+      sent,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it('still posts the agent reply for a text-mode task', async () => {
+    const task = makeStructuredTask({
+      id: 'text-task',
+      reply_mode: 'text',
+    });
+    const sent: string[] = [];
+    await run(task, runnerEmitting('exp-001 done'), sent);
+    expect(sent).toEqual(['exp-001 done']);
+  });
+
+  it('logs the run as a success when a structured task recorded a terminal outcome', async () => {
+    const task = makeStructuredTask({ id: 'structured-ok' });
+    await run(
+      task,
+      runnerEmitting('__SILENT__', () =>
+        outcome('structured-ok', 'exp-001', 'complete'),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses('structured-ok', 1)).toEqual(['success']);
+  });
+
+  it('logs the run as an error when a structured task recorded a failure', async () => {
+    const task = makeStructuredTask({ id: 'structured-failed' });
+    await run(
+      task,
+      runnerEmitting('__SILENT__', () =>
+        outcome('structured-failed', 'exp-001', 'failed', 'skill_failed'),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses('structured-failed', 1)).toEqual(['error']);
+  });
+
+  it('logs the run as an error when a structured task recorded a stall', async () => {
+    const task = makeStructuredTask({ id: 'structured-stalled' });
+    await run(
+      task,
+      runnerEmitting('__SILENT__', () =>
+        outcome(
+          'structured-stalled',
+          'exp-001',
+          'stalled',
+          'upstream_query_failed',
+        ),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses('structured-stalled', 1)).toEqual([
+      'error',
+    ]);
+  });
+
+  it('logs the run as an error when a structured task recorded nothing at all', async () => {
+    const task = makeStructuredTask({ id: 'structured-silent' });
+    await run(task, runnerEmitting('__SILENT__'), []);
+    expect(getRecentTaskRunStatuses('structured-silent', 1)).toEqual(['error']);
+  });
+
+  it('ignores outcomes recorded by a different task', async () => {
+    const task = makeStructuredTask({ id: 'structured-other' });
+    await run(
+      task,
+      runnerEmitting('__SILENT__', () =>
+        outcome('some-other-task', 'exp-001', 'complete'),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses('structured-other', 1)).toEqual(['error']);
+  });
+
+  it('leaves a text-mode task with no outcome records logging as a success', async () => {
+    const task = makeStructuredTask({
+      id: 'text-no-outcome',
+      reply_mode: 'text',
+    });
+    await run(task, runnerEmitting('__SILENT__'), []);
+    expect(getRecentTaskRunStatuses('text-no-outcome', 1)).toEqual(['success']);
+  });
+});
+
+describe('deriveStructuredRunError', () => {
+  it('flags a run that recorded no outcome at all', () => {
+    expect(deriveStructuredRunError([])).toEqual({
+      error: 'Structured task recorded no outcome for this run',
+      error_class: NO_TASK_OUTCOME_ERROR_CLASS,
+    });
+  });
+
+  it('passes a run whose only outcomes are terminal successes', () => {
+    expect(
+      deriveStructuredRunError([
+        { status: 'complete', error_class: null },
+        { status: 'submitted', error_class: null },
+      ]),
+    ).toBeNull();
+  });
+
+  it('flags a run carrying a failed outcome', () => {
+    expect(
+      deriveStructuredRunError([
+        { status: 'complete', error_class: null },
+        { status: 'failed', error_class: 'skill_failed' },
+      ]),
+    ).toEqual({
+      error: 'Structured task reported failed [skill_failed]',
+      error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
+    });
+  });
+
+  it('flags a run carrying a stalled outcome', () => {
+    expect(
+      deriveStructuredRunError([
+        { status: 'stalled', error_class: 'upstream_query_failed' },
+      ]),
+    ).toEqual({
+      error: 'Structured task reported stalled [upstream_query_failed]',
+      error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
+    });
+  });
+
+  it('treats a rejected outcome as a successful tick (the refusal is the work)', () => {
+    expect(
+      deriveStructuredRunError([
+        { status: 'rejected', error_class: 'rejected_injection' },
+      ]),
+    ).toBeNull();
   });
 });
