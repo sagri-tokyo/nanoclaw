@@ -11,6 +11,7 @@ import {
   _computeInitialNextRun,
   _parseArgs,
   _validateScheduleValue,
+  _validateTaskId,
   upsertTask,
 } from './register-task.ts';
 
@@ -61,6 +62,29 @@ describe('schedule value validation', () => {
   it('accepts once with any schedule value', () => {
     const error = _validateScheduleValue('once', '');
     expect(error).toBeNull();
+  });
+});
+
+describe('task id validation', () => {
+  it('accepts a live task id', () => {
+    expect(_validateTaskId('dsm-experiment-poller')).toBeNull();
+  });
+
+  it('rejects an id containing whitespace', () => {
+    expect(_validateTaskId('bad id')).toBe(
+      'invalid_task_id: bad id must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$',
+    );
+  });
+
+  it('rejects an id longer than 64 characters', () => {
+    const tooLong = 'a'.repeat(65);
+    expect(_validateTaskId(tooLong)).toBe(
+      `invalid_task_id: ${tooLong} must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`,
+    );
+  });
+
+  it('accepts an id at the 64-character boundary', () => {
+    expect(_validateTaskId('a'.repeat(64))).toBeNull();
   });
 });
 

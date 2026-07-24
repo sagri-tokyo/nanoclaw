@@ -45,7 +45,11 @@ export const TASK_OUTCOME_ERROR_CLASSES = [
 export type TaskOutcomeErrorClass = (typeof TASK_OUTCOME_ERROR_CLASSES)[number];
 
 // Constrained-id shapes. No whitespace, so prose cannot pass as an id.
-const CONSTRAINED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+// Exported as the single source of truth for the `task_id` shape:
+// `setup/register-task.ts` validates `--id` against the same regex so an
+// unusable id is rejected at registration rather than silently failing every
+// `report_outcome` call at runtime.
+export const CONSTRAINED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const DETAIL_KEY = /^[a-z][a-z0-9_]{0,31}$/;
 // Detail values additionally allow `/` so an S3 URI or a Batch job ARN fits.
 const DETAIL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;

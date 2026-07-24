@@ -17,6 +17,7 @@ import {
   updateTask,
 } from '../src/db.ts';
 import { logger } from '../src/logger.ts';
+import { CONSTRAINED_ID } from '../src/task-outcome.ts';
 import { CapabilityProfile, ReplyMode, ScheduledTask } from '../src/types.ts';
 import { emitStatus } from './status.ts';
 
@@ -181,6 +182,20 @@ function parseArgs(args: string[]): RegisterTaskArgs {
   return result;
 }
 
+/**
+ * The task id is host-authored and forwarded to the container as
+ * `NANOCLAW_TASK_ID`; `parseTaskOutcome` (src/task-outcome.ts) rejects any
+ * `report_outcome` whose `task_id` fails `CONSTRAINED_ID`. Validating the same
+ * shape here means an unusable id fails loudly at registration instead of
+ * silently breaking every outcome the task ever reports.
+ */
+function validateTaskId(id: string): string | null {
+  if (!CONSTRAINED_ID.test(id)) {
+    return `invalid_task_id: ${id} must match ${CONSTRAINED_ID.source}`;
+  }
+  return null;
+}
+
 function validateScheduleValue(
   scheduleType: ScheduledTask['schedule_type'],
   scheduleValue: string,
@@ -323,6 +338,11 @@ export async function run(args: string[]): Promise<void> {
     failBadArgs('missing_required_args');
   }
 
+  const taskIdError = validateTaskId(parsed.id);
+  if (taskIdError) {
+    failBadArgs(taskIdError);
+  }
+
   if (!['cron', 'interval', 'once'].includes(parsed.scheduleType)) {
     failBadArgs(`invalid_schedule_type: ${parsed.scheduleType}`);
   }
@@ -394,6 +414,7 @@ export async function run(args: string[]): Promise<void> {
 // and scheduling code the CLI runs.
 export {
   parseArgs as _parseArgs,
+  validateTaskId as _validateTaskId,
   validateScheduleValue as _validateScheduleValue,
   computeInitialNextRun as _computeInitialNextRun,
 };
