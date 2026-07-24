@@ -31,8 +31,8 @@ interface RegisterTaskArgs {
   scheduleType: ScheduledTask['schedule_type'];
   scheduleValue: string;
   contextMode: ScheduledTask['context_mode'];
-  capabilityProfile: CapabilityProfile;
-  replyMode: ReplyMode;
+  capabilityProfile?: CapabilityProfile;
+  replyMode?: ReplyMode;
   runbookUrl?: string;
   postAfterFails?: number;
 }
@@ -98,8 +98,6 @@ function parseArgs(args: string[]): RegisterTaskArgs {
     scheduleType: 'cron',
     scheduleValue: '',
     contextMode: 'isolated',
-    capabilityProfile: 'operator',
-    replyMode: 'text',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -400,8 +398,8 @@ export async function run(args: string[]): Promise<void> {
     SCHEDULE_TYPE: parsed.scheduleType,
     SCHEDULE_VALUE: parsed.scheduleValue,
     CONTEXT_MODE: parsed.contextMode,
-    CAPABILITY_PROFILE: parsed.capabilityProfile,
-    REPLY_MODE: parsed.replyMode,
+    CAPABILITY_PROFILE: parsed.capabilityProfile ?? 'operator',
+    REPLY_MODE: parsed.replyMode ?? 'text',
     ACTION: action,
     STATUS: 'success',
     LOG: 'logs/setup.log',

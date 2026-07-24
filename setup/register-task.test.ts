@@ -538,9 +538,9 @@ describe('parseArgs (strict --capability-profile semantics)', () => {
     'isolated',
   ];
 
-  it('defaults to operator when the flag is omitted (fail-closed)', () => {
+  it('leaves capabilityProfile undefined when the flag is omitted', () => {
     const parsed = _parseArgs(baseArgs);
-    expect(parsed.capabilityProfile).toBe('operator');
+    expect(parsed.capabilityProfile).toBeUndefined();
   });
 
   it('captures --capability-profile trusted-writer', () => {
@@ -648,6 +648,55 @@ describe('register-task capability_profile handling', () => {
       'trusted-writer',
     );
   });
+
+  it('preserves an existing trusted-writer profile when the flag is omitted on update', () => {
+    upsertTask({
+      id: 'cap-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    upsertTask({
+      id: 'cap-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt only.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('cap-preserve')!.capability_profile).toBe(
+      'trusted-writer',
+    );
+  });
+
+  it('downgrades to operator when the flag is explicit on update', () => {
+    upsertTask({
+      id: 'cap-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'trusted-writer',
+    });
+    upsertTask({
+      id: 'cap-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      capabilityProfile: 'operator',
+    });
+    expect(getTaskById('cap-downgrade')!.capability_profile).toBe('operator');
+  });
 });
 
 describe('prompt file handling', () => {
@@ -701,8 +750,8 @@ describe('parseArgs (strict --reply-mode semantics)', () => {
     'isolated',
   ];
 
-  it('defaults to text when the flag is omitted', () => {
-    expect(_parseArgs(baseArgs).replyMode).toBe('text');
+  it('leaves replyMode undefined when the flag is omitted', () => {
+    expect(_parseArgs(baseArgs).replyMode).toBeUndefined();
   });
 
   it('captures --reply-mode structured', () => {
@@ -794,5 +843,52 @@ describe('register-task reply_mode handling', () => {
       replyMode: 'structured',
     });
     expect(getTaskById('reply-overwrite')!.reply_mode).toBe('structured');
+  });
+
+  it('preserves an existing structured reply_mode when the flag is omitted on update', () => {
+    upsertTask({
+      id: 'reply-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    upsertTask({
+      id: 'reply-preserve',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated prompt only.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+    });
+    expect(getTaskById('reply-preserve')!.reply_mode).toBe('structured');
+  });
+
+  it('downgrades to text when the flag is explicit on update', () => {
+    upsertTask({
+      id: 'reply-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Original.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'structured',
+    });
+    upsertTask({
+      id: 'reply-downgrade',
+      groupFolder: 'slack_main',
+      chatJid: 'C123@slack',
+      prompt: 'Updated.',
+      scheduleType: 'cron',
+      scheduleValue: '*/15 * * * *',
+      contextMode: 'isolated',
+      replyMode: 'text',
+    });
+    expect(getTaskById('reply-downgrade')!.reply_mode).toBe('text');
   });
 });
