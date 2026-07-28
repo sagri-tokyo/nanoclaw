@@ -128,13 +128,13 @@ const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
 
 // The whole ECMAScript LineTerminator set, not `\n` alone: narration split by
 // a bare `\r` or U+2028 read as one line and logged status=error on a run that
-// succeeded (sagri-tokyo/sagri-ai#617). `isSilentResult` stays `\n`-only for
-// the opposite reason, spelled out at `SILENT_RESULT_LINE`.
+// succeeded (sagri-tokyo/sagri-ai#617). `isSilentResult` stays `\n`-only — see
+// `SILENT_RESULT_LINE`.
 //
-// `\r` is in the class knowing a renderer may not break on it, so such a reply
-// can read as one failure line in chat while counting as narration here — green
-// status, and no `formatErrorWrap` footer. Deliberate: the alternative is one
-// terminator classified against the contract the other three follow.
+// A `\r`-split reply can still render as one failure line in chat while
+// counting as narration here: green status, no `formatErrorWrap` footer.
+// Accepted because the set is taken whole from the language; excluding `\r`
+// would leave one terminator classified by hand.
 const LINE_TERMINATOR = /[\n\r\u2028\u2029]/u;
 
 export function isErrorReply(result: string): boolean {
