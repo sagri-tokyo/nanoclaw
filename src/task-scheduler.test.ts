@@ -189,6 +189,13 @@ describe('task scheduler', () => {
       expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
+    it('does not treat a bare carriage return as a line break', () => {
+      // The `m` flag would: it counts `\r` and U+2028 as line ends, which
+      // would silence narration this has always posted.
+      expect(isSilentResult('Ingested 3 pages\r__SILENT__')).toBe(false);
+      expect(isSilentResult('Ingested 3 pages __SILENT__')).toBe(false);
+    });
+
     it('does not silence narration written in Japanese', () => {
       // CJK is non-ASCII, so an ASCII-punctuation match would count this
       // narration as a bare marker and drop the whole reply.
@@ -903,14 +910,21 @@ describe('isErrorReply', () => {
   it('matches an ERROR reply with only the label emphasised', () => {
     expect(isErrorReply('**ERROR:** Batch submit rejected')).toBe(true);
     expect(isErrorReply('`ERROR:` Notion 404')).toBe(true);
+    // Slack mrkdwn bold is a single asterisk, and the colon sometimes sits
+    // outside the emphasis. Both are the near neighbours of the bullet case
+    // below, so they pin which side of the line the anchoring falls on.
+    expect(isErrorReply('*ERROR:* Batch submit rejected')).toBe(true);
+    expect(isErrorReply('**ERROR**: Batch submit rejected')).toBe(true);
   });
 
   it('does not match a list item that narrates a recovered error', () => {
     // `*` opens bold and a bullet both, so tolerating emphasis anywhere on
-    // the line would flip each of these from success to status=error.
+    // the line would flip each of these from success to status=error. Each
+    // shape is a separate widening of the lead class, so each earns a case.
     expect(isErrorReply('* ERROR: retry limit hit, recovered')).toBe(false);
     expect(isErrorReply('- ERROR: rows skipped, run continued')).toBe(false);
     expect(isErrorReply('3. ERROR: step retried and passed')).toBe(false);
+    expect(isErrorReply('500 ERROR: rows skipped, run continued')).toBe(false);
     expect(isErrorReply('[14:32:01] ERROR: retried, recovered')).toBe(false);
   });
 
