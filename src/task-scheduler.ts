@@ -131,10 +131,10 @@ const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
 // succeeded (sagri-tokyo/sagri-ai#617). `isSilentResult` stays `\n`-only for
 // the opposite reason, spelled out at `SILENT_RESULT_LINE`.
 //
-// `\r` is in the class knowing Slack does not render it as a break, so such a
-// reply reads as one failure line in chat while counting as narration here —
-// green status, and no `formatErrorWrap` footer. Deliberate: the alternative
-// is one terminator classified against the contract the other three follow.
+// `\r` is in the class knowing a renderer may not break on it, so such a reply
+// can read as one failure line in chat while counting as narration here — green
+// status, and no `formatErrorWrap` footer. Deliberate: the alternative is one
+// terminator classified against the contract the other three follow.
 const LINE_TERMINATOR = /[\n\r\u2028\u2029]/u;
 
 export function isErrorReply(result: string): boolean {
