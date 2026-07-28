@@ -169,6 +169,18 @@ describe('task scheduler', () => {
       expect(isSilentResult('  __SILENT__\n')).toBe(true);
     });
 
+    it('silences a marker the agent rendered as inline code', () => {
+      // Verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z. Its prompt
+      // documents the marker in backticks and the agent copied them, so the
+      // exact-match check missed and Slack got the marker.
+      expect(isSilentResult('`__SILENT__`')).toBe(true);
+    });
+
+    it('silences a bolded or quoted marker', () => {
+      expect(isSilentResult('**__SILENT__**')).toBe(true);
+      expect(isSilentResult('"__SILENT__"')).toBe(true);
+    });
+
     it('does not silence narration that only mentions the marker inline', () => {
       expect(
         isSilentResult('Per policy, I would output __SILENT__ here.'),

@@ -79,12 +79,23 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // post matches that intent better than posting the narration alone.
 const SILENT_RESULT_MARKERS = new Set(['__SILENT__', '__NOOP__']);
 
+// Prompts render the marker as inline code (`__SILENT__`) when they document
+// it, and the agent copies that formatting into its reply. A backticked or
+// quoted marker missed the exact-match check and posted to Slack instead
+// (sagri-tokyo/sagri-ai#616: six dsm-experiment-poller ticks between
+// 2026-07-25 and 2026-07-27). Stripping the wrapper here rather than in each
+// prompt keeps one prompt's formatting habits from spamming the channel.
+// Underscore is deliberately absent — it is part of the marker itself.
+const MARKER_WRAPPERS = /^[`'"*]+|[`'"*]+$/g;
+
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
   if (trimmed === '') return true;
   return trimmed
     .split('\n')
-    .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
+    .some((line) =>
+      SILENT_RESULT_MARKERS.has(line.trim().replace(MARKER_WRAPPERS, '')),
+    );
 }
 
 // A scheduled-task agent reports failure by making its whole reply a single
