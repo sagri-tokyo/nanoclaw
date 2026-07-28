@@ -113,9 +113,9 @@ export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 // Same markup-wrapping bug as `isSilentResult` (sagri-tokyo/sagri-ai#616),
 // applied to the ERROR: convention. Wrappers may sit in any of three slots —
 // before the label, between the label and its colon, after the colon — and
-// they need not balance, so `**ERROR:**`, `**ERROR**:` and `*ERROR:*` all
-// match. The pattern stops at the space after the colon; the rest of the line
-// is the failure message and is not inspected.
+// they need not balance, so `**ERROR:** x`, `**ERROR**: x` and `*ERROR:* x`
+// all match; what follows the whitespace is the failure message and is not
+// inspected.
 //
 // A wrapper has to abut the label rather than float ahead of it, because `*`
 // opens both bold and a bullet: anything looser reads "* ERROR: retried,
