@@ -186,6 +186,7 @@ describe('task scheduler', () => {
       // Widening the match must not swallow a real summary that happens to
       // name the marker.
       expect(isSilentResult('`__SILENT__` is the marker')).toBe(false);
+      expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
     it('does not silence narration written in Japanese', () => {
@@ -897,6 +898,23 @@ describe('isErrorReply', () => {
     expect(isErrorReply('`ERROR: Notion 404 on database_id`')).toBe(true);
     expect(isErrorReply('**ERROR: Batch submit rejected**')).toBe(true);
     expect(isErrorReply('> ERROR: describe-jobs timed out')).toBe(true);
+  });
+
+  it('matches an ERROR reply with only the label emphasised', () => {
+    // The likelier shape than wrapping the whole sentence, and the one a
+    // leading-only strip misses.
+    expect(isErrorReply('**ERROR:** Batch submit rejected')).toBe(true);
+    expect(isErrorReply('`ERROR:` Notion 404')).toBe(true);
+  });
+
+  it('does not match narration prefixed by a number or timestamp', () => {
+    // Tolerating markup must not become tolerating any non-letter run: each
+    // of these would flip a successful run to status=error.
+    expect(isErrorReply('500 ERROR: rows skipped, run continued')).toBe(false);
+    expect(isErrorReply('[14:32:01] ERROR: retry limit hit, recovered')).toBe(
+      false,
+    );
+    expect(isErrorReply('3. ERROR: step retried and passed')).toBe(false);
   });
 
   it('does not match Japanese narration that mentions ERROR', () => {

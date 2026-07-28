@@ -84,12 +84,12 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // matched as "no letters either side" rather than a list of ASCII punctuation:
 // any ASCII class, `\W` included, also matches CJK, so a Japanese narration
 // line ending in the marker would count as bare and drop the whole post.
-const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/u;
+const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/mu;
 
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
   if (trimmed === '') return true;
-  return trimmed.split('\n').some((line) => SILENT_RESULT_LINE.test(line));
+  return SILENT_RESULT_LINE.test(trimmed);
 }
 
 // A scheduled-task agent reports failure by making its whole reply a single
@@ -101,18 +101,26 @@ export function isSilentResult(result: string): boolean {
 // failure.
 export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 
-// Same wrapper tolerance as `isSilentResult`, and for the same reason: an
-// agent that renders one sentinel as inline code renders the other that way
-// too. Missing it here is the worse half — the reply still reaches Slack, but
-// the run logs status=success and every monitor over it reads green.
-const LEADING_MARKUP = /^[^\p{L}]*/u;
+// An agent that renders one sentinel as inline code renders the other that
+// way too, and missing it here is the worse half: the reply still reaches
+// Slack, but the run logs status=success and every monitor over it reads
+// green. Emphasis is deleted wherever it sits rather than stripped off the
+// front, because the label alone is the shape agents actually emit
+// (`**ERROR:** notion 404`).
+//
+// Deliberately narrower than `isSilentResult`'s "no letters either side":
+// that one anchors both ends of the line, so a loose class is harmless, while
+// this is a prefix test and any non-letter run would classify a numbered or
+// timestamped narration line ("3. ERROR: rows skipped") as a reported failure.
+const MARKDOWN_EMPHASIS = /[`*~_>"'()[\]]/g;
 
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
-  return (
-    !trimmed.includes('\n') &&
-    trimmed.replace(LEADING_MARKUP, '').startsWith('ERROR: ')
-  );
+  if (trimmed.includes('\n')) return false;
+  return trimmed
+    .replace(MARKDOWN_EMPHASIS, '')
+    .trimStart()
+    .startsWith('ERROR: ');
 }
 
 // A `structured` task has no ERROR: line to key on — its reply never reaches
