@@ -937,6 +937,16 @@ describe('isErrorReply', () => {
 
   it('does not match a multi-line reply starting with ERROR', () => {
     expect(isErrorReply('ERROR: first leg\ningested 3 items')).toBe(false);
+    // \r and the two separators count as breaks too (sagri-ai#617).
+    expect(isErrorReply('ERROR: first leg\ringested 3 items')).toBe(false);
+    expect(isErrorReply('ERROR: first leg\u2028ingested 3 items')).toBe(false);
+    expect(isErrorReply('ERROR: first leg\u2029ingested 3 items')).toBe(false);
+  });
+
+  it('matches a failure message carrying a non-ECMAScript line break', () => {
+    // U+0085 is a Unicode line break but not an ECMAScript one, so the class
+    // boundary sits here: this stays a reported failure and logs red.
+    expect(isErrorReply('ERROR: batch submit failed\u0085 exit 1')).toBe(true);
   });
 
   it('does not match a normal reply mentioning ERROR mid-text', () => {
