@@ -169,6 +169,42 @@ describe('task scheduler', () => {
       expect(isSilentResult('  __SILENT__\n')).toBe(true);
     });
 
+    it('silences a marker the agent wrapped in markup', () => {
+      // Backticks are the verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z.
+      expect(isSilentResult('`__SILENT__`')).toBe(true);
+      expect(isSilentResult('**__SILENT__**')).toBe(true);
+      expect(isSilentResult('~~__SILENT__~~')).toBe(true);
+      expect(isSilentResult('"__SILENT__"')).toBe(true);
+      expect(isSilentResult('(__SILENT__)')).toBe(true);
+      expect(isSilentResult('- __SILENT__')).toBe(true);
+      expect(isSilentResult('> __SILENT__')).toBe(true);
+      expect(isSilentResult('1. __SILENT__')).toBe(true);
+      expect(isSilentResult('__SILENT__!')).toBe(true);
+    });
+
+    it('does not silence a wrapped marker with words around it', () => {
+      // Widening the match must not swallow a real summary that happens to
+      // name the marker.
+      expect(isSilentResult('`__SILENT__` is the marker')).toBe(false);
+      expect(isSilentResult('`__staging__`')).toBe(false);
+    });
+
+    it('treats only a newline as a line break', () => {
+      // Pins the `\n` split in SILENT_RESULT_LINE against the `m` flag, which
+      // counts both of these as line ends.
+      expect(isSilentResult('Ingested 3 pages\r__SILENT__')).toBe(false);
+      expect(isSilentResult('Ingested 3 pages\u2028__SILENT__')).toBe(false);
+    });
+
+    it('does not silence narration written in Japanese', () => {
+      // CJK is non-ASCII, so an ASCII-punctuation match would count this
+      // narration as a bare marker and drop the whole reply. Both sides need
+      // a case: only the trailing one catches the class being widened to
+      // ASCII `\W` on the right.
+      expect(isSilentResult('実行完了。__SILENT__')).toBe(false);
+      expect(isSilentResult('__SILENT__ 完了')).toBe(false);
+    });
+
     it('does not silence narration that only mentions the marker inline', () => {
       expect(
         isSilentResult('Per policy, I would output __SILENT__ here.'),
@@ -865,6 +901,38 @@ describe('isErrorReply', () => {
 
   it('matches with surrounding whitespace', () => {
     expect(isErrorReply('  ERROR: Notion query failed\n')).toBe(true);
+  });
+
+  it('matches an ERROR reply the agent wrapped in markup', () => {
+    // Same markup-wrapping bug as the silent marker (sagri-ai#616).
+    expect(isErrorReply('`ERROR: Notion 404 on database_id`')).toBe(true);
+    expect(isErrorReply('**ERROR: Batch submit rejected**')).toBe(true);
+    expect(isErrorReply('> ERROR: describe-jobs timed out')).toBe(true);
+  });
+
+  it('matches an ERROR reply with only the label emphasised', () => {
+    expect(isErrorReply('**ERROR:** Batch submit rejected')).toBe(true);
+    expect(isErrorReply('`ERROR:` Notion 404')).toBe(true);
+    // Slack mrkdwn bold is a single asterisk, and the colon sometimes sits
+    // outside the emphasis. Both are the near neighbours of the bullet case
+    // below, so they pin which side of the line the anchoring falls on.
+    expect(isErrorReply('*ERROR:* Batch submit rejected')).toBe(true);
+    expect(isErrorReply('**ERROR**: Batch submit rejected')).toBe(true);
+  });
+
+  it('does not match a list item that narrates a recovered error', () => {
+    // `*` opens bold and a bullet both, so tolerating emphasis anywhere on
+    // the line would flip each of these from success to status=error. Each
+    // shape is a separate widening of the lead class, so each earns a case.
+    expect(isErrorReply('* ERROR: retry limit hit, recovered')).toBe(false);
+    expect(isErrorReply('- ERROR: rows skipped, run continued')).toBe(false);
+    expect(isErrorReply('3. ERROR: step retried and passed')).toBe(false);
+    expect(isErrorReply('500 ERROR: rows skipped, run continued')).toBe(false);
+    expect(isErrorReply('[14:32:01] ERROR: retried, recovered')).toBe(false);
+  });
+
+  it('does not match Japanese narration that mentions ERROR', () => {
+    expect(isErrorReply('取得失敗 ERROR: notion')).toBe(false);
   });
 
   it('does not match a multi-line reply starting with ERROR', () => {

@@ -77,14 +77,28 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // __SILENT__"). Treating any-line match as silent swallows the narration
 // too — operator's intent was "nothing to say", so suppressing the whole
 // post matches that intent better than posting the narration alone.
-const SILENT_RESULT_MARKERS = new Set(['__SILENT__', '__NOOP__']);
+//
+// Prompts document the marker as inline code, and the agent copies that
+// formatting into its reply, so a backticked marker missed the exact-match
+// check and posted to Slack (sagri-tokyo/sagri-ai#616). Wrapper markup is
+// matched as "no letters either side" rather than a list of ASCII punctuation:
+// any ASCII class, `\W` included, also matches CJK, so a Japanese narration
+// line ending in the marker would count as bare and drop the whole post.
+//
+// The class admits digits, so a numbered-list marker line ("1. __SILENT__")
+// silences. Safe because both ends are anchored and the marker literal is
+// mandatory. `isErrorReply` is a prefix test with no such anchor, which is
+// why it cannot reuse this class.
+//
+// Split on `\n` rather than using the `m` flag: `m` also treats a bare `\r`
+// and U+2028 as line ends, which would silence narration this has always
+// posted.
+const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/u;
 
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
   if (trimmed === '') return true;
-  return trimmed
-    .split('\n')
-    .some((line) => SILENT_RESULT_MARKERS.has(line.trim()));
+  return trimmed.split('\n').some((line) => SILENT_RESULT_LINE.test(line));
 }
 
 // A scheduled-task agent reports failure by making its whole reply a single
@@ -96,9 +110,25 @@ export function isSilentResult(result: string): boolean {
 // failure.
 export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 
+// Same markup-wrapping bug as `isSilentResult` (sagri-tokyo/sagri-ai#616),
+// applied to the ERROR: convention. Wrappers may sit in any of three slots —
+// before the label, between the label and its colon, after the colon — and
+// they need not balance, so `**ERROR:** x`, `**ERROR**: x` and `*ERROR:* x`
+// all match; what follows the whitespace is the failure message and is not
+// inspected.
+//
+// A wrapper has to abut the label rather than float ahead of it, because `*`
+// opens both bold and a bullet: anything looser reads "* ERROR: retried,
+// recovered" as a reported failure and flips a green run to status=error.
+// Digits are excluded from the leading slot for the neighbouring reason — an
+// ordered-list marker leads a line of narration, not a reported failure. The
+// one lead that is allowed is a blockquote, which has no inline-emphasis
+// meaning to collide with and is how an agent quotes its own failure.
+const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
+
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
-  return !trimmed.includes('\n') && trimmed.startsWith('ERROR: ');
+  return !trimmed.includes('\n') && ERROR_REPLY_LINE.test(trimmed);
 }
 
 // A `structured` task has no ERROR: line to key on — its reply never reaches
