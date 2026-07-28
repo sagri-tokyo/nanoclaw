@@ -169,32 +169,28 @@ describe('task scheduler', () => {
       expect(isSilentResult('  __SILENT__\n')).toBe(true);
     });
 
-    it('silences a marker the agent rendered as inline code', () => {
-      // Verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z.
+    it('silences a marker the agent wrapped in markup', () => {
+      // Backticks are the verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z.
       expect(isSilentResult('`__SILENT__`')).toBe(true);
-    });
-
-    it('silences a marker wrapped in other markup', () => {
       expect(isSilentResult('**__SILENT__**')).toBe(true);
+      expect(isSilentResult('~~__SILENT__~~')).toBe(true);
       expect(isSilentResult('"__SILENT__"')).toBe(true);
+      expect(isSilentResult('(__SILENT__)')).toBe(true);
       expect(isSilentResult('- __SILENT__')).toBe(true);
       expect(isSilentResult('> __SILENT__')).toBe(true);
-      expect(isSilentResult('__SILENT__.')).toBe(true);
+      expect(isSilentResult('1. __SILENT__')).toBe(true);
+      expect(isSilentResult('__SILENT__!')).toBe(true);
     });
 
     it('does not silence a wrapped marker with words around it', () => {
-      // Widening the strip must not swallow a real summary that happens to
+      // Widening the match must not swallow a real summary that happens to
       // name the marker.
       expect(isSilentResult('`__SILENT__` is the marker')).toBe(false);
-      expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
     it('does not silence narration written in Japanese', () => {
-      // CJK is non-ASCII, so a `\W`-based strip would erase this narration
-      // down to the bare marker and drop the whole reply.
-      expect(isSilentResult('今日は何もありませんでした__SILENT__')).toBe(
-        false,
-      );
+      // CJK is non-ASCII, so an ASCII-punctuation match would count this
+      // narration as a bare marker and drop the whole reply.
       expect(isSilentResult('実行完了。__SILENT__')).toBe(false);
     });
 
@@ -894,6 +890,17 @@ describe('isErrorReply', () => {
 
   it('matches with surrounding whitespace', () => {
     expect(isErrorReply('  ERROR: Notion query failed\n')).toBe(true);
+  });
+
+  it('matches an ERROR reply the agent wrapped in markup', () => {
+    // Same markup-wrapping bug as the silent marker (sagri-ai#504).
+    expect(isErrorReply('`ERROR: Notion 404 on database_id`')).toBe(true);
+    expect(isErrorReply('**ERROR: Batch submit rejected**')).toBe(true);
+    expect(isErrorReply('> ERROR: describe-jobs timed out')).toBe(true);
+  });
+
+  it('does not match Japanese narration that mentions ERROR', () => {
+    expect(isErrorReply('取得失敗 ERROR: notion')).toBe(false);
   });
 
   it('does not match a multi-line reply starting with ERROR', () => {

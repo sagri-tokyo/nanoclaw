@@ -77,30 +77,19 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // __SILENT__"). Treating any-line match as silent swallows the narration
 // too — operator's intent was "nothing to say", so suppressing the whole
 // post matches that intent better than posting the narration alone.
-const SILENT_RESULT_MARKERS = new Set(['__SILENT__', '__NOOP__']);
-
-// Prompts render the marker as inline code (`__SILENT__`) when they document
-// it, and the agent copies that formatting into its reply, which missed the
-// exact-match check and posted to Slack instead (sagri-tokyo/sagri-ai#616).
-// Stripping here rather than in each prompt keeps one prompt's formatting
-// habits from spamming the channel.
 //
-// The class is ASCII markdown punctuation, listed out rather than written as
-// `\W`: JS `\W` is ASCII-only, so it also strips CJK, and a Japanese reply
-// with the marker at the end of a narration line would be normalised to the
-// bare marker and the whole post dropped. A numbered-list prefix ("1. ") is
-// the one wrapper shape still outside the class; add the digits if it ever
-// shows up in a reply.
-const MARKER_WRAPPERS = /^[\s`'"*>.-]+|[\s`'"*.]+$/g;
+// Prompts document the marker as inline code, and the agent copies that
+// formatting into its reply, so a backticked marker missed the exact-match
+// check and posted to Slack (sagri-tokyo/sagri-ai#616). Wrapper markup is
+// matched as "no letters either side" rather than a list of ASCII punctuation:
+// any ASCII class, `\W` included, also matches CJK, so a Japanese narration
+// line ending in the marker would count as bare and drop the whole post.
+const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/u;
 
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
   if (trimmed === '') return true;
-  return trimmed
-    .split('\n')
-    .some((line) =>
-      SILENT_RESULT_MARKERS.has(line.trim().replace(MARKER_WRAPPERS, '')),
-    );
+  return trimmed.split('\n').some((line) => SILENT_RESULT_LINE.test(line));
 }
 
 // A scheduled-task agent reports failure by making its whole reply a single
@@ -112,9 +101,18 @@ export function isSilentResult(result: string): boolean {
 // failure.
 export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 
+// Same wrapper tolerance as `isSilentResult`, and for the same reason: an
+// agent that renders one sentinel as inline code renders the other that way
+// too. Missing it here is the worse half — the reply still reaches Slack, but
+// the run logs status=success and every monitor over it reads green.
+const LEADING_MARKUP = /^[^\p{L}]*/u;
+
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
-  return !trimmed.includes('\n') && trimmed.startsWith('ERROR: ');
+  return (
+    !trimmed.includes('\n') &&
+    trimmed.replace(LEADING_MARKUP, '').startsWith('ERROR: ')
+  );
 }
 
 // A `structured` task has no ERROR: line to key on — its reply never reaches
