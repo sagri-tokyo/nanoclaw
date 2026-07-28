@@ -189,17 +189,20 @@ describe('task scheduler', () => {
       expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
-    it('does not treat a bare carriage return as a line break', () => {
-      // The `m` flag would: it counts `\r` and U+2028 as line ends, which
-      // would silence narration this has always posted.
+    it('treats only a newline as a line break', () => {
+      // Pins the `\n` split in SILENT_RESULT_LINE against the `m` flag, which
+      // counts both of these as line ends.
       expect(isSilentResult('Ingested 3 pages\r__SILENT__')).toBe(false);
-      expect(isSilentResult('Ingested 3 pages __SILENT__')).toBe(false);
+      expect(isSilentResult('Ingested 3 pages\u2028__SILENT__')).toBe(false);
     });
 
     it('does not silence narration written in Japanese', () => {
       // CJK is non-ASCII, so an ASCII-punctuation match would count this
-      // narration as a bare marker and drop the whole reply.
+      // narration as a bare marker and drop the whole reply. Both sides need
+      // a case: only the trailing one catches the class being widened to
+      // ASCII `\W` on the right.
       expect(isSilentResult('実行完了。__SILENT__')).toBe(false);
+      expect(isSilentResult('__SILENT__ 完了')).toBe(false);
     });
 
     it('does not silence narration that only mentions the marker inline', () => {
@@ -901,7 +904,7 @@ describe('isErrorReply', () => {
   });
 
   it('matches an ERROR reply the agent wrapped in markup', () => {
-    // Same markup-wrapping bug as the silent marker (sagri-ai#504).
+    // Same markup-wrapping bug as the silent marker (sagri-ai#616).
     expect(isErrorReply('`ERROR: Notion 404 on database_id`')).toBe(true);
     expect(isErrorReply('**ERROR: Batch submit rejected**')).toBe(true);
     expect(isErrorReply('> ERROR: describe-jobs timed out')).toBe(true);

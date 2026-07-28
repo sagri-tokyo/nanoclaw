@@ -86,10 +86,9 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // line ending in the marker would count as bare and drop the whole post.
 //
 // The class admits digits, so a numbered-list marker line ("1. __SILENT__")
-// silences. Safe only because both ends are anchored and the marker literal
-// is mandatory: a line has to be the marker plus punctuation and nothing
-// else. `isErrorReply` is a prefix test with no such anchor, which is why it
-// cannot reuse this class.
+// silences. Safe because both ends are anchored and the marker literal is
+// mandatory. `isErrorReply` is a prefix test with no such anchor, which is
+// why it cannot reuse this class.
 //
 // Split on `\n` rather than using the `m` flag: `m` also treats a bare `\r`
 // and U+2028 as line ends, which would silence narration this has always
@@ -112,17 +111,20 @@ export function isSilentResult(result: string): boolean {
 export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 
 // Same markup-wrapping bug as `isSilentResult` (sagri-tokyo/sagri-ai#616),
-// applied to the ERROR: convention. Only the opening wrapper is consumed —
-// there is no closing anchor, so a trailing `**` is simply ignored — because
-// the label alone is the shape agents emit most (`**ERROR:** notion 404`).
+// applied to the ERROR: convention. Wrappers may sit in any of three slots —
+// before the label, between the label and its colon, after the colon — and
+// they need not balance, so `**ERROR:**`, `**ERROR**:` and `*ERROR:*` all
+// match. The pattern stops at the space after the colon; the rest of the line
+// is the failure message and is not inspected.
 //
-// The wrapper has to abut the label rather than float ahead of it. `*` opens
-// both bold and a bullet, so anything looser reads "* ERROR: retried,
-// recovered" as a reported failure and flips a green run to status=error;
-// digits are out for the same reason. A blockquote is the one exception that
-// may lead: `>` is how an agent quotes its own reported failure, and it has
-// no inline-emphasis meaning to collide with.
-const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/;
+// A wrapper has to abut the label rather than float ahead of it, because `*`
+// opens both bold and a bullet: anything looser reads "* ERROR: retried,
+// recovered" as a reported failure and flips a green run to status=error.
+// Digits are excluded from the leading slot for the neighbouring reason — an
+// ordered-list marker leads a line of narration, not a reported failure. The
+// one lead that is allowed is a blockquote, which has no inline-emphasis
+// meaning to collide with and is how an agent quotes its own failure.
+const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
 
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
