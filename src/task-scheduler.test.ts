@@ -170,15 +170,23 @@ describe('task scheduler', () => {
     });
 
     it('silences a marker the agent rendered as inline code', () => {
-      // Verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z. Its prompt
-      // documents the marker in backticks and the agent copied them, so the
-      // exact-match check missed and Slack got the marker.
+      // Verbatim dsm-experiment-poller reply, 2026-07-27T16:11Z.
       expect(isSilentResult('`__SILENT__`')).toBe(true);
     });
 
-    it('silences a bolded or quoted marker', () => {
+    it('silences a marker wrapped in other markup', () => {
       expect(isSilentResult('**__SILENT__**')).toBe(true);
       expect(isSilentResult('"__SILENT__"')).toBe(true);
+      expect(isSilentResult('- __SILENT__')).toBe(true);
+      expect(isSilentResult('> __SILENT__')).toBe(true);
+      expect(isSilentResult('__SILENT__.')).toBe(true);
+    });
+
+    it('does not silence a wrapped marker with words around it', () => {
+      // Widening the strip must not swallow a real summary that happens to
+      // name the marker.
+      expect(isSilentResult('`__SILENT__` is the marker')).toBe(false);
+      expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
     it('does not silence narration that only mentions the marker inline', () => {
