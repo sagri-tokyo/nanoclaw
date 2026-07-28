@@ -901,20 +901,17 @@ describe('isErrorReply', () => {
   });
 
   it('matches an ERROR reply with only the label emphasised', () => {
-    // The likelier shape than wrapping the whole sentence, and the one a
-    // leading-only strip misses.
     expect(isErrorReply('**ERROR:** Batch submit rejected')).toBe(true);
     expect(isErrorReply('`ERROR:` Notion 404')).toBe(true);
   });
 
-  it('does not match narration prefixed by a number or timestamp', () => {
-    // Tolerating markup must not become tolerating any non-letter run: each
-    // of these would flip a successful run to status=error.
-    expect(isErrorReply('500 ERROR: rows skipped, run continued')).toBe(false);
-    expect(isErrorReply('[14:32:01] ERROR: retry limit hit, recovered')).toBe(
-      false,
-    );
+  it('does not match a list item that narrates a recovered error', () => {
+    // `*` opens bold and a bullet both, so tolerating emphasis anywhere on
+    // the line would flip each of these from success to status=error.
+    expect(isErrorReply('* ERROR: retry limit hit, recovered')).toBe(false);
+    expect(isErrorReply('- ERROR: rows skipped, run continued')).toBe(false);
     expect(isErrorReply('3. ERROR: step retried and passed')).toBe(false);
+    expect(isErrorReply('[14:32:01] ERROR: retried, recovered')).toBe(false);
   });
 
   it('does not match Japanese narration that mentions ERROR', () => {

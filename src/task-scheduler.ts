@@ -84,12 +84,21 @@ export function computeNextRun(task: ScheduledTask): string | null {
 // matched as "no letters either side" rather than a list of ASCII punctuation:
 // any ASCII class, `\W` included, also matches CJK, so a Japanese narration
 // line ending in the marker would count as bare and drop the whole post.
-const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/mu;
+//
+// The class admits digits, so a numbered-list marker line ("1. __SILENT__")
+// silences. That is a risk taken, not a free win: it also silences a reply
+// whose narration happens to end on a line of pure digits and punctuation.
+// Anchoring both ends makes that shape implausible enough to accept.
+//
+// Split on `\n` rather than using the `m` flag: `m` also treats a bare `\r`
+// and U+2028 as line ends, which would silence narration this has always
+// posted.
+const SILENT_RESULT_LINE = /^[^\p{L}]*(?:__SILENT__|__NOOP__)[^\p{L}]*$/u;
 
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
   if (trimmed === '') return true;
-  return SILENT_RESULT_LINE.test(trimmed);
+  return trimmed.split('\n').some((line) => SILENT_RESULT_LINE.test(line));
 }
 
 // A scheduled-task agent reports failure by making its whole reply a single
@@ -104,23 +113,19 @@ export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 // An agent that renders one sentinel as inline code renders the other that
 // way too, and missing it here is the worse half: the reply still reaches
 // Slack, but the run logs status=success and every monitor over it reads
-// green. Emphasis is deleted wherever it sits rather than stripped off the
-// front, because the label alone is the shape agents actually emit
-// (`**ERROR:** notion 404`).
+// green. Emphasis is matched around the label as well as around the whole
+// line, because `**ERROR:** notion 404` is the shape agents emit most.
 //
-// Deliberately narrower than `isSilentResult`'s "no letters either side":
-// that one anchors both ends of the line, so a loose class is harmless, while
-// this is a prefix test and any non-letter run would classify a numbered or
-// timestamped narration line ("3. ERROR: rows skipped") as a reported failure.
-const MARKDOWN_EMPHASIS = /[`*~_>"'()[\]]/g;
+// Emphasis has to abut the label rather than float ahead of it, and only a
+// blockquote may lead. `*` opens both bold and a bullet, so anything looser
+// reads "* ERROR: retried, recovered" as a reported failure and flips a green
+// run to status=error. Same reason digits are out: "3. ERROR: ..." is a list
+// item in a narration, not the closed-set literal.
+const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
 
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
-  if (trimmed.includes('\n')) return false;
-  return trimmed
-    .replace(MARKDOWN_EMPHASIS, '')
-    .trimStart()
-    .startsWith('ERROR: ');
+  return !trimmed.includes('\n') && ERROR_REPLY_LINE.test(trimmed);
 }
 
 // A `structured` task has no ERROR: line to key on — its reply never reaches
