@@ -189,6 +189,15 @@ describe('task scheduler', () => {
       expect(isSilentResult('`__staging__`')).toBe(false);
     });
 
+    it('does not silence narration written in Japanese', () => {
+      // CJK is non-ASCII, so a `\W`-based strip would erase this narration
+      // down to the bare marker and drop the whole reply.
+      expect(isSilentResult('今日は何もありませんでした__SILENT__')).toBe(
+        false,
+      );
+      expect(isSilentResult('実行完了。__SILENT__')).toBe(false);
+    });
+
     it('does not silence narration that only mentions the marker inline', () => {
       expect(
         isSilentResult('Per policy, I would output __SILENT__ here.'),

@@ -83,10 +83,15 @@ const SILENT_RESULT_MARKERS = new Set(['__SILENT__', '__NOOP__']);
 // it, and the agent copies that formatting into its reply, which missed the
 // exact-match check and posted to Slack instead (sagri-tokyo/sagri-ai#616).
 // Stripping here rather than in each prompt keeps one prompt's formatting
-// habits from spamming the channel. Underscore is a word character, so the
-// marker survives its own strip while a bullet, quote, or trailing period
-// does not.
-const MARKER_WRAPPERS = /^\W+|\W+$/g;
+// habits from spamming the channel.
+//
+// The class is ASCII markdown punctuation, listed out rather than written as
+// `\W`: JS `\W` is ASCII-only, so it also strips CJK, and a Japanese reply
+// with the marker at the end of a narration line would be normalised to the
+// bare marker and the whole post dropped. A numbered-list prefix ("1. ") is
+// the one wrapper shape still outside the class; add the digits if it ever
+// shows up in a reply.
+const MARKER_WRAPPERS = /^[\s`'"*>.-]+|[\s`'"*.]+$/g;
 
 export function isSilentResult(result: string): boolean {
   const trimmed = result.trim();
