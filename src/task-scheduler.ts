@@ -126,9 +126,20 @@ export const AGENT_ERROR_REPLY_CLASS = 'AgentErrorReply';
 // meaning to collide with and is how an agent quotes its own failure.
 const ERROR_REPLY_LINE = /^[>\s]*[`*_~]*ERROR[`*_~]*:[`*_~]*\s/u;
 
+// The whole ECMAScript LineTerminator set, not `\n` alone: narration split by
+// a bare `\r` or U+2028 read as one line and logged status=error on a run that
+// succeeded (sagri-tokyo/sagri-ai#617). `isSilentResult` stays `\n`-only — see
+// `SILENT_RESULT_LINE`.
+//
+// A `\r`-split reply can still render as one failure line in chat while
+// counting as narration here: green status, no `formatErrorWrap` footer.
+// Accepted because the set is taken whole from the language; excluding `\r`
+// would leave one terminator classified by hand.
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/u;
+
 export function isErrorReply(result: string): boolean {
   const trimmed = result.trim();
-  return !trimmed.includes('\n') && ERROR_REPLY_LINE.test(trimmed);
+  return !LINE_TERMINATOR.test(trimmed) && ERROR_REPLY_LINE.test(trimmed);
 }
 
 // A `structured` task has no ERROR: line to key on — its reply never reaches
