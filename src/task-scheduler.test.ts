@@ -1427,3 +1427,74 @@ describe('deriveStructuredRunError', () => {
     ).toBeNull();
   });
 });
+
+describe('requester attribution per context mode (sagri-ai#296)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function group(): RegisteredGroup {
+    return {
+      name: 'slack_main',
+      folder: 'slack_main',
+      trigger: '@bot',
+      added_at: '2026-07-24T00:00:00.000Z',
+    };
+  }
+
+  async function capturedRequesterIds(
+    contextMode: string,
+  ): Promise<string[] | undefined | 'unset'> {
+    const base = {
+      id: `attribution-${contextMode}`,
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do the thing.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: contextMode as 'isolated' | 'group',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-07-24T00:00:00.000Z',
+    };
+    createTask(base);
+    let captured: string[] | undefined | 'unset' = 'unset';
+    await _runTaskForTests(
+      getTaskById(base.id) as ScheduledTask,
+      {
+        registeredGroups: () => ({ 'C123@slack': group() }),
+        getSessions: () => ({ slack_main: 'session-abc' }),
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      },
+      async (_group, input: ContainerInput) => {
+        captured = input.requesterIds;
+        return { status: 'success', result: 'done' } as ContainerOutput;
+      },
+    );
+    return captured;
+  }
+
+  it('claims nobody asked for an isolated run, which runs on its own prompt', async () => {
+    expect(await capturedRequesterIds('isolated')).toStrictEqual([]);
+  });
+
+  it('claims no knowledge for a group run, which resumes the humans session', async () => {
+    // `[]` here would tell the gate no approver could be the requester, while the
+    // resumed session still carries whatever a human asked for.
+    expect(await capturedRequesterIds('group')).toBeUndefined();
+  });
+
+  it('claims no knowledge for an unrecognized context_mode', async () => {
+    // context_mode is an unvalidated TEXT column; an unexpected value must not
+    // land on the permissive answer.
+    expect(await capturedRequesterIds('something-else')).toBeUndefined();
+  });
+});

@@ -31,11 +31,18 @@ describe('run requester attribution', () => {
   });
 
   it('clears the attribution for a run whose context it cannot enumerate', () => {
-    // A group-context scheduled task resumes the humans' session, so `[]` would
-    // claim nobody is in context when somebody is.
+    // Group-context runs cannot safely claim `[]` (see run-requesters.ts).
     setRunRequesters('dev', ['U_BOB'], false);
     setRunRequesters('dev', undefined, false);
     expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
+  it('keeps the attribution an undrained request still needs', () => {
+    // Clearing here would refuse U_BOB's pending request for no gain, and strand
+    // the group unattributed for the launch after this one as well.
+    setRunRequesters('dev', ['U_BOB'], false);
+    setRunRequesters('dev', undefined, true);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB']);
   });
 
   it('declines to attribute an undrained request to the run that follows it', () => {

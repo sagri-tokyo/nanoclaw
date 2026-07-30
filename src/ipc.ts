@@ -141,7 +141,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
     try {
       groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
         const stat = fs.statSync(path.join(ipcBaseDir, f));
-        return stat.isDirectory() && f !== 'errors';
+        if (!stat.isDirectory() || f === 'errors') return false;
+        // A name that is not a legal group folder is not a group identity, and
+        // resolving a path from it throws. A throw escapes this loop before the
+        // reschedule at the end, which would stop the drain for every group
+        // until a restart, so screen it out here with the rest of the filter.
+        return isValidGroupFolder(f);
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
@@ -158,17 +163,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
     }
 
     for (const sourceGroup of groupFolders) {
-      // A directory whose name is not a legal group folder is not a group
-      // identity, so skip it rather than resolving a path from it. Resolution
-      // throws, and a throw here would escape before the reschedule below and
-      // stop the drain for every group until a restart.
-      if (!isValidGroupFolder(sourceGroup)) {
-        logger.warn(
-          { sourceGroup },
-          'IPC: skipping directory that is not a valid group folder',
-        );
-        continue;
-      }
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = resolveGroupIpcTasksPath(sourceGroup);

@@ -184,6 +184,15 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.posted[0].text).toContain('took part in the request');
   });
 
+  it('names the empty approver list as the cause when that is why nobody is eligible', async () => {
+    // Same branch as the all-requesters refusal, different cause: this one sends
+    // the operator to the host config, not to a colleague.
+    const { deps, rec } = makeDeps({ approvers: () => new Set() });
+    await seedGated(deps, ['U_HUMAN']);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted[0].text).toContain('the approver list is empty');
+  });
+
   it('holds when one approver is clear of the request', async () => {
     const { deps, rec } = makeDeps({
       approvers: () => new Set(['U_BOB', 'U_CAROL']),

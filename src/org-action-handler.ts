@@ -340,9 +340,11 @@ export async function driveOrgActionRequest(
   // allowlist fully covered by requesters is ordinary in a busy channel, since
   // the requester set widens with the thread context the run read.
   const requesters = new Set(ctx.requesterIds);
-  const eligible = [...deps.approvers()].filter((id) => !requesters.has(id));
-  if (eligible.length === 0) {
-    const emptyAllowlist = deps.approvers().size === 0;
+  const approvers = deps.approvers();
+  if ([...approvers].every((id) => requesters.has(id))) {
+    // `every` is vacuously true on an empty allowlist, which is why that case
+    // lands here and picks its own wording rather than getting its own branch.
+    const emptyAllowlist = approvers.size === 0;
     await refuse(
       emptyAllowlist
         ? 'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json)'

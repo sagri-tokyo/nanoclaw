@@ -24,11 +24,17 @@
  * there is no existing set to union into (the post-restart case). Attribution
  * can only ever widen, never shift to the wrong humans.
  *
- * KNOWN LIMIT (sagri-ai#629): an interactive run resumes the group's session, so
- * it can act on an instruction from an earlier run whose author this run's set
- * does not name. The scheduled-task path avoids this by claiming `undefined` for
- * a session-resuming run; doing the same for interactive runs would refuse
- * almost everything, so #629 holds the design question.
+ * KNOWN LIMIT (sagri-ai#629), and it is a live bypass, not a theoretical one:
+ * an interactive run resumes the group's session, and a launch REPLACES the set.
+ * So if Alice asks for a gated write, the run ends without raising it, anyone
+ * else then posts, the next run raises it from Alice's resumed instruction and
+ * records only that person. Alice approves her own request.
+ *
+ * The scheduled-task path dodges this by claiming `undefined` for a
+ * session-resuming run. Interactive runs cannot: a session outlives many runs,
+ * so unioning over it (or claiming `undefined` per run) would refuse nearly
+ * every gated action once the approvers had spoken in the channel. Which
+ * tradeoff to take is the design question #629 holds.
  */
 
 import { logger } from './logger.js';
@@ -45,10 +51,14 @@ export function setRunRequesters(
   hasUndrainedRequests: boolean,
 ): void {
   if (requesterIds === undefined) {
-    requestersByGroupFolder.delete(groupFolder);
+    // Keep what is on record while a request is still undrained: that request's
+    // exclusions are correct and dropping them would refuse it for no gain, and
+    // would strand the group unattributed for the launch after this one too.
+    // With nothing pending, clear it so this run's own actions refuse.
+    if (!hasUndrainedRequests) requestersByGroupFolder.delete(groupFolder);
     logger.warn(
-      { groupFolder },
-      'run-requesters: run launched with unenumerable context — group left unattributed, gated actions will refuse',
+      { groupFolder, keptExisting: hasUndrainedRequests },
+      'run-requesters: run launched with unenumerable context — gated actions from it will refuse',
     );
     return;
   }
