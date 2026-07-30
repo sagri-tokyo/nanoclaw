@@ -37,12 +37,20 @@ describe('run requester attribution', () => {
     expect(getRunRequesters('dev')).toBeUndefined();
   });
 
-  it('keeps the attribution an undrained request still needs', () => {
-    // Clearing here would refuse U_BOB's pending request for no gain, and strand
-    // the group unattributed for the launch after this one as well.
+  it('clears even while a request is undrained, rather than handing it to this run', () => {
+    // The undrained request refuses as a result. Keeping the set would give it to
+    // a run whose context the host cannot enumerate, which is the permissive
+    // direction (see run-requesters.ts).
     setRunRequesters('dev', ['U_BOB'], false);
     setRunRequesters('dev', undefined, true);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
+  it('never lets an isolated task empty set survive into an unattributable run', () => {
+    // `[]` excludes nobody, so inheriting it is worse than inheriting a real set.
+    setRunRequesters('dev', [], false);
+    setRunRequesters('dev', undefined, true);
+    expect(getRunRequesters('dev')).toBeUndefined();
   });
 
   it('declines to attribute an undrained request to the run that follows it', () => {

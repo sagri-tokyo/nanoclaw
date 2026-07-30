@@ -341,9 +341,8 @@ export async function driveOrgActionRequest(
   // the requester set widens with the thread context the run read.
   const requesters = new Set(ctx.requesterIds);
   const approvers = deps.approvers();
-  if ([...approvers].every((id) => requesters.has(id))) {
-    // `every` is vacuously true on an empty allowlist, which is why that case
-    // lands here and picks its own wording rather than getting its own branch.
+  const eligible = [...approvers].filter((id) => !requesters.has(id));
+  if (eligible.length === 0) {
     const emptyAllowlist = approvers.size === 0;
     await refuse(
       emptyAllowlist

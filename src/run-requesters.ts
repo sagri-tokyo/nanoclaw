@@ -18,11 +18,17 @@
  *     to an approver who might be the requester.
  *
  * The drain is a 1s poll decoupled from container lifetime, so it can pick up a
- * request after that container exited and the next run already started. While
- * the group has an undrained IPC file, a launch therefore unions into the
- * existing set instead of replacing it, and refuses to attribute at all when
- * there is no existing set to union into (the post-restart case). Attribution
- * can only ever widen, never shift to the wrong humans.
+ * request after that container exited and the next run already started. There is
+ * one slot per group, shared by a pending request's exclusions and the next run's
+ * attribution, so while the group has an undrained IPC file a launch never
+ * narrows that slot: it unions its own senders in, declines to attribute when
+ * there is nothing to union into (the post-restart case), and clears outright
+ * when it cannot enumerate its own context. A pending request can therefore be
+ * over-excluded or refused, never handed a set that omits its real requester.
+ *
+ * Making a pending request keep exactly the set it was raised under would need
+ * per-request correlation the drain does not have (it sees a file, not the run
+ * that wrote it) or no launch overlap at all. sagri-ai#630 holds that.
  *
  * KNOWN LIMIT (sagri-ai#629), and it is a live bypass, not a theoretical one:
  * an interactive run resumes the group's session, and a launch REPLACES the set.
@@ -51,14 +57,16 @@ export function setRunRequesters(
   hasUndrainedRequests: boolean,
 ): void {
   if (requesterIds === undefined) {
-    // Keep what is on record while a request is still undrained: that request's
-    // exclusions are correct and dropping them would refuse it for no gain, and
-    // would strand the group unattributed for the launch after this one too.
-    // With nothing pending, clear it so this run's own actions refuse.
-    if (!hasUndrainedRequests) requestersByGroupFolder.delete(groupFolder);
+    // Clear unconditionally, including when a request is still undrained. One
+    // slot per group serves both that request's exclusions and this run's own
+    // attribution, so keeping the set to spare the old request would hand it to
+    // this run, whose context the host cannot enumerate — and an inherited `[]`
+    // from a preceding isolated task would then exclude nobody at all. The cost
+    // is that the undrained request refuses too.
+    requestersByGroupFolder.delete(groupFolder);
     logger.warn(
-      { groupFolder, keptExisting: hasUndrainedRequests },
-      'run-requesters: run launched with unenumerable context — gated actions from it will refuse',
+      { groupFolder },
+      'run-requesters: run launched with unenumerable context — group left unattributed, gated actions will refuse',
     );
     return;
   }
