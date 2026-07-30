@@ -38,16 +38,14 @@ describe('run requester attribution', () => {
   });
 
   it('clears even while a request is undrained, rather than handing it to this run', () => {
-    // The undrained request refuses as a result. Keeping the set would give it to
-    // a run whose context the host cannot enumerate, which is the permissive
-    // direction (see run-requesters.ts).
+    // Mid-drain version of the rule above (see run-requesters.ts).
     setRunRequesters('dev', ['U_BOB'], false);
     setRunRequesters('dev', undefined, true);
     expect(getRunRequesters('dev')).toBeUndefined();
   });
 
   it('never lets an isolated task empty set survive into an unattributable run', () => {
-    // `[]` excludes nobody, so inheriting it is worse than inheriting a real set.
+    // `[]` excludes nobody, which is worse to inherit than a real set.
     setRunRequesters('dev', [], false);
     setRunRequesters('dev', undefined, true);
     expect(getRunRequesters('dev')).toBeUndefined();

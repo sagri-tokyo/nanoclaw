@@ -20,11 +20,11 @@
  * The drain is a 1s poll decoupled from container lifetime, so it can pick up a
  * request after that container exited and the next run already started. There is
  * one slot per group, shared by a pending request's exclusions and the next run's
- * attribution, so while the group has an undrained IPC file a launch never
- * narrows that slot: it unions its own senders in, declines to attribute when
- * there is nothing to union into (the post-restart case), and clears outright
- * when it cannot enumerate its own context. A pending request can therefore be
- * over-excluded or refused, never handed a set that omits its real requester.
+ * attribution. While the group has an undrained IPC file, a launch therefore
+ * either widens the slot (unioning its own senders in) or empties it, and never
+ * trims it to a smaller non-empty set. That is the invariant: a pending request
+ * can be over-excluded, or refused outright, but is never handed a set that omits
+ * one of its real requesters.
  *
  * Making a pending request keep exactly the set it was raised under would need
  * per-request correlation the drain does not have (it sees a file, not the run
@@ -48,8 +48,9 @@ import { logger } from './logger.js';
 const requestersByGroupFolder = new Map<string, Set<string>>();
 
 /**
- * Record the requesters of a run being launched. See the module docstring for
- * the three states and why an undrained request makes this union.
+ * Record the requesters of a run being launched. `hasUndrainedRequests` makes
+ * this union rather than replace, but only when the run has senders of its own;
+ * an `undefined` clears the slot whatever is pending. See the module docstring.
  */
 export function setRunRequesters(
   groupFolder: string,
@@ -57,12 +58,10 @@ export function setRunRequesters(
   hasUndrainedRequests: boolean,
 ): void {
   if (requesterIds === undefined) {
-    // Clear unconditionally, including when a request is still undrained. One
-    // slot per group serves both that request's exclusions and this run's own
-    // attribution, so keeping the set to spare the old request would hand it to
-    // this run, whose context the host cannot enumerate — and an inherited `[]`
-    // from a preceding isolated task would then exclude nobody at all. The cost
-    // is that the undrained request refuses too.
+    // Clears even mid-drain: keeping the set to spare a pending request would
+    // hand it to this run instead (see the module docstring), and an inherited
+    // `[]` from a preceding isolated task would exclude nobody at all. The
+    // pending request pays for it by refusing too.
     requestersByGroupFolder.delete(groupFolder);
     logger.warn(
       { groupFolder },

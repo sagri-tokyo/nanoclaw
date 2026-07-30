@@ -179,6 +179,7 @@ import {
   mapContainerOutputForUser,
 } from './container-runner.js';
 import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
+import { clearRunRequesters, getRunRequesters } from './run-requesters.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -1581,5 +1582,46 @@ describe('container-runner capability profile write-token gating', () => {
     const args = await captureArgsForInput(interactiveInput);
     expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).toBeNull();
     expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).toBeNull();
+  });
+});
+
+describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
+  // The three units are covered separately (task-scheduler emits the value, the
+  // registry stores it, the gate refuses on undefined). This pins the line that
+  // joins them, which is the only place the gate's input is actually set.
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    clearRunRequesters();
+  });
+
+  // Attribution is recorded before the spawn, deliberately, so the container can
+  // never emit an org_action ahead of it. That lets this read the registry without
+  // running the container to completion.
+  function launchWith(
+    requesterIds: string[] | undefined,
+  ): string[] | undefined {
+    void runContainerAgent(
+      testGroup,
+      { ...testInput, requesterIds },
+      () => {},
+    ).catch(() => {});
+    return getRunRequesters(testGroup.folder);
+  }
+
+  it('records the run senders so the gate can exclude them', () => {
+    expect(launchWith(['U_BOB', 'U_ALICE'])).toStrictEqual([
+      'U_BOB',
+      'U_ALICE',
+    ]);
+  });
+
+  it('records a scheduled run as nobody asked, not as unknown', () => {
+    expect(launchWith([])).toStrictEqual([]);
+  });
+
+  it('leaves the group unattributed when the run cannot enumerate its context', () => {
+    // The gate reads this as "refuse", which is the whole point of `undefined`
+    // being distinct from `[]`.
+    expect(launchWith(undefined)).toBeUndefined();
   });
 });
