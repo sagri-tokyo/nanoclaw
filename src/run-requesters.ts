@@ -24,12 +24,11 @@
  * there is no existing set to union into (the post-restart case). Attribution
  * can only ever widen, never shift to the wrong humans.
  *
- * KNOWN LIMIT (sagri-ai#629): attribution is per run, but the container resumes
- * the group's Claude session, so run N+1's agent still has run N's messages in
- * context and could act on an instruction whose author is not in run N+1's
- * requester set. Closing that needs session-scoped attribution, which would
- * accumulate every speaker for the session's life and make the gate
- * unsatisfiable; it is a design question, not a patch.
+ * KNOWN LIMIT (sagri-ai#629): an interactive run resumes the group's session, so
+ * it can act on an instruction from an earlier run whose author this run's set
+ * does not name. The scheduled-task path avoids this by claiming `undefined` for
+ * a session-resuming run; doing the same for interactive runs would refuse
+ * almost everything, so #629 holds the design question.
  */
 
 import { logger } from './logger.js';
@@ -38,27 +37,39 @@ const requestersByGroupFolder = new Map<string, Set<string>>();
 
 /**
  * Record the requesters of a run being launched. See the module docstring for
- * why `hasUndrainedRequests` unions, and why it declines to attribute rather
- * than attributing the launching run's senders to somebody else's request.
+ * the three states and why an undrained request makes this union.
  */
 export function setRunRequesters(
   groupFolder: string,
-  requesterIds: string[],
+  requesterIds: string[] | undefined,
   hasUndrainedRequests: boolean,
 ): void {
-  const existing = requestersByGroupFolder.get(groupFolder);
-  if (hasUndrainedRequests && !existing) {
+  if (requesterIds === undefined) {
+    requestersByGroupFolder.delete(groupFolder);
     logger.warn(
-      { groupFolder, requesterCount: requesterIds.length },
-      'run-requesters: undrained IPC request with no attribution on record (restart?) — leaving the group unattributed so the gate refuses rather than blaming this run',
+      { groupFolder },
+      'run-requesters: run launched with unenumerable context — group left unattributed, gated actions will refuse',
     );
     return;
   }
-  const base = hasUndrainedRequests ? existing : undefined;
-  requestersByGroupFolder.set(
-    groupFolder,
-    new Set([...(base ?? []), ...requesterIds]),
-  );
+
+  if (!hasUndrainedRequests) {
+    requestersByGroupFolder.set(groupFolder, new Set(requesterIds));
+    return;
+  }
+
+  const existing = requestersByGroupFolder.get(groupFolder);
+  if (!existing) {
+    // Nothing to union into means the pending request predates the attribution
+    // we hold (a restart). Naming this run's senders would blame them for a
+    // request they never made, and clear whoever did make it to approve it.
+    logger.warn(
+      { groupFolder, requesterCount: requesterIds.length },
+      'run-requesters: undrained IPC request with no attribution on record (restart?) — group left unattributed, gated actions will refuse',
+    );
+    return;
+  }
+  for (const id of requesterIds) existing.add(id);
 }
 
 /**
@@ -73,9 +84,8 @@ export function addRunRequesters(
 ): void {
   const existing = requestersByGroupFolder.get(groupFolder);
   if (!existing) {
-    // Never create the entry here: it would miss the launch's own senders and so
-    // read as a complete attribution when it is a partial one. Staying absent
-    // makes the gate refuse instead.
+    // Creating the entry here would miss the launch's own senders, so a partial
+    // attribution would read as a complete one.
     logger.warn(
       { groupFolder, requesterCount: requesterIds.length },
       'run-requesters: piped batch for an unattributed group — senders not recorded, gated actions will refuse',

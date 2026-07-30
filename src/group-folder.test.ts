@@ -1,14 +1,17 @@
+import fs from 'fs';
 import path from 'path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   GroupNotFoundError,
   InvalidGroupFolderError,
   PathEscapeError,
+  hasUndrainedIpcRequests,
   isValidGroupFolder,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
+  resolveGroupIpcTasksPath,
 } from './group-folder.js';
 
 describe('group folder validation', () => {
@@ -69,5 +72,47 @@ describe('group folder validation', () => {
     expect(b).toBeInstanceOf(Error);
     expect(b.constructor.name).toBe('PathEscapeError');
     expect(b.name).toBe('PathEscapeError');
+  });
+});
+
+describe('hasUndrainedIpcRequests', () => {
+  // Runs against the real filesystem, not a mocked one: what it has to get right
+  // is agreeing with the drain about where requests land.
+  const FOLDER = 'undrained-probe';
+  const tasksDir = resolveGroupIpcTasksPath(FOLDER);
+
+  beforeEach(() => {
+    fs.rmSync(tasksDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(tasksDir), { recursive: true, force: true });
+  });
+
+  it('is false when the group has never written a request', () => {
+    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+  });
+
+  it('is false for a drained directory', () => {
+    fs.mkdirSync(tasksDir, { recursive: true });
+    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+  });
+
+  it('is true while a request file is still there', () => {
+    fs.mkdirSync(tasksDir, { recursive: true });
+    fs.writeFileSync(path.join(tasksDir, 'req.json'), '{}');
+    expect(hasUndrainedIpcRequests(FOLDER)).toBe(true);
+  });
+
+  it('ignores a half-written .tmp file the writer has not renamed yet', () => {
+    fs.mkdirSync(tasksDir, { recursive: true });
+    fs.writeFileSync(path.join(tasksDir, 'req.json.tmp'), '{}');
+    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+  });
+
+  it('rejects a folder name that is not a legal group identity', () => {
+    expect(() => hasUndrainedIpcRequests('../escape')).toThrow(
+      InvalidGroupFolderError,
+    );
   });
 });

@@ -158,6 +158,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
     }
 
     for (const sourceGroup of groupFolders) {
+      // A directory whose name is not a legal group folder is not a group
+      // identity, so skip it rather than resolving a path from it. Resolution
+      // throws, and a throw here would escape before the reschedule below and
+      // stop the drain for every group until a restart.
+      if (!isValidGroupFolder(sourceGroup)) {
+        logger.warn(
+          { sourceGroup },
+          'IPC: skipping directory that is not a valid group folder',
+        );
+        continue;
+      }
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = resolveGroupIpcTasksPath(sourceGroup);

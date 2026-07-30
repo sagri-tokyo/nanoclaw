@@ -170,7 +170,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)).toBeUndefined();
     expect(rec.posted).toHaveLength(1);
-    expect(rec.posted[0].text).toContain('lost track of who requested it');
+    expect(rec.posted[0].text).toContain('cannot say who asked for it');
   });
 
   it('refuses when every approver is a requester rather than holding a row nobody can approve', async () => {
@@ -181,7 +181,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)).toBeUndefined();
     expect(rec.posted).toHaveLength(1);
-    expect(rec.posted[0].text).toContain('nobody is left who could approve it');
+    expect(rec.posted[0].text).toContain('took part in the request');
   });
 
   it('holds when one approver is clear of the request', async () => {

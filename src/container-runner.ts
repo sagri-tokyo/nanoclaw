@@ -31,9 +31,9 @@ import {
 } from './config.js';
 import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
 import {
+  hasUndrainedIpcRequests,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
-  resolveGroupIpcTasksPath,
 } from './group-folder.js';
 import { logger } from './logger.js';
 
@@ -116,11 +116,13 @@ export interface ContainerInput {
    */
   triggeringUserId?: string;
   /**
-   * Human senders of this run's prompt batch; see `run-requesters.ts`. Required,
-   * not optional: `[]` is a positive "no human asked" that only a scheduled task
-   * may claim, so every call site has to state which it is.
+   * Human senders of this run's prompt batch; see `run-requesters.ts` for the
+   * three states. Required, not optional, because `[]` is a positive "no human is
+   * in this run's context" and `undefined` is "the host cannot enumerate them" —
+   * every call site has to say which it means rather than defaulting into the
+   * permissive one by omission.
    */
-  requesterIds: string[];
+  requesterIds: string[] | undefined;
 }
 
 export type ContainerOutput =
@@ -788,14 +790,6 @@ async function buildContainerArgs(
   args.push(CONTAINER_IMAGE);
 
   return { args, credDir };
-}
-
-/** Any `.json` counts: never parse container-written JSON to decide a security
- * question. Cost is a needless union when the pending file was another verb. */
-export function hasUndrainedIpcRequests(groupFolder: string): boolean {
-  const tasksDir = resolveGroupIpcTasksPath(groupFolder);
-  if (!fs.existsSync(tasksDir)) return false;
-  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
 }
 
 export async function runContainerAgent(

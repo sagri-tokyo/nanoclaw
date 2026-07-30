@@ -317,49 +317,39 @@ export async function driveOrgActionRequest(
     return;
   }
 
-  const held = `${resolvedInput.action} on ${resolvedInput.target_ref}`;
+  const actionLabel = `${resolvedInput.action} on ${resolvedInput.target_ref}`;
+  const refuse = async (logMessage: string, reply: string): Promise<void> => {
+    logger.error(logContext, logMessage);
+    await deps.sendMessage(ctx.chatJid, `Refused ${actionLabel}: ${reply}`);
+  };
 
-  // Unattributed refuses rather than holds (see the module docstring); the
-  // operator re-asks and the next run is attributed.
+  // Unattributed refuses rather than holds (see the module docstring). A re-send
+  // into the same live container is piped, and the piped path declines for an
+  // unattributed group too, so waiting out the run is what actually recovers it.
   if (ctx.requesterIds === undefined) {
-    logger.error(
-      logContext,
-      'org-action refused: gated action has no requester attribution (host restart?) — cannot enforce dual control',
-    );
-    await deps.sendMessage(
-      ctx.chatJid,
-      `Refused ${held}: the host lost track of who requested it, so no approver can be cleared of having asked. Re-send the request.`,
+    await refuse(
+      'org-action refused: gated action has no requester attribution — cannot enforce dual control',
+      'the host cannot say who asked for it, so no approver can be cleared of having asked. Wait for the current run to finish, then send it again.',
     );
     return;
   }
 
-  // Nobody who could ever approve means the row would sit until its TTL while
-  // every attempt was told no. Refuse now with the reason instead. The two causes
-  // need different words: an empty allowlist is a host misconfiguration, whereas
-  // an allowlist fully covered by requesters is ordinary in a busy channel,
-  // because the requester set widens with the thread context the run read.
-  const approvers = deps.approvers();
-  if (approvers.size === 0) {
-    logger.error(
-      logContext,
-      'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json) — nothing can ever be approved',
-    );
-    await deps.sendMessage(
-      ctx.chatJid,
-      `Refused ${held}: the approver list is empty, so no approval is possible. Check approver-allowlist.json on the host.`,
-    );
-    return;
-  }
-
+  // No approver clear of the request means holding the row would only collect
+  // rejections until its TTL. The two causes read very differently to an
+  // operator: an empty allowlist is a host misconfiguration, whereas an
+  // allowlist fully covered by requesters is ordinary in a busy channel, since
+  // the requester set widens with the thread context the run read.
   const requesters = new Set(ctx.requesterIds);
-  if ([...approvers].every((id) => requesters.has(id))) {
-    logger.error(
-      { ...logContext, requesterCount: requesters.size },
-      'org-action refused: every allow-listed approver is a requester of this action — no eligible approver exists',
-    );
-    await deps.sendMessage(
-      ctx.chatJid,
-      `Refused ${held}: everyone on the approver list took part in the request, so nobody is left who could approve it. Ask an approver who was not in this conversation.`,
+  const eligible = [...deps.approvers()].filter((id) => !requesters.has(id));
+  if (eligible.length === 0) {
+    const emptyAllowlist = deps.approvers().size === 0;
+    await refuse(
+      emptyAllowlist
+        ? 'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json)'
+        : 'org-action refused: every allow-listed approver is a requester of this action',
+      emptyAllowlist
+        ? 'the approver list is empty, so no approval is possible. Check approver-allowlist.json on the host.'
+        : 'everyone on the approver list took part in the request. Ask an approver who was not in this conversation.',
     );
     return;
   }
@@ -387,14 +377,7 @@ export async function driveOrgActionRequest(
   };
   createPendingAction(row);
   await deps.sendMessage(ctx.chatJid, renderApprovalPrompt(token, summary));
-  logger.info(
-    {
-      token,
-      action: resolvedInput.action,
-      target_ref: resolvedInput.target_ref,
-    },
-    'org-action held pending approval',
-  );
+  logger.info({ ...logContext, token }, 'org-action held pending approval');
 }
 
 function renderApprovalPrompt(token: string, summary: string): string {

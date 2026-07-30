@@ -426,9 +426,13 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
-        // No human asked for this run, so no approver can be its requester
-        // (sagri-ai#296). Empty, not absent: absent means the host lost track.
-        requesterIds: [],
+        // `isolated` runs on its own prompt, so nobody asked and no approver can
+        // be its requester. `group` resumes the group's live session (see
+        // sessionId above), which carries the humans' messages, and the host
+        // cannot tell which of them the agent will act on — so it claims no
+        // knowledge and the gate refuses to hold rather than reading `[]` as
+        // "safe to offer to anyone" (sagri-ai#296).
+        requesterIds: task.context_mode === 'group' ? undefined : [],
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

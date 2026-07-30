@@ -30,6 +30,14 @@ describe('run requester attribution', () => {
     expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
   });
 
+  it('clears the attribution for a run whose context it cannot enumerate', () => {
+    // A group-context scheduled task resumes the humans' session, so `[]` would
+    // claim nobody is in context when somebody is.
+    setRunRequesters('dev', ['U_BOB'], false);
+    setRunRequesters('dev', undefined, false);
+    expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
   it('declines to attribute an undrained request to the run that follows it', () => {
     // Post-restart: a request is pending but nothing is on record. Naming this
     // run's senders would blame them for somebody else's request and clear the
