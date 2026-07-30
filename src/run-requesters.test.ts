@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
+  addRunRequesters,
   clearRunRequesters,
   getRunRequesters,
   setRunRequesters,
@@ -11,25 +12,38 @@ beforeEach(() => {
 });
 
 describe('run requester attribution', () => {
-  it('reads back the ids recorded for a group folder', () => {
-    setRunRequesters('dev', ['U_BOB', 'U_ALICE']);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
+  it('distinguishes an unrecorded group from a run with no human requester', () => {
+    setRunRequesters('scheduled', [], false);
+    expect(getRunRequesters('scheduled')).toStrictEqual([]);
+    expect(getRunRequesters('never-ran')).toBeUndefined();
   });
 
-  it('keeps each group folder separate', () => {
-    setRunRequesters('dev', ['U_BOB']);
-    setRunRequesters('ops', ['U_ALICE']);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB']);
-    expect(getRunRequesters('ops')).toStrictEqual(['U_ALICE']);
-  });
-
-  it('replaces the previous run attribution rather than accumulating it', () => {
-    setRunRequesters('dev', ['U_BOB']);
-    setRunRequesters('dev', ['U_ALICE']);
+  it('replaces the previous attribution when nothing is left undrained', () => {
+    setRunRequesters('dev', ['U_BOB'], false);
+    setRunRequesters('dev', ['U_ALICE'], false);
     expect(getRunRequesters('dev')).toStrictEqual(['U_ALICE']);
   });
 
-  it('is empty for a group that has not run', () => {
-    expect(getRunRequesters('never-ran')).toStrictEqual([]);
+  it('unions the previous attribution while a request is still undrained', () => {
+    setRunRequesters('dev', ['U_BOB'], false);
+    setRunRequesters('dev', ['U_ALICE'], true);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
+  });
+
+  it('keeps a scheduled run from clearing an undrained run requesters', () => {
+    setRunRequesters('dev', ['U_BOB'], false);
+    setRunRequesters('dev', [], true);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB']);
+  });
+
+  it('adds the senders of a batch piped into a running container', () => {
+    setRunRequesters('dev', ['U_BOB'], false);
+    addRunRequesters('dev', ['U_ALICE', 'U_BOB']);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
+  });
+
+  it('does not invent an attribution for a group that has none', () => {
+    addRunRequesters('never-ran', ['U_ALICE']);
+    expect(getRunRequesters('never-ran')).toBeUndefined();
   });
 });

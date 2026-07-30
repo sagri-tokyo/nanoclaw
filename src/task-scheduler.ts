@@ -426,6 +426,9 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
+        // No human asked for this run, so no approver can be its requester
+        // (sagri-ai#296). Empty, not absent: absent means the host lost track.
+        requesterIds: [],
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

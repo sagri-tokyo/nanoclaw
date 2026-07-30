@@ -14,21 +14,22 @@
  * SEPARATION-OF-DUTY SCOPE (read before relying on the guard):
  * The dual-control property enforced here is the approver-allowlist gate, the
  * bot/self reject, and a user-level self-approval reject (sagri-ai#296). The
- * `org_action` IPC request itself still carries no sender identity — the MCP
- * tool runs inside the container, which knows only its group folder — so the
- * requester is attributed host-side: `run-requesters.ts` records every distinct
- * human sender in the prompt batch at container launch, and the drain persists
- * that set as `requester`.
+ * requester is attributed host-side by `run-requesters.ts`, not carried in the
+ * request; read that module for why, and for the attribution's lifetime rules.
  *
- * The set, not one id, is what closes the multiple-senders-per-batch case the
- * container cannot disambiguate. A batch where Bob asks for the write and Alice
- * types the @mention was driven by both, so neither may approve it. Attributing
- * only the trigger sender would leave Bob free to approve his own request.
+ * A SET of requesters, not one id, because a run answers a batch of messages and
+ * the container cannot say which of them drove the write. If Bob asks for the
+ * write and Alice types the @mention, both drove it and neither may approve it;
+ * recording only the trigger sender would leave Bob free to approve his own
+ * request.
  *
- * An empty requester set (a scheduled task, or a group that has not run since
- * boot) leaves the approver allowlist as the only gate. That is correct for a
- * scheduled task: no human requested it, so there is no self-approval to
- * prevent.
+ * Three requester states, and the difference between the last two is the gate:
+ *   - non-empty: those humans cannot approve, anyone else on the allowlist can.
+ *   - empty: a scheduled task. No human asked, so there is no self-approval to
+ *     prevent and the allowlist is the only gate.
+ *   - unattributed: the host does not know who asked (a restart dropped the
+ *     record). A gated action is REFUSED rather than held, because holding it
+ *     would admit an approver who might be the requester.
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -103,11 +104,10 @@ export interface OrgActionRequestInput {
 export interface OrgActionRequestContext {
   sourceGroup: string;
   chatJid: string;
-  // Every distinct human sender in the prompt batch of the run that raised this
-  // request, from `run-requesters.ts`. None of them may approve it. Empty for a
-  // scheduled task. The group folder is not in here — `sourceGroup` already
-  // carries it, and it is persisted as the row's `source_group`.
-  requesterIds: string[];
+  // From `run-requesters.ts`; see the three states in the module docstring. The
+  // group folder is not in here: `sourceGroup` already carries it, and it is
+  // persisted as the row's `source_group`.
+  requesterIds: string[] | undefined;
 }
 
 function defaultMintToken(): string {
@@ -255,17 +255,12 @@ function parsePendingRow(row: PendingActionRow): ParsedPendingRow {
 }
 
 /**
- * The requester ids a persisted row records. Stored as a JSON string array, the
- * same convention `citation_refs` uses in this table.
- *
- * A row written before sagri-ai#296 holds a bare group-folder string instead. It
- * is read back as a single-element set, which reproduces that row's original
- * group-level guard exactly — a group folder never collides with a Slack user id,
- * so it excludes nobody new, and it excludes nobody less.
+ * A JSON string[] like `citation_refs`, except a row written before sagri-ai#296
+ * holds a bare group folder. A folder is never bracketed, so the leading `[`
+ * tells the formats apart; a legacy row reads back as that one requester, which
+ * is the group-level guard it originally shipped with.
  */
-export function parseRequesters(raw: string): string[] {
-  // A group folder is never bracketed, so the leading `[` is what tells the two
-  // formats apart. Anything bracketed was written by this module and must parse.
+function parseRequesters(raw: string): string[] {
   if (!raw.startsWith('[')) return [raw];
   const parsed: unknown = JSON.parse(raw);
   if (!isStringArray(parsed)) {
@@ -322,6 +317,25 @@ export async function driveOrgActionRequest(
     logger.info(
       { action: resolvedInput.action, target_ref: resolvedInput.target_ref },
       'org-action executed host-side (safe)',
+    );
+    return;
+  }
+
+  // Holding an unattributed action would offer it to an approver who might be the
+  // very human who asked for it, which is the property this gate exists to deny.
+  // Refuse instead; the operator re-asks and the next run is attributed.
+  if (ctx.requesterIds === undefined) {
+    logger.error(
+      {
+        action: resolvedInput.action,
+        target_ref: resolvedInput.target_ref,
+        sourceGroup: ctx.sourceGroup,
+      },
+      'org-action refused: gated action has no requester attribution (host restart?) — cannot enforce dual control',
+    );
+    await deps.sendMessage(
+      ctx.chatJid,
+      'Refused a held internal action: the host lost track of who requested it, so no approver can be cleared of having asked. Re-send the request.',
     );
     return;
   }
@@ -432,11 +446,18 @@ export async function handleApprovalReply(
   }
 
   // User-level dual control: nobody whose message drove the run that raised this
-  // action may authorize it, approver allowlist membership notwithstanding.
+  // action may authorize it, approver allowlist membership notwithstanding. This
+  // reject answers in-channel, unlike the allowlist and bot/self rejects: the
+  // sender IS an approver and would otherwise watch a valid-looking approval
+  // vanish until the TTL expired the row.
   if (parseRequesters(row.requester).includes(msg.sender)) {
     logger.warn(
       { chatJid, sender: msg.sender, token: intent.token },
       'org-action approval rejected: approver is a requester of this action',
+    );
+    await deps.sendMessage(
+      chatJid,
+      `Cannot approve ${intent.token}: you are on record as requesting it. Another approver must authorize it.`,
     );
     return true;
   }

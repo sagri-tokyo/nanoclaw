@@ -147,6 +147,57 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.posted[0].text).toContain('Ready for AI');
   });
 
+  it('refuses a gated action with no requester attribution rather than holding it', async () => {
+    // A host restart drops the attribution. Holding the action would offer it to
+    // an approver who might be the human who asked for it.
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterIds: undefined,
+      },
+      deps,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('lost track of who requested it');
+  });
+
+  it('still executes a safe action with no requester attribution', async () => {
+    // A safe action never reaches an approver, so attribution is irrelevant to it
+    // and losing it must not stall ordinary writes.
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        citation_refs: [],
+        canonical_args: { text: 'hi' },
+      },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterIds: undefined,
+      },
+      deps,
+    );
+    expect(rec.executed).toEqual([
+      { action: 'notion.append_progress', target_ref: HEX32 },
+    ]);
+  });
+
   it('refuses a red-line action: no row, no effect, refusal posted', async () => {
     const { deps, rec } = makeDeps();
     await driveOrgActionRequest(
@@ -464,6 +515,7 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
       approvers: () => new Set(['U_HUMAN']),
     });
     await seedGated(deps, ['U_HUMAN']);
+    rec.posted.length = 0;
     await handleApprovalReply(
       'slack:C0AAA1111',
       approval({ sender: 'U_HUMAN' }),
@@ -471,6 +523,10 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     );
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    // An approver whose reply looked valid must be told why it did not land,
+    // unlike the allowlist and bot/self rejects which stay silent.
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('on record as requesting it');
   });
 
   it('rejects a co-sender of the batch, not just the newest requester', async () => {

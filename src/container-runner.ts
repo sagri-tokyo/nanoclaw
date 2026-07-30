@@ -112,13 +112,23 @@ export interface ContainerInput {
    */
   triggeringUserId?: string;
   /**
-   * Every distinct human sender whose message is in this run's prompt batch
-   * (sagri-ai#296). Recorded host-side at launch and read back at the
-   * `org_action` IPC drain so a gated action's `requester` is a real set of
-   * Slack user ids; none of them may approve their own request. Absent for a
-   * scheduled task, which has no human requester.
+   * Human senders of this run's prompt batch; see `run-requesters.ts`. Required,
+   * not optional: `[]` is a positive "no human asked" that only a scheduled task
+   * may claim, so every call site has to state which it is.
    */
-  requesterIds?: string[];
+  requesterIds: string[];
+}
+
+/**
+ * Does the group have an IPC request the host has not drained yet? Any file
+ * counts, not just an `org_action` one, so this never parses container-written
+ * JSON to decide a security question. Cost is an occasional needless union of
+ * requester sets when the pending file was an unrelated verb.
+ */
+function hasUndrainedIpcRequests(groupFolder: string): boolean {
+  const tasksDir = path.join(resolveGroupIpcPath(groupFolder), 'tasks');
+  if (!fs.existsSync(tasksDir)) return false;
+  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
 }
 
 export type ContainerOutput =
@@ -797,9 +807,14 @@ export async function runContainerAgent(
   const startTime = Date.now();
 
   // Record who this run is answering before the container can emit an
-  // org_action, so the drain always reads the attribution for the run that
-  // raised the request (sagri-ai#296).
-  setRunRequesters(group.folder, input.requesterIds ?? []);
+  // org_action (sagri-ai#296). An undrained IPC file means the previous run
+  // raised a request the drain has not attributed yet, so union rather than
+  // replace and keep its requesters excludable.
+  setRunRequesters(
+    group.folder,
+    input.requesterIds,
+    hasUndrainedIpcRequests(group.folder),
+  );
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });

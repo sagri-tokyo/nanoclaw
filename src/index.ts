@@ -82,7 +82,7 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
-import { getRunRequesters } from './run-requesters.js';
+import { addRunRequesters, getRunRequesters } from './run-requesters.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -277,11 +277,8 @@ export function newestHumanMessage(
 }
 
 /**
- * The distinct human senders of a prompt batch, in first-seen order — the set of
- * people a run is answering, and therefore the set that may not approve a gated
- * org-action the run raises (sagri-ai#296). The whole set, not just the trigger
- * sender: any of them could be the one whose words drove the write, and the
- * container has no sender identity to tell the host which.
+ * Distinct human senders of a prompt batch, in first-seen order (sagri-ai#296).
+ * See `org-action-handler.ts` for why the approval gate needs all of them.
  *
  * @internal - exported for testing
  */
@@ -518,11 +515,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // to scheduled tasks.
   const triggeringUserId = newestHumanMessage(promptMessages)?.sender;
 
-  // Requester attribution for the org-action approval gate (sagri-ai#296). Scoped
-  // to the new messages this run is answering: fetched thread context is
-  // background the run was not asked to act on, and folding a long thread's
-  // participants in would lock out approvers who never made the request.
-  const requesterIds = humanSenders(missedMessages);
+  // Requester attribution for the org-action approval gate (sagri-ai#296), over
+  // the same prompt the agent acts on. Merged thread context counts: an
+  // instruction the agent reads from a thread drove the write whether or not its
+  // author sent one of this batch's new messages.
+  const requesterIds = humanSenders(promptMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -874,6 +871,10 @@ async function startMessageLoop(): Promise<void> {
           );
 
           if (queue.sendMessage(chatJid, piped)) {
+            // A piped batch reaches the running container without a fresh launch,
+            // so its senders have to be added to the run's requesters here or
+            // they would drive a gated write while off the record (sagri-ai#296).
+            addRunRequesters(group.folder, humanSenders(messagesToSend));
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -1196,9 +1197,8 @@ async function main(): Promise<void> {
       // citation_refs) before this handler is called, so the record arrives
       // fully typed. No coercion: a coerced value would pass the gate, consume
       // the approval, then drop or mis-tier the write silently (the footgun
-      // ipc.ts names). The requester ids come from the host's own record of who
-      // this group's current run is answering (sagri-ai#296) — never from the
-      // container, which has no sender identity to offer.
+      // ipc.ts names). requesterIds is host-attributed, never taken from the
+      // record; see run-requesters.ts.
       await driveOrgActionRequest(
         {
           action: record.action,

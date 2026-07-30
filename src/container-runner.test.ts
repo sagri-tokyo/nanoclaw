@@ -190,11 +190,12 @@ const testGroup: RegisteredGroup = {
   added_at: new Date().toISOString(),
 };
 
-const testInput = {
+const testInput: ContainerInput = {
   prompt: 'Hello',
   groupFolder: 'test-group',
   chatJid: 'test@g.us',
   isMain: false,
+  requesterIds: [],
 };
 
 // The write tokens (GitHub, Notion) are only mounted for the trusted-writer
@@ -1530,6 +1531,7 @@ describe('container-runner capability profile write-token gating', () => {
     chatJid: 'test@g.us',
     isMain: false,
     capabilityProfile: 'operator',
+    requesterIds: [],
   };
 
   const trustedWriterInput: ContainerInput = {
@@ -1538,6 +1540,7 @@ describe('container-runner capability profile write-token gating', () => {
     chatJid: 'test@g.us',
     isMain: false,
     capabilityProfile: 'trusted-writer',
+    requesterIds: [],
   };
 
   it('mounts no GitHub token for the operator profile', async () => {
@@ -1573,6 +1576,7 @@ describe('container-runner capability profile write-token gating', () => {
       chatJid: 'test@g.us',
       isMain: false,
       isScheduledTask: false,
+      requesterIds: [],
     };
     const args = await captureArgsForInput(interactiveInput);
     expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).toBeNull();
