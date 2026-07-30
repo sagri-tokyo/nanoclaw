@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   findExplicitTriggerMessage,
+  humanSenders,
   newestHumanMessage,
   newestHumanThreadAnchor,
 } from './index.js';
@@ -82,6 +83,41 @@ describe('newestHumanMessage', () => {
     expect(
       newestHumanMessage([message({ id: 'ts-bot', is_bot_message: true })]),
     ).toBeUndefined();
+  });
+});
+
+describe('humanSenders', () => {
+  it('collects every distinct human sender, not just the newest', () => {
+    expect(
+      humanSenders([
+        message({ id: 'ts-1', sender: 'U_BOB' }),
+        message({ id: 'ts-2', sender: 'U_ALICE' }),
+      ]),
+    ).toStrictEqual(['U_BOB', 'U_ALICE']);
+  });
+
+  it('deduplicates a sender who wrote more than once', () => {
+    expect(
+      humanSenders([
+        message({ id: 'ts-1', sender: 'U_BOB' }),
+        message({ id: 'ts-2', sender: 'U_BOB' }),
+      ]),
+    ).toStrictEqual(['U_BOB']);
+  });
+
+  it('excludes bots so a bot can never be recorded as a requester', () => {
+    expect(
+      humanSenders([
+        message({ id: 'ts-1', sender: 'U_BOB' }),
+        message({ id: 'ts-2', sender: 'B_BOT', is_bot_message: true }),
+      ]),
+    ).toStrictEqual(['U_BOB']);
+  });
+
+  it('is empty for a bot-only batch', () => {
+    expect(
+      humanSenders([message({ id: 'ts-bot', is_bot_message: true })]),
+    ).toStrictEqual([]);
   });
 });
 

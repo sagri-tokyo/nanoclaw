@@ -82,6 +82,7 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
+import { getRunRequesters } from './run-requesters.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -273,6 +274,21 @@ export function newestHumanMessage(
   messages: NewMessage[],
 ): NewMessage | undefined {
   return [...messages].reverse().find((m) => !m.is_bot_message);
+}
+
+/**
+ * The distinct human senders of a prompt batch, in first-seen order — the set of
+ * people a run is answering, and therefore the set that may not approve a gated
+ * org-action the run raises (sagri-ai#296). The whole set, not just the trigger
+ * sender: any of them could be the one whose words drove the write, and the
+ * container has no sender identity to tell the host which.
+ *
+ * @internal - exported for testing
+ */
+export function humanSenders(messages: NewMessage[]): string[] {
+  return [
+    ...new Set(messages.filter((m) => !m.is_bot_message).map((m) => m.sender)),
+  ];
 }
 
 /**
@@ -502,6 +518,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // to scheduled tasks.
   const triggeringUserId = newestHumanMessage(promptMessages)?.sender;
 
+  // Requester attribution for the org-action approval gate (sagri-ai#296). Scoped
+  // to the new messages this run is answering: fetched thread context is
+  // background the run was not asked to act on, and folding a long thread's
+  // participants in would lock out approvers who never made the request.
+  const requesterIds = humanSenders(missedMessages);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -549,6 +571,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       prompt,
       chatJid,
       triggeringUserId,
+      requesterIds,
       async (result) => {
         // Streaming output callback — called for each agent result
         if (result.result) {
@@ -642,6 +665,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   triggeringUserId: string | undefined,
+  requesterIds: string[],
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -695,6 +719,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         triggeringUserId,
+        requesterIds,
         // Interactive (operator-triggered) messages never get the org-write
         // tokens; all writes route through the host-executed org_action gate
         // (sagri-ai#312).
@@ -1171,9 +1196,9 @@ async function main(): Promise<void> {
       // citation_refs) before this handler is called, so the record arrives
       // fully typed. No coercion: a coerced value would pass the gate, consume
       // the approval, then drop or mis-tier the write silently (the footgun
-      // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
-      // see the separation-of-duty scope note in org-action-handler.ts;
-      // user-level dual control is not enforced.
+      // ipc.ts names). The requester ids come from the host's own record of who
+      // this group's current run is answering (sagri-ai#296) — never from the
+      // container, which has no sender identity to offer.
       await driveOrgActionRequest(
         {
           action: record.action,
@@ -1184,7 +1209,11 @@ async function main(): Promise<void> {
           citation_refs: record.citation_refs,
           canonical_args: record.canonical_args,
         },
-        { sourceGroup, chatJid, requesterGroup: sourceGroup },
+        {
+          sourceGroup,
+          chatJid,
+          requesterIds: getRunRequesters(sourceGroup),
+        },
         orgActionDeps,
       );
     },

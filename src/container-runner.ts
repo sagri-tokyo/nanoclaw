@@ -43,6 +43,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
+import { setRunRequesters } from './run-requesters.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
 import { CapabilityProfile, RegisteredGroup } from './types.js';
@@ -110,6 +111,14 @@ export interface ContainerInput {
    * namespaced unattributed placeholder rather than fabricating an identity.
    */
   triggeringUserId?: string;
+  /**
+   * Every distinct human sender whose message is in this run's prompt batch
+   * (sagri-ai#296). Recorded host-side at launch and read back at the
+   * `org_action` IPC drain so a gated action's `requester` is a real set of
+   * Slack user ids; none of them may approve their own request. Absent for a
+   * scheduled task, which has no human requester.
+   */
+  requesterIds?: string[];
 }
 
 export type ContainerOutput =
@@ -786,6 +795,11 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+
+  // Record who this run is answering before the container can emit an
+  // org_action, so the drain always reads the attribution for the run that
+  // raised the request (sagri-ai#296).
+  setRunRequesters(group.folder, input.requesterIds ?? []);
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });

@@ -12,20 +12,23 @@
  * a gated action executes exactly once.
  *
  * SEPARATION-OF-DUTY SCOPE (read before relying on the guard):
- * The dual-control property enforced here is the approver-allowlist gate plus
- * the bot/self reject. It is NOT user-level "the requesting human cannot
- * self-approve". The originating Slack user id is not available at the
- * `org_action` IPC drain: the container is launched per group on a BATCH of
- * laundered messages (potentially several distinct senders), the MCP tool that
- * emits the request runs inside the container with only the group folder as
- * identity, and the triggering user's id is never forwarded into the container
- * or the IPC request. So the persisted `requester_group` is the requesting
- * GROUP FOLDER, not a user. The `requesterGroup !== approver` check below can
- * never be a user-level self-approval guard (a group folder string and a Slack
- * user id never collide); it only excludes the degenerate case where the
- * approver allowlist itself names a group-folder string. Wiring real user-level
- * dual control would require new plumbing to carry the triggering sender id
- * through container launch into the org_action request (tracked separately).
+ * The dual-control property enforced here is the approver-allowlist gate, the
+ * bot/self reject, and a user-level self-approval reject (sagri-ai#296). The
+ * `org_action` IPC request itself still carries no sender identity — the MCP
+ * tool runs inside the container, which knows only its group folder — so the
+ * requester is attributed host-side: `run-requesters.ts` records every distinct
+ * human sender in the prompt batch at container launch, and the drain persists
+ * that set as `requester`.
+ *
+ * The set, not one id, is what closes the multiple-senders-per-batch case the
+ * container cannot disambiguate. A batch where Bob asks for the write and Alice
+ * types the @mention was driven by both, so neither may approve it. Attributing
+ * only the trigger sender would leave Bob free to approve his own request.
+ *
+ * An empty requester set (a scheduled task, or a group that has not run since
+ * boot) leaves the approver allowlist as the only gate. That is correct for a
+ * scheduled task: no human requested it, so there is no self-approval to
+ * prevent.
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -100,10 +103,11 @@ export interface OrgActionRequestInput {
 export interface OrgActionRequestContext {
   sourceGroup: string;
   chatJid: string;
-  // The requesting GROUP FOLDER, not a user id. See the separation-of-duty
-  // scope note in the module docstring: user-level dual control is not enforced
-  // here because the triggering Slack user id is not available at this drain.
-  requesterGroup: string;
+  // Every distinct human sender in the prompt batch of the run that raised this
+  // request, from `run-requesters.ts`. None of them may approve it. Empty for a
+  // scheduled task. The group folder is not in here — `sourceGroup` already
+  // carries it, and it is persisted as the row's `source_group`.
+  requesterIds: string[];
 }
 
 function defaultMintToken(): string {
@@ -250,6 +254,26 @@ function parsePendingRow(row: PendingActionRow): ParsedPendingRow {
   };
 }
 
+/**
+ * The requester ids a persisted row records. Stored as a JSON string array, the
+ * same convention `citation_refs` uses in this table.
+ *
+ * A row written before sagri-ai#296 holds a bare group-folder string instead. It
+ * is read back as a single-element set, which reproduces that row's original
+ * group-level guard exactly — a group folder never collides with a Slack user id,
+ * so it excludes nobody new, and it excludes nobody less.
+ */
+export function parseRequesters(raw: string): string[] {
+  // A group folder is never bracketed, so the leading `[` is what tells the two
+  // formats apart. Anything bracketed was written by this module and must parse.
+  if (!raw.startsWith('[')) return [raw];
+  const parsed: unknown = JSON.parse(raw);
+  if (!isStringArray(parsed)) {
+    throw new Error(`org-action: requester "${raw}" is not a string[]`);
+  }
+  return parsed;
+}
+
 function addMs(iso: string, ms: number): string {
   return new Date(new Date(iso).getTime() + ms).toISOString();
 }
@@ -316,7 +340,7 @@ export async function driveOrgActionRequest(
     citation_refs: JSON.stringify(resolvedInput.citation_refs),
     canonical_args: JSON.stringify(resolvedInput.canonical_args),
     summary,
-    requester: ctx.requesterGroup,
+    requester: JSON.stringify(ctx.requesterIds),
     state: 'pending',
     created_at: createdAt,
     expires_at: addMs(createdAt, deps.ttlMs),
@@ -352,11 +376,9 @@ function renderApprovalPrompt(token: string, summary: string): string {
  * authorized execution, was rejected, or was denied by a fail-closed check),
  * false if it was ordinary text the caller should keep processing.
  *
- * Every reject path is fail-closed: a non-allowlisted approver or a bot/self
- * message leaves the row untouched. The `row.requester === msg.sender` check is
- * a group-level guard only (row.requester holds the requesting GROUP FOLDER, not
- * the triggering user id — see the module docstring's separation-of-duty scope),
- * so it does NOT enforce user-level "the requester cannot self-approve".
+ * Every reject path is fail-closed: a non-allowlisted approver, a bot/self
+ * message, or an approver who is one of the row's recorded requesters leaves the
+ * row untouched.
  */
 export async function handleApprovalReply(
   chatJid: string,
@@ -409,13 +431,12 @@ export async function handleApprovalReply(
     return true;
   }
 
-  // Group-level guard only: row.requester is the requesting group folder, never
-  // a user id, so this excludes the degenerate case where the approver allowlist
-  // names a group-folder string. It is NOT user-level self-approval prevention.
-  if (row.requester === msg.sender) {
+  // User-level dual control: nobody whose message drove the run that raised this
+  // action may authorize it, approver allowlist membership notwithstanding.
+  if (parseRequesters(row.requester).includes(msg.sender)) {
     logger.warn(
       { chatJid, sender: msg.sender, token: intent.token },
-      'org-action approval rejected: approver matches the requesting group',
+      'org-action approval rejected: approver is a requester of this action',
     );
     return true;
   }

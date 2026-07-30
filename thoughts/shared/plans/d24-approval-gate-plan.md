@@ -173,7 +173,7 @@ CREATE TABLE IF NOT EXISTS pending_actions (
   canonical_args TEXT NOT NULL,      -- JSON, the exact args the host will replay
   summary TEXT NOT NULL,             -- host-rendered approver-facing text
   state TEXT NOT NULL,               -- 'pending' | 'approved' | 'consumed' | 'denied' | 'expired'
-  requester TEXT NOT NULL,           -- requesting GROUP FOLDER (NOT a user id); see separation-of-duty scope note
+  requester TEXT NOT NULL,           -- JSON string[] of the requesting Slack user ids (sagri-ai#296)
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,          -- created_at + TTL
   approved_by TEXT,                  -- approver sender id, set on approve
@@ -220,6 +220,13 @@ CREATE INDEX IF NOT EXISTS idx_pending_actions_state ON pending_actions(state, e
   (finding 7). The handler rejects unless `msg.sender ∈ approvers`, rejects
   `is_from_me || is_bot_message`, rejects `requester === approver`, and refuses
   to classify at all while `botUserId` is unresolved (treat unresolved as deny).
+
+  **RESOLVED by sagri-tokyo/sagri-ai#296.** The scope note below described D2.4 as
+  shipped and is kept as the record of why it was scoped that way. It no longer
+  describes the code: `requester` now holds a JSON array of the Slack user ids
+  the host attributed to the run (`src/run-requesters.ts`), and
+  `handleApprovalReply` rejects an approver who is one of them. Read the module
+  docstring in `src/org-action-handler.ts` for the property that holds now.
 
   **Separation-of-duty scope (true property, not the aspiration).** The
   `requester === approver` reject is GROUP-LEVEL only. `requester` holds the
@@ -380,11 +387,7 @@ Each phase is independently mergeable and reversible.
 - **Approver set membership**: who is in the fail-closed approver allowlist, and
   is requester != approver required for ALL gated actions or only the red-line
   tiers? (ADR decision 5 requires it for the red lines; confirm the broader
-  policy.) NOTE: user-level requester != approver is NOT enforceable today —
-  the triggering user id is not available at the drain (see the separation-of-
-  duty scope note above). The follow-up to plumb the sender id through container
-  launch must land before any user-level requester != approver claim is relied
-  on.
+  policy.) User-level requester != approver is enforced as of sagri-ai#296.
 
 ## Success criteria
 

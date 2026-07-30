@@ -24,6 +24,7 @@ import type { NewMessage, PendingActionRow } from './src/types.js';
 const CHAT = 'slack:C0DEVCHANNEL';
 const GROUP = 'sagri-ai-dev';
 const APPROVER = 'U_APPROVER';
+const REQUESTER = 'U_REQUESTER';
 
 // --- Slack + write-client stubs: every side effect lands here as a log line ---
 const slackOut: string[] = [];
@@ -57,7 +58,7 @@ function deps(token?: string): OrgActionGateDeps {
 }
 
 function ctx() {
-  return { sourceGroup: GROUP, chatJid: CHAT, requesterGroup: GROUP };
+  return { sourceGroup: GROUP, chatJid: CHAT, requesterIds: [REQUESTER] };
 }
 
 function agentEmits(
@@ -233,7 +234,7 @@ async function main() {
     citation_refs: '[]',
     canonical_args: JSON.stringify({ text: 'tamper: prod deploy' }),
     summary: 'tampered',
-    requester: GROUP,
+    requester: JSON.stringify([REQUESTER]),
     state: 'approved',
     created_at: '2026-06-29T00:00:00.000Z',
     expires_at: '2026-06-29T01:00:00.000Z',

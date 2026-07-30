@@ -108,6 +108,10 @@ export interface PendingActionRow {
   citation_refs: string;
   canonical_args: string;
   summary: string;
+  // JSON string array of the Slack user ids that requested this action — every
+  // distinct human sender in the prompt batch of the run that raised it. None of
+  // them may approve it (sagri-ai#296). Read back with `parseRequesters`, which
+  // also handles a pre-#296 row holding a bare group-folder string.
   requester: string;
   state: PendingActionState;
   created_at: string;
