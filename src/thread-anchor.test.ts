@@ -105,6 +105,14 @@ describe('humanSenders', () => {
       ]),
     ).toStrictEqual(['U_BOB']);
   });
+
+  it('is empty for a bot-only batch, never a bot id', () => {
+    // `[]` is the approval gate's "no human asked", so a bot leaking into this
+    // list would read as a human requester.
+    expect(
+      humanSenders([message({ id: 'ts-bot', is_bot_message: true })]),
+    ).toStrictEqual([]);
+  });
 });
 
 describe('newestHumanThreadAnchor', () => {

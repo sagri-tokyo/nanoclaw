@@ -173,6 +173,26 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.posted[0].text).toContain('lost track of who requested it');
   });
 
+  it('refuses when every approver is a requester rather than holding a row nobody can approve', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_ALICE', 'U_BOB']),
+    });
+    await seedGated(deps, ['U_BOB', 'U_ALICE']);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('nobody is left who could approve it');
+  });
+
+  it('holds when one approver is clear of the request', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_BOB', 'U_CAROL']),
+    });
+    await seedGated(deps, ['U_BOB']);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    expect(rec.posted[0].text).toContain(TOKEN);
+  });
+
   it('still executes a safe action with no requester attribution', async () => {
     // A safe action never reaches an approver, so attribution is irrelevant to it
     // and losing it must not stall ordinary writes.
@@ -445,7 +465,9 @@ function seedGated(
 describe('handleApprovalReply — fail-closed approver checks', () => {
   it('rejects an approver not in the allowlist', async () => {
     const { deps, rec } = makeDeps({ approvers: () => new Set() });
-    await seedGated(deps);
+    // Seeded directly: an empty allowlist makes driveOrgActionRequest refuse to
+    // hold at all, and the row under test here is one that was already held.
+    createPendingAction(pendingActionRow());
     const handled = await handleApprovalReply(
       'slack:C0AAA1111',
       approval({ sender: 'U_RANDOM' }),
@@ -511,8 +533,10 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
   });
 
   it('rejects a user-level self-approval even from an allow-listed approver', async () => {
+    // U_CAROL is the eligible approver that lets the row be held at all; the
+    // point of the test is that U_HUMAN cannot stand in for her.
     const { deps, rec } = makeDeps({
-      approvers: () => new Set(['U_HUMAN']),
+      approvers: () => new Set(['U_HUMAN', 'U_CAROL']),
     });
     await seedGated(deps, ['U_HUMAN']);
     rec.posted.length = 0;
@@ -533,9 +557,11 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     // The batch spanned two humans, so both drove the request and neither may
     // authorize it — the case a single trigger-sender attribution would miss.
     const { deps, rec } = makeDeps({
-      approvers: () => new Set(['U_BOB', 'U_ALICE']),
+      approvers: () => new Set(['U_BOB', 'U_ALICE', 'U_CAROL']),
     });
     await seedGated(deps, ['U_BOB', 'U_ALICE']);
+    // U_BOB is not the newest sender, so a trigger-sender-only attribution would
+    // have cleared him to approve his own request.
     await handleApprovalReply(
       'slack:C0AAA1111',
       approval({ sender: 'U_BOB' }),

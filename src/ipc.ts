@@ -13,7 +13,10 @@ import {
   taskOutcomeIsNew,
   updateTask,
 } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import {
+  isValidGroupFolder,
+  resolveGroupIpcTasksPath,
+} from './group-folder.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -157,7 +160,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
     for (const sourceGroup of groupFolders) {
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const tasksDir = resolveGroupIpcTasksPath(sourceGroup);
 
       // Process messages from this group's IPC directory
       try {

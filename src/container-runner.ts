@@ -30,7 +30,11 @@ import {
   TIMEZONE,
 } from './config.js';
 import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+  resolveGroupIpcTasksPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 
 import {
@@ -117,18 +121,6 @@ export interface ContainerInput {
    * may claim, so every call site has to state which it is.
    */
   requesterIds: string[];
-}
-
-/**
- * Does the group have an IPC request the host has not drained yet? Any file
- * counts, not just an `org_action` one, so this never parses container-written
- * JSON to decide a security question. Cost is an occasional needless union of
- * requester sets when the pending file was an unrelated verb.
- */
-function hasUndrainedIpcRequests(groupFolder: string): boolean {
-  const tasksDir = path.join(resolveGroupIpcPath(groupFolder), 'tasks');
-  if (!fs.existsSync(tasksDir)) return false;
-  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
 }
 
 export type ContainerOutput =
@@ -798,6 +790,14 @@ async function buildContainerArgs(
   return { args, credDir };
 }
 
+/** Any `.json` counts: never parse container-written JSON to decide a security
+ * question. Cost is a needless union when the pending file was another verb. */
+export function hasUndrainedIpcRequests(groupFolder: string): boolean {
+  const tasksDir = resolveGroupIpcTasksPath(groupFolder);
+  if (!fs.existsSync(tasksDir)) return false;
+  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -806,10 +806,8 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  // Record who this run is answering before the container can emit an
-  // org_action (sagri-ai#296). An undrained IPC file means the previous run
-  // raised a request the drain has not attributed yet, so union rather than
-  // replace and keep its requesters excludable.
+  // Attribute this run before the container can emit an org_action
+  // (sagri-ai#296); setRunRequesters owns the union rule.
   setRunRequesters(
     group.folder,
     input.requesterIds,

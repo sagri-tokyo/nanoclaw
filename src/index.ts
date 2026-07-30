@@ -871,9 +871,8 @@ async function startMessageLoop(): Promise<void> {
           );
 
           if (queue.sendMessage(chatJid, piped)) {
-            // A piped batch reaches the running container without a fresh launch,
-            // so its senders have to be added to the run's requesters here or
-            // they would drive a gated write while off the record (sagri-ai#296).
+            // A piped batch skips a fresh launch, so add its senders here
+            // (sagri-ai#296); see addRunRequesters.
             addRunRequesters(group.folder, humanSenders(messagesToSend));
             logger.debug(
               { chatJid, count: messagesToSend.length },

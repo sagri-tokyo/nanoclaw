@@ -23,13 +23,11 @@
  * recording only the trigger sender would leave Bob free to approve his own
  * request.
  *
- * Three requester states, and the difference between the last two is the gate:
- *   - non-empty: those humans cannot approve, anyone else on the allowlist can.
- *   - empty: a scheduled task. No human asked, so there is no self-approval to
- *     prevent and the allowlist is the only gate.
- *   - unattributed: the host does not know who asked (a restart dropped the
- *     record). A gated action is REFUSED rather than held, because holding it
- *     would admit an approver who might be the requester.
+ * `run-requesters.ts` documents the three requester states and the attribution's
+ * lifetime rules, including the known cross-run limit (sagri-ai#629). Two gated
+ * actions are refused here rather than held: one with no attribution at all, and
+ * one where every allow-listed approver is itself a requester, which no reply
+ * could ever satisfy.
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -295,14 +293,15 @@ export async function driveOrgActionRequest(
     resolved.targetTitle,
   );
   const verdict = classifyOrgAction(record);
+  const logContext = {
+    action: resolvedInput.action,
+    target_ref: resolvedInput.target_ref,
+    sourceGroup: ctx.sourceGroup,
+  };
 
   if (verdict === 'refuse') {
     logger.warn(
-      {
-        action: resolvedInput.action,
-        target_ref: resolvedInput.target_ref,
-        sourceGroup: ctx.sourceGroup,
-      },
+      logContext,
       'org-action refused host-side (red line / allowlist / id shape)',
     );
     return;
@@ -314,28 +313,53 @@ export async function driveOrgActionRequest(
       target_ref: resolvedInput.target_ref,
       canonical_args: resolvedInput.canonical_args,
     });
-    logger.info(
-      { action: resolvedInput.action, target_ref: resolvedInput.target_ref },
-      'org-action executed host-side (safe)',
-    );
+    logger.info(logContext, 'org-action executed host-side (safe)');
     return;
   }
 
-  // Holding an unattributed action would offer it to an approver who might be the
-  // very human who asked for it, which is the property this gate exists to deny.
-  // Refuse instead; the operator re-asks and the next run is attributed.
+  const held = `${resolvedInput.action} on ${resolvedInput.target_ref}`;
+
+  // Unattributed refuses rather than holds (see the module docstring); the
+  // operator re-asks and the next run is attributed.
   if (ctx.requesterIds === undefined) {
     logger.error(
-      {
-        action: resolvedInput.action,
-        target_ref: resolvedInput.target_ref,
-        sourceGroup: ctx.sourceGroup,
-      },
+      logContext,
       'org-action refused: gated action has no requester attribution (host restart?) — cannot enforce dual control',
     );
     await deps.sendMessage(
       ctx.chatJid,
-      'Refused a held internal action: the host lost track of who requested it, so no approver can be cleared of having asked. Re-send the request.',
+      `Refused ${held}: the host lost track of who requested it, so no approver can be cleared of having asked. Re-send the request.`,
+    );
+    return;
+  }
+
+  // Nobody who could ever approve means the row would sit until its TTL while
+  // every attempt was told no. Refuse now with the reason instead. The two causes
+  // need different words: an empty allowlist is a host misconfiguration, whereas
+  // an allowlist fully covered by requesters is ordinary in a busy channel,
+  // because the requester set widens with the thread context the run read.
+  const approvers = deps.approvers();
+  if (approvers.size === 0) {
+    logger.error(
+      logContext,
+      'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json) — nothing can ever be approved',
+    );
+    await deps.sendMessage(
+      ctx.chatJid,
+      `Refused ${held}: the approver list is empty, so no approval is possible. Check approver-allowlist.json on the host.`,
+    );
+    return;
+  }
+
+  const requesters = new Set(ctx.requesterIds);
+  if ([...approvers].every((id) => requesters.has(id))) {
+    logger.error(
+      { ...logContext, requesterCount: requesters.size },
+      'org-action refused: every allow-listed approver is a requester of this action — no eligible approver exists',
+    );
+    await deps.sendMessage(
+      ctx.chatJid,
+      `Refused ${held}: everyone on the approver list took part in the request, so nobody is left who could approve it. Ask an approver who was not in this conversation.`,
     );
     return;
   }

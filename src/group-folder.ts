@@ -78,3 +78,13 @@ export function resolveGroupIpcPath(folder: string): string {
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
 }
+
+/**
+ * The directory the container drops request files into and `ipc.ts` drains.
+ * Shared so the drain and the requester-attribution check that asks "is anything
+ * still undrained" can never disagree about where to look (sagri-ai#296) — a
+ * silent disagreement there reads as "nothing pending" and drops attribution.
+ */
+export function resolveGroupIpcTasksPath(folder: string): string {
+  return path.join(resolveGroupIpcPath(folder), 'tasks');
+}

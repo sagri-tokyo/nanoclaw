@@ -30,6 +30,14 @@ describe('run requester attribution', () => {
     expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
   });
 
+  it('declines to attribute an undrained request to the run that follows it', () => {
+    // Post-restart: a request is pending but nothing is on record. Naming this
+    // run's senders would blame them for somebody else's request and clear the
+    // real requester to approve it.
+    setRunRequesters('dev', ['U_ALICE'], true);
+    expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
   it('keeps a scheduled run from clearing an undrained run requesters', () => {
     setRunRequesters('dev', ['U_BOB'], false);
     setRunRequesters('dev', [], true);
