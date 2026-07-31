@@ -179,7 +179,11 @@ import {
   mapContainerOutputForUser,
 } from './container-runner.js';
 import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
-import { clearRunRequesters, getRunRequesters } from './run-requesters.js';
+import {
+  _clearAllRunRequesters,
+  getRunRequesters,
+  setRunRequesters,
+} from './run-requesters.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -1591,7 +1595,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   // joins them, which is the only place the gate's input is actually set.
   beforeEach(() => {
     fakeProc = createFakeProcess();
-    clearRunRequesters();
+    _clearAllRunRequesters();
   });
 
   // Attribution is recorded before the spawn, deliberately, so the container can
@@ -1599,10 +1603,11 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   // running the container to completion.
   function launchWith(
     requesterIds: string[] | undefined,
+    sessionId?: string,
   ): string[] | undefined {
     void runContainerAgent(
       testGroup,
-      { ...testInput, requesterIds },
+      { ...testInput, requesterIds, sessionId },
       () => {},
     ).catch(() => {});
     return getRunRequesters(testGroup.folder);
@@ -1623,5 +1628,30 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
     // The gate reads this as "refuse", which is the whole point of `undefined`
     // being distinct from `[]`.
     expect(launchWith(undefined)).toBeUndefined();
+  });
+
+  // `sessionId` is the only signal that the agent still holds an earlier run's
+  // messages, so it is what has to reach the widen-vs-replace rule
+  // (sagri-ai#629). The rule itself is covered in run-requesters.test.ts; these
+  // two pin that the launch feeds it the right flag. The earlier run is seeded
+  // directly rather than launched, because a second concurrent launch would race
+  // this suite's single fake process.
+  it('widens the attribution when the run resumes a session', () => {
+    setRunRequesters(testGroup.folder, ['U_CAROL'], {
+      hasUndrainedRequests: false,
+      resumesSession: false,
+    });
+    expect(launchWith(['U_DAVE'], 'session-abc')).toStrictEqual([
+      'U_CAROL',
+      'U_DAVE',
+    ]);
+  });
+
+  it('replaces it when the run resumes no session', () => {
+    setRunRequesters(testGroup.folder, ['U_CAROL'], {
+      hasUndrainedRequests: false,
+      resumesSession: false,
+    });
+    expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
   });
 });

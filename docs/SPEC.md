@@ -464,6 +464,23 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 3. Claude continues the conversation with full context
 4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
 
+### Session Lifetime
+
+A session is resumed indefinitely within one process, with two exceptions.
+
+It does not survive a restart. Boot drops whatever is in the table, because the
+org-action approval gate's requester attribution is held in memory and a session
+without it can never be attributed to anybody.
+
+And it is dropped when the gate deadlocks. The gate excludes the humans who asked
+for an action from approving it, and that set grows as the session does; once it
+covers every allow-listed approver, no reply could authorize anything. The gate
+refuses, the session is dropped before the group's next run, and sending the
+request again works unless the new conversation draws in every approver too.
+
+The second one is recovery, not a bound, and the agent container picks the
+moment. `src/run-requesters.ts` carries the reasoning and the limits.
+
 ---
 
 ## Message Flow

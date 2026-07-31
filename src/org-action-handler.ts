@@ -24,10 +24,11 @@
  * request.
  *
  * `run-requesters.ts` documents the three requester states and the attribution's
- * lifetime rules, including the known cross-run limit (sagri-ai#629). Two gated
- * actions are refused here rather than held: one with no attribution at all, and
- * one where every allow-listed approver is itself a requester, which no reply
- * could ever satisfy.
+ * lifetime rules. The set spans the group's session, not one run, because a run
+ * that resumes a session can act on an instruction from an earlier one
+ * (sagri-ai#629). Two gated actions are refused here rather than held: one with
+ * no attribution at all, and one where every allow-listed approver is itself a
+ * requester, which no reply could ever satisfy.
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -84,6 +85,12 @@ export interface OrgActionGateDeps {
   // Token mint seam (overridable in tests). Default is a 43-char base64url
   // string from 32 random bytes (>=256 bits of entropy).
   mintToken?: () => string;
+  // Ask the host to forget the group's session and the requester attribution it
+  // carries, before the next run. Called when a gated action is refused for want
+  // of an eligible approver (sagri-ai#629). A request rather than an immediate
+  // drop because this runs on the IPC drain, which can fire mid-run; index.ts
+  // explains what an immediate one would race.
+  requestSessionReset: (groupFolder: string) => void;
 }
 
 export interface OrgActionRequestInput {
@@ -337,20 +344,25 @@ export async function driveOrgActionRequest(
   // No approver clear of the request means holding the row would only collect
   // rejections until its TTL. The two causes read very differently to an
   // operator: an empty allowlist is a host misconfiguration, whereas an
-  // allowlist fully covered by requesters is ordinary in a busy channel, since
-  // the requester set widens with the thread context the run read.
+  // allowlist fully covered by requesters is the requester set having grown over
+  // the session until it named everyone who could authorize anything.
+  //
+  // The second case is the one worth acting on: ask for the session to be
+  // dropped so the re-send starts from its own senders. Why it happens here
+  // rather than on a clock, and what it costs, is in `run-requesters.ts`.
   const requesters = new Set(ctx.requesterIds);
   const approvers = deps.approvers();
   const eligible = [...approvers].filter((id) => !requesters.has(id));
   if (eligible.length === 0) {
     const emptyAllowlist = approvers.size === 0;
+    if (!emptyAllowlist) deps.requestSessionReset(ctx.sourceGroup);
     await refuse(
       emptyAllowlist
         ? 'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json)'
         : 'org-action refused: every allow-listed approver is a requester of this action',
       emptyAllowlist
         ? 'the approver list is empty, so no approval is possible. Check approver-allowlist.json on the host.'
-        : 'everyone on the approver list took part in the request. Ask an approver who was not in this conversation.',
+        : 'everyone on the approver list took part in the conversation this was raised from. Wait for the current run to finish, then send it again: it starts a fresh conversation, and goes through unless the same people drive that one too.',
     );
     return;
   }

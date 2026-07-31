@@ -42,6 +42,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   deleteSession,
+  deleteAllSessions,
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessagesSince,
@@ -82,8 +83,13 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
-import { addRunRequesters, getRunRequesters } from './run-requesters.js';
+import {
+  addRunRequesters,
+  clearRunRequestersForGroup,
+  getRunRequesters,
+} from './run-requesters.js';
 import { startSessionCleanup } from './session-cleanup.js';
+import { requestSessionReset, takeSessionReset } from './session-reset.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { hashPayload, logger } from './logger.js';
@@ -93,6 +99,40 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+
+/**
+ * Forget a group's session everywhere it is held. The requester attribution goes
+ * with it: a session the agent will not resume can no longer put anyone's
+ * instruction in context, and leaving the set behind would strand it (see
+ * `run-requesters.ts`).
+ */
+function dropSession(groupFolder: string): void {
+  delete sessions[groupFolder];
+  deleteSession(groupFolder);
+  clearRunRequestersForGroup(groupFolder);
+  // Any reset owed to this group is already satisfied, whatever asked for it.
+  // Leaving it parked would fire a second drop at the next launch and log a
+  // gate reset for a run that had nothing to reset.
+  takeSessionReset(groupFolder);
+}
+
+/**
+ * The group's session id for the run about to launch, dropping it first if the
+ * org-action gate asked for a reset (sagri-ai#629). Named for the write, not the
+ * read: calling it clears the group's session and its requester attribution.
+ * Scoped to one group on purpose; `session-reset.ts` says why a global flush
+ * would be wrong.
+ */
+function sessionForNextRun(groupFolder: string): string | undefined {
+  if (takeSessionReset(groupFolder)) {
+    dropSession(groupFolder);
+    logger.info(
+      { groupFolder },
+      'Applying the org-action gate session reset — this run starts fresh',
+    );
+  }
+  return sessions[groupFolder];
+}
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -108,7 +148,18 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  sessions = getAllSessions();
+  // Sessions do not survive the process, because their requester attribution
+  // does not (sagri-ai#629). Resuming one the host can no longer attribute would
+  // refuse every gated action in that group with no way back.
+  const carriedOver = Object.keys(getAllSessions()).length;
+  if (carriedOver > 0) {
+    deleteAllSessions();
+    logger.info(
+      { groupCount: carriedOver },
+      'Dropped sessions carried across a restart — attribution does not survive the process',
+    );
+  }
+  sessions = {};
   registeredGroups = getAllRegisteredGroups();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
@@ -666,7 +717,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const sessionId = sessionForNextRun(group.folder);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -749,8 +800,7 @@ async function runAgent(
           { group: group.name, staleSessionId: sessionId, error: output.error },
           'Stale session detected — clearing for next retry',
         );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        dropSession(group.folder);
       }
 
       logger.error(
@@ -1033,6 +1083,7 @@ async function main(): Promise<void> {
   // accessor the read fetchers use); the container never holds the write client.
   const orgActionDeps: OrgActionGateDeps = {
     approvers: () => loadApproverAllowlist(),
+    requestSessionReset,
     sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -1138,7 +1189,7 @@ async function main(): Promise<void> {
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
+    sessionForNextRun,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
