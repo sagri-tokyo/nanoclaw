@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
@@ -77,4 +78,21 @@ export function resolveGroupIpcPath(folder: string): string {
   const ipcPath = path.resolve(ipcBaseDir, folder);
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
+}
+
+/** Shared with hasUndrainedIpcRequests so it and the drain cannot disagree. */
+export function resolveGroupIpcTasksPath(folder: string): string {
+  return path.join(resolveGroupIpcPath(folder), 'tasks');
+}
+
+/**
+ * Is a request file sitting in the group's IPC directory that the host has not
+ * drained yet? Any `.json` counts: deciding this by reading container-written
+ * JSON would put a security question in the container's hands. Cost is a needless
+ * union of requester sets when the pending file was an unrelated verb.
+ */
+export function hasUndrainedIpcRequests(folder: string): boolean {
+  const tasksDir = resolveGroupIpcTasksPath(folder);
+  if (!fs.existsSync(tasksDir)) return false;
+  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
 }

@@ -30,7 +30,11 @@ import {
   TIMEZONE,
 } from './config.js';
 import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  hasUndrainedIpcRequests,
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 
 import {
@@ -43,6 +47,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
+import { setRunRequesters } from './run-requesters.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
 import { CapabilityProfile, RegisteredGroup } from './types.js';
@@ -110,6 +115,14 @@ export interface ContainerInput {
    * namespaced unattributed placeholder rather than fabricating an identity.
    */
   triggeringUserId?: string;
+  /**
+   * Human senders of this run's prompt batch; see `run-requesters.ts` for the
+   * three states. Required, not optional, because `[]` is a positive "no human is
+   * in this run's context" and `undefined` is "the host cannot enumerate them" —
+   * every call site has to say which it means rather than defaulting into the
+   * permissive one by omission.
+   */
+  requesterIds: string[] | undefined;
 }
 
 export type ContainerOutput =
@@ -796,6 +809,15 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+
+  // Attribute this run before the container can emit an org_action
+  // (sagri-ai#296); setRunRequesters owns the widen-vs-replace rule. A resumed
+  // session means the agent still holds earlier runs' messages, so this run
+  // cannot speak for the whole slot (sagri-ai#629).
+  setRunRequesters(group.folder, input.requesterIds, {
+    hasUndrainedRequests: hasUndrainedIpcRequests(group.folder),
+    resumesSession: input.sessionId !== undefined,
+  });
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });

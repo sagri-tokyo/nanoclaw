@@ -12,20 +12,23 @@
  * a gated action executes exactly once.
  *
  * SEPARATION-OF-DUTY SCOPE (read before relying on the guard):
- * The dual-control property enforced here is the approver-allowlist gate plus
- * the bot/self reject. It is NOT user-level "the requesting human cannot
- * self-approve". The originating Slack user id is not available at the
- * `org_action` IPC drain: the container is launched per group on a BATCH of
- * laundered messages (potentially several distinct senders), the MCP tool that
- * emits the request runs inside the container with only the group folder as
- * identity, and the triggering user's id is never forwarded into the container
- * or the IPC request. So the persisted `requester_group` is the requesting
- * GROUP FOLDER, not a user. The `requesterGroup !== approver` check below can
- * never be a user-level self-approval guard (a group folder string and a Slack
- * user id never collide); it only excludes the degenerate case where the
- * approver allowlist itself names a group-folder string. Wiring real user-level
- * dual control would require new plumbing to carry the triggering sender id
- * through container launch into the org_action request (tracked separately).
+ * The dual-control property enforced here is the approver-allowlist gate, the
+ * bot/self reject, and a user-level self-approval reject (sagri-ai#296). The
+ * requester is attributed host-side by `run-requesters.ts`, not carried in the
+ * request; read that module for why, and for the attribution's lifetime rules.
+ *
+ * A SET of requesters, not one id, because a run answers a batch of messages and
+ * the container cannot say which of them drove the write. If Bob asks for the
+ * write and Alice types the @mention, both drove it and neither may approve it;
+ * recording only the trigger sender would leave Bob free to approve his own
+ * request.
+ *
+ * `run-requesters.ts` documents the three requester states and the attribution's
+ * lifetime rules. The set spans the group's session, not one run, because a run
+ * that resumes a session can act on an instruction from an earlier one
+ * (sagri-ai#629). Two gated actions are refused here rather than held: one with
+ * no attribution at all, and one where every allow-listed approver is itself a
+ * requester, which no reply could ever satisfy.
  *
  * Pure orchestration over injected dependencies (DB accessors are imported;
  * the approver set, the channel send, the host write client, the clock, the
@@ -82,6 +85,12 @@ export interface OrgActionGateDeps {
   // Token mint seam (overridable in tests). Default is a 43-char base64url
   // string from 32 random bytes (>=256 bits of entropy).
   mintToken?: () => string;
+  // Ask the host to forget the group's session and the requester attribution it
+  // carries, before the next run. Called when a gated action is refused for want
+  // of an eligible approver (sagri-ai#629). A request rather than an immediate
+  // drop because this runs on the IPC drain, which can fire mid-run; index.ts
+  // explains what an immediate one would race.
+  requestSessionReset: (groupFolder: string) => void;
 }
 
 export interface OrgActionRequestInput {
@@ -100,10 +109,10 @@ export interface OrgActionRequestInput {
 export interface OrgActionRequestContext {
   sourceGroup: string;
   chatJid: string;
-  // The requesting GROUP FOLDER, not a user id. See the separation-of-duty
-  // scope note in the module docstring: user-level dual control is not enforced
-  // here because the triggering Slack user id is not available at this drain.
-  requesterGroup: string;
+  // From `run-requesters.ts`; see the three states in the module docstring. The
+  // group folder is not in here: `sourceGroup` already carries it, and it is
+  // persisted as the row's `source_group`.
+  requesterIds: string[] | undefined;
 }
 
 function defaultMintToken(): string {
@@ -250,6 +259,21 @@ function parsePendingRow(row: PendingActionRow): ParsedPendingRow {
   };
 }
 
+/**
+ * A JSON string[] like `citation_refs`, except a row written before sagri-ai#296
+ * holds a bare group folder. A folder is never bracketed, so the leading `[`
+ * tells the formats apart; a legacy row reads back as that one requester, which
+ * is the group-level guard it originally shipped with.
+ */
+function parseRequesters(raw: string): string[] {
+  if (!raw.startsWith('[')) return [raw];
+  const parsed: unknown = JSON.parse(raw);
+  if (!isStringArray(parsed)) {
+    throw new Error(`org-action: requester "${raw}" is not a string[]`);
+  }
+  return parsed;
+}
+
 function addMs(iso: string, ms: number): string {
   return new Date(new Date(iso).getTime() + ms).toISOString();
 }
@@ -276,14 +300,15 @@ export async function driveOrgActionRequest(
     resolved.targetTitle,
   );
   const verdict = classifyOrgAction(record);
+  const logContext = {
+    action: resolvedInput.action,
+    target_ref: resolvedInput.target_ref,
+    sourceGroup: ctx.sourceGroup,
+  };
 
   if (verdict === 'refuse') {
     logger.warn(
-      {
-        action: resolvedInput.action,
-        target_ref: resolvedInput.target_ref,
-        sourceGroup: ctx.sourceGroup,
-      },
+      logContext,
       'org-action refused host-side (red line / allowlist / id shape)',
     );
     return;
@@ -295,9 +320,49 @@ export async function driveOrgActionRequest(
       target_ref: resolvedInput.target_ref,
       canonical_args: resolvedInput.canonical_args,
     });
-    logger.info(
-      { action: resolvedInput.action, target_ref: resolvedInput.target_ref },
-      'org-action executed host-side (safe)',
+    logger.info(logContext, 'org-action executed host-side (safe)');
+    return;
+  }
+
+  const actionLabel = `${resolvedInput.action} on ${resolvedInput.target_ref}`;
+  const refuse = async (logMessage: string, reply: string): Promise<void> => {
+    logger.error(logContext, logMessage);
+    await deps.sendMessage(ctx.chatJid, `Refused ${actionLabel}: ${reply}`);
+  };
+
+  // Unattributed refuses rather than holds (see the module docstring). A re-send
+  // into the same live container is piped, and the piped path declines for an
+  // unattributed group too, so waiting out the run is what actually recovers it.
+  if (ctx.requesterIds === undefined) {
+    await refuse(
+      'org-action refused: gated action has no requester attribution — cannot enforce dual control',
+      'the host cannot say who asked for it, so no approver can be cleared of having asked. Wait for the current run to finish, then send it again.',
+    );
+    return;
+  }
+
+  // No approver clear of the request means holding the row would only collect
+  // rejections until its TTL. The two causes read very differently to an
+  // operator: an empty allowlist is a host misconfiguration, whereas an
+  // allowlist fully covered by requesters is the requester set having grown over
+  // the session until it named everyone who could authorize anything.
+  //
+  // The second case is the one worth acting on: ask for the session to be
+  // dropped so the re-send starts from its own senders. Why it happens here
+  // rather than on a clock, and what it costs, is in `run-requesters.ts`.
+  const requesters = new Set(ctx.requesterIds);
+  const approvers = deps.approvers();
+  const eligible = [...approvers].filter((id) => !requesters.has(id));
+  if (eligible.length === 0) {
+    const emptyAllowlist = approvers.size === 0;
+    if (!emptyAllowlist) deps.requestSessionReset(ctx.sourceGroup);
+    await refuse(
+      emptyAllowlist
+        ? 'org-action refused: approver allowlist is empty (missing or invalid approver-allowlist.json)'
+        : 'org-action refused: every allow-listed approver is a requester of this action',
+      emptyAllowlist
+        ? 'the approver list is empty, so no approval is possible. Check approver-allowlist.json on the host.'
+        : 'everyone on the approver list took part in the conversation this was raised from. Wait for the current run to finish, then send it again: it starts a fresh conversation, and goes through unless the same people drive that one too.',
     );
     return;
   }
@@ -316,7 +381,7 @@ export async function driveOrgActionRequest(
     citation_refs: JSON.stringify(resolvedInput.citation_refs),
     canonical_args: JSON.stringify(resolvedInput.canonical_args),
     summary,
-    requester: ctx.requesterGroup,
+    requester: JSON.stringify(ctx.requesterIds),
     state: 'pending',
     created_at: createdAt,
     expires_at: addMs(createdAt, deps.ttlMs),
@@ -325,14 +390,7 @@ export async function driveOrgActionRequest(
   };
   createPendingAction(row);
   await deps.sendMessage(ctx.chatJid, renderApprovalPrompt(token, summary));
-  logger.info(
-    {
-      token,
-      action: resolvedInput.action,
-      target_ref: resolvedInput.target_ref,
-    },
-    'org-action held pending approval',
-  );
+  logger.info({ ...logContext, token }, 'org-action held pending approval');
 }
 
 function renderApprovalPrompt(token: string, summary: string): string {
@@ -352,11 +410,9 @@ function renderApprovalPrompt(token: string, summary: string): string {
  * authorized execution, was rejected, or was denied by a fail-closed check),
  * false if it was ordinary text the caller should keep processing.
  *
- * Every reject path is fail-closed: a non-allowlisted approver or a bot/self
- * message leaves the row untouched. The `row.requester === msg.sender` check is
- * a group-level guard only (row.requester holds the requesting GROUP FOLDER, not
- * the triggering user id — see the module docstring's separation-of-duty scope),
- * so it does NOT enforce user-level "the requester cannot self-approve".
+ * Every reject path is fail-closed: a non-allowlisted approver, a bot/self
+ * message, or an approver who is one of the row's recorded requesters leaves the
+ * row untouched.
  */
 export async function handleApprovalReply(
   chatJid: string,
@@ -409,13 +465,19 @@ export async function handleApprovalReply(
     return true;
   }
 
-  // Group-level guard only: row.requester is the requesting group folder, never
-  // a user id, so this excludes the degenerate case where the approver allowlist
-  // names a group-folder string. It is NOT user-level self-approval prevention.
-  if (row.requester === msg.sender) {
+  // User-level dual control: nobody whose message drove the run that raised this
+  // action may authorize it, approver allowlist membership notwithstanding. This
+  // reject answers in-channel, unlike the allowlist and bot/self rejects: the
+  // sender IS an approver and would otherwise watch a valid-looking approval
+  // vanish until the TTL expired the row.
+  if (parseRequesters(row.requester).includes(msg.sender)) {
     logger.warn(
       { chatJid, sender: msg.sender, token: intent.token },
-      'org-action approval rejected: approver matches the requesting group',
+      'org-action approval rejected: approver is a requester of this action',
+    );
+    await deps.sendMessage(
+      chatJid,
+      `Cannot approve ${intent.token}: you are on record as requesting it. Another approver must authorize it.`,
     );
     return true;
   }

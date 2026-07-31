@@ -40,8 +40,8 @@ import {
   getAllChats,
   botRepliedInThread,
   getAllRegisteredGroups,
-  getAllSessions,
   deleteSession,
+  deleteAllSessions,
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessagesSince,
@@ -82,7 +82,13 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
+import {
+  addRunRequesters,
+  clearRunRequestersForGroup,
+  getRunRequesters,
+} from './run-requesters.js';
 import { startSessionCleanup } from './session-cleanup.js';
+import { requestSessionReset, takeSessionReset } from './session-reset.js';
 import { createSessionTracker, SessionStore } from './session-tracker.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -93,6 +99,40 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+
+/**
+ * Forget a group's session everywhere it is held. The requester attribution goes
+ * with it: a session the agent will not resume can no longer put anyone's
+ * instruction in context, and leaving the set behind would strand it (see
+ * `run-requesters.ts`).
+ */
+function dropSession(groupFolder: string): void {
+  delete sessions[groupFolder];
+  deleteSession(groupFolder);
+  clearRunRequestersForGroup(groupFolder);
+  // Any reset owed to this group is already satisfied, whatever asked for it.
+  // Leaving it parked would fire a second drop at the next launch and log a
+  // gate reset for a run that had nothing to reset.
+  takeSessionReset(groupFolder);
+}
+
+/**
+ * The group's session id for the run about to launch, dropping it first if the
+ * org-action gate asked for a reset (sagri-ai#629). Named for the write, not the
+ * read: calling it clears the group's session and its requester attribution.
+ * Scoped to one group on purpose; `session-reset.ts` says why a global flush
+ * would be wrong.
+ */
+function sessionForNextRun(groupFolder: string): string | undefined {
+  if (takeSessionReset(groupFolder)) {
+    dropSession(groupFolder);
+    logger.info(
+      { groupFolder },
+      'Applying the org-action gate session reset — this run starts fresh',
+    );
+  }
+  return sessions[groupFolder];
+}
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -108,7 +148,20 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  sessions = getAllSessions();
+  // Sessions do not survive the process, because their requester attribution
+  // does not (sagri-ai#629). A restored session's first resumed launch would
+  // self-heal on its own (run-requesters.ts asks for a reset when it cannot
+  // attribute a resumed session) — but that costs one unattributed, refused
+  // run per group on every restart before it recovers. Wiping here trades
+  // conversation continuity across restarts for skipping that run.
+  const carriedOver = deleteAllSessions();
+  if (carriedOver > 0) {
+    logger.info(
+      { groupCount: carriedOver },
+      'Dropped sessions carried across a restart — attribution does not survive the process',
+    );
+  }
+  sessions = {};
   registeredGroups = getAllRegisteredGroups();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
@@ -274,6 +327,18 @@ export function newestHumanMessage(
   messages: NewMessage[],
 ): NewMessage | undefined {
   return [...messages].reverse().find((m) => !m.is_bot_message);
+}
+
+/**
+ * Distinct human senders of a prompt batch, in first-seen order (sagri-ai#296).
+ * See `org-action-handler.ts` for why the approval gate needs all of them.
+ *
+ * @internal - exported for testing
+ */
+export function humanSenders(messages: NewMessage[]): string[] {
+  return [
+    ...new Set(messages.filter((m) => !m.is_bot_message).map((m) => m.sender)),
+  ];
 }
 
 /**
@@ -503,6 +568,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // to scheduled tasks.
   const triggeringUserId = newestHumanMessage(promptMessages)?.sender;
 
+  // Requester attribution for the org-action approval gate (sagri-ai#296), over
+  // the same prompt the agent acts on. Merged thread context counts: an
+  // instruction the agent reads from a thread drove the write whether or not its
+  // author sent one of this batch's new messages.
+  const requesterIds = humanSenders(promptMessages);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -550,6 +621,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       prompt,
       chatJid,
       triggeringUserId,
+      requesterIds,
       async (result) => {
         // Streaming output callback — called for each agent result
         if (result.result) {
@@ -647,10 +719,10 @@ const sessionStore: SessionStore = {
     sessions[groupFolder] = sessionId;
     setSession(groupFolder, sessionId);
   },
-  forget: (groupFolder) => {
-    delete sessions[groupFolder];
-    deleteSession(groupFolder);
-  },
+  // dropSession rather than a bare delete: the requester attribution has to go
+  // with the session it was scoped to, or the group holds a dead session's
+  // requesters and refuses every gated action (sagri-ai#629).
+  forget: dropSession,
 };
 
 async function runAgent(
@@ -658,10 +730,11 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   triggeringUserId: string | undefined,
+  requesterIds: string[],
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const sessionId = sessionForNextRun(group.folder);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -711,6 +784,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         triggeringUserId,
+        requesterIds,
         // Interactive (operator-triggered) messages never get the org-write
         // tokens; all writes route through the host-executed org_action gate
         // (sagri-ai#312).
@@ -842,6 +916,9 @@ async function startMessageLoop(): Promise<void> {
           );
 
           if (queue.sendMessage(chatJid, piped)) {
+            // A piped batch skips a fresh launch, so add its senders here
+            // (sagri-ai#296); see addRunRequesters.
+            addRunRequesters(group.folder, humanSenders(messagesToSend));
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -1001,6 +1078,7 @@ async function main(): Promise<void> {
   // accessor the read fetchers use); the container never holds the write client.
   const orgActionDeps: OrgActionGateDeps = {
     approvers: () => loadApproverAllowlist(),
+    requestSessionReset,
     sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -1106,7 +1184,7 @@ async function main(): Promise<void> {
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
+    sessionForNextRun,
     sessionStore,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
@@ -1165,9 +1243,8 @@ async function main(): Promise<void> {
       // citation_refs) before this handler is called, so the record arrives
       // fully typed. No coercion: a coerced value would pass the gate, consume
       // the approval, then drop or mis-tier the write silently (the footgun
-      // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
-      // see the separation-of-duty scope note in org-action-handler.ts;
-      // user-level dual control is not enforced.
+      // ipc.ts names). requesterIds is host-attributed, never taken from the
+      // record; see run-requesters.ts.
       await driveOrgActionRequest(
         {
           action: record.action,
@@ -1178,7 +1255,11 @@ async function main(): Promise<void> {
           citation_refs: record.citation_refs,
           canonical_args: record.canonical_args,
         },
-        { sourceGroup, chatJid, requesterGroup: sourceGroup },
+        {
+          sourceGroup,
+          chatJid,
+          requesterIds: getRunRequesters(sourceGroup),
+        },
         orgActionDeps,
       );
     },

@@ -29,6 +29,7 @@ import type { NewMessage, RegisteredGroup } from './src/types.js';
 const CHAT = 'slack:C0DEVCHANNEL';
 const GROUP = 'sagri-ai-dev';
 const APPROVER = 'U_APPROVER';
+const REQUESTER = 'U_REQUESTER';
 
 const slackOut: string[] = [];
 const executed: { action: string; target_ref: string }[] = [];
@@ -90,7 +91,7 @@ const ipcDeps: IpcDeps = {
   onOrgAction: (record, sourceGroup, chatJid) =>
     driveOrgActionRequest(
       record,
-      { sourceGroup, chatJid, requesterGroup: sourceGroup },
+      { sourceGroup, chatJid, requesterIds: [REQUESTER] },
       gate,
     ),
   actionSink: (rec) => {

@@ -268,7 +268,10 @@ export function shouldPostFailure(
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
+  // Resolves the session a group-context run should resume, and drops it first
+  // if the org-action gate asked for a reset. It WRITES; only call it for a run
+  // that is actually about to resume a session, never to peek.
+  sessionForNextRun: (groupFolder: string) => string | undefined;
   sessionStore: SessionStore;
   queue: GroupQueue;
   onProcess: (
@@ -395,10 +398,14 @@ async function runTask(
   let error: string | null = null;
   let errorClass: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
+  // For group context mode, use the group's current session. The call is kept
+  // behind the branch deliberately: an isolated task resumes nothing, and
+  // hoisting it would have every isolated tick eat the group's pending gate
+  // reset and drop a session it never touched.
   const isGroupContext = task.context_mode === 'group';
-  const sessionId = isGroupContext ? sessions[task.group_folder] : undefined;
+  const sessionId = isGroupContext
+    ? deps.sessionForNextRun(task.group_folder)
+    : undefined;
 
   // A group-context run must keep the session it established, or the next run
   // starts a fresh one and orphans the transcript this one wrote. Dropping a
@@ -439,6 +446,11 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
+        // A task contributes no requesters of its own: nobody asked, it runs on
+        // its own prompt. `[]` is honest in both modes because `sessionId` above
+        // makes run-requesters widen the group's slot rather than replace it, so
+        // the session-scoped humans stay excluded (sagri-ai#629).
+        requesterIds: [],
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

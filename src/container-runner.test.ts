@@ -179,6 +179,11 @@ import {
   mapContainerOutputForUser,
 } from './container-runner.js';
 import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
+import {
+  _clearAllRunRequesters,
+  getRunRequesters,
+  setRunRequesters,
+} from './run-requesters.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -190,11 +195,12 @@ const testGroup: RegisteredGroup = {
   added_at: new Date().toISOString(),
 };
 
-const testInput = {
+const testInput: ContainerInput = {
   prompt: 'Hello',
   groupFolder: 'test-group',
   chatJid: 'test@g.us',
   isMain: false,
+  requesterIds: [],
 };
 
 // The write tokens (GitHub, Notion) are only mounted for the trusted-writer
@@ -1530,6 +1536,7 @@ describe('container-runner capability profile write-token gating', () => {
     chatJid: 'test@g.us',
     isMain: false,
     capabilityProfile: 'operator',
+    requesterIds: [],
   };
 
   const trustedWriterInput: ContainerInput = {
@@ -1538,6 +1545,7 @@ describe('container-runner capability profile write-token gating', () => {
     chatJid: 'test@g.us',
     isMain: false,
     capabilityProfile: 'trusted-writer',
+    requesterIds: [],
   };
 
   it('mounts no GitHub token for the operator profile', async () => {
@@ -1573,9 +1581,77 @@ describe('container-runner capability profile write-token gating', () => {
       chatJid: 'test@g.us',
       isMain: false,
       isScheduledTask: false,
+      requesterIds: [],
     };
     const args = await captureArgsForInput(interactiveInput);
     expect(readonlyMountFor(args, GITHUB_TOKEN_CONTAINER_PATH)).toBeNull();
     expect(readonlyMountFor(args, NOTION_API_KEY_CONTAINER_PATH)).toBeNull();
+  });
+});
+
+describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
+  // The three units are covered separately (task-scheduler emits the value, the
+  // registry stores it, the gate refuses on undefined). This pins the line that
+  // joins them, which is the only place the gate's input is actually set.
+  beforeEach(() => {
+    fakeProc = createFakeProcess();
+    _clearAllRunRequesters();
+  });
+
+  // Attribution is recorded before the spawn, deliberately, so the container can
+  // never emit an org_action ahead of it. That lets this read the registry without
+  // running the container to completion.
+  function launchWith(
+    requesterIds: string[] | undefined,
+    sessionId?: string,
+  ): string[] | undefined {
+    void runContainerAgent(
+      testGroup,
+      { ...testInput, requesterIds, sessionId },
+      () => {},
+    ).catch(() => {});
+    return getRunRequesters(testGroup.folder);
+  }
+
+  it('records the run senders so the gate can exclude them', () => {
+    expect(launchWith(['U_BOB', 'U_ALICE'])).toStrictEqual([
+      'U_BOB',
+      'U_ALICE',
+    ]);
+  });
+
+  it('records a scheduled run as nobody asked, not as unknown', () => {
+    expect(launchWith([])).toStrictEqual([]);
+  });
+
+  it('leaves the group unattributed when the run cannot enumerate its context', () => {
+    // The gate reads this as "refuse", which is the whole point of `undefined`
+    // being distinct from `[]`.
+    expect(launchWith(undefined)).toBeUndefined();
+  });
+
+  // `sessionId` is the only signal that the agent still holds an earlier run's
+  // messages, so it is what has to reach the widen-vs-replace rule
+  // (sagri-ai#629). The rule itself is covered in run-requesters.test.ts; these
+  // two pin that the launch feeds it the right flag. The earlier run is seeded
+  // directly rather than launched, because a second concurrent launch would race
+  // this suite's single fake process.
+  it('widens the attribution when the run resumes a session', () => {
+    setRunRequesters(testGroup.folder, ['U_CAROL'], {
+      hasUndrainedRequests: false,
+      resumesSession: false,
+    });
+    expect(launchWith(['U_DAVE'], 'session-abc')).toStrictEqual([
+      'U_CAROL',
+      'U_DAVE',
+    ]);
+  });
+
+  it('replaces it when the run resumes no session', () => {
+    setRunRequesters(testGroup.folder, ['U_CAROL'], {
+      hasUndrainedRequests: false,
+      resumesSession: false,
+    });
+    expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
   });
 });

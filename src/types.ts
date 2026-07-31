@@ -108,6 +108,9 @@ export interface PendingActionRow {
   citation_refs: string;
   canonical_args: string;
   summary: string;
+  // JSON string array of the Slack user ids that requested this action
+  // (sagri-ai#296); a pre-#296 row holds a bare group folder instead. Parsed by
+  // `parseRequesters` in org-action-handler.ts, which handles both.
   requester: string;
   state: PendingActionState;
   created_at: string;
