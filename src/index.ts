@@ -82,6 +82,7 @@ import {
   reDriveApprovedActions,
   type OrgActionGateDeps,
 } from './org-action-handler.js';
+import { addRunRequesters, getRunRequesters } from './run-requesters.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -273,6 +274,18 @@ export function newestHumanMessage(
   messages: NewMessage[],
 ): NewMessage | undefined {
   return [...messages].reverse().find((m) => !m.is_bot_message);
+}
+
+/**
+ * Distinct human senders of a prompt batch, in first-seen order (sagri-ai#296).
+ * See `org-action-handler.ts` for why the approval gate needs all of them.
+ *
+ * @internal - exported for testing
+ */
+export function humanSenders(messages: NewMessage[]): string[] {
+  return [
+    ...new Set(messages.filter((m) => !m.is_bot_message).map((m) => m.sender)),
+  ];
 }
 
 /**
@@ -502,6 +515,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // to scheduled tasks.
   const triggeringUserId = newestHumanMessage(promptMessages)?.sender;
 
+  // Requester attribution for the org-action approval gate (sagri-ai#296), over
+  // the same prompt the agent acts on. Merged thread context counts: an
+  // instruction the agent reads from a thread drove the write whether or not its
+  // author sent one of this batch's new messages.
+  const requesterIds = humanSenders(promptMessages);
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -549,6 +568,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       prompt,
       chatJid,
       triggeringUserId,
+      requesterIds,
       async (result) => {
         // Streaming output callback — called for each agent result
         if (result.result) {
@@ -642,6 +662,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   triggeringUserId: string | undefined,
+  requesterIds: string[],
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -695,6 +716,7 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
         triggeringUserId,
+        requesterIds,
         // Interactive (operator-triggered) messages never get the org-write
         // tokens; all writes route through the host-executed org_action gate
         // (sagri-ai#312).
@@ -849,6 +871,9 @@ async function startMessageLoop(): Promise<void> {
           );
 
           if (queue.sendMessage(chatJid, piped)) {
+            // A piped batch skips a fresh launch, so add its senders here
+            // (sagri-ai#296); see addRunRequesters.
+            addRunRequesters(group.folder, humanSenders(messagesToSend));
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -1171,9 +1196,8 @@ async function main(): Promise<void> {
       // citation_refs) before this handler is called, so the record arrives
       // fully typed. No coercion: a coerced value would pass the gate, consume
       // the approval, then drop or mis-tier the write silently (the footgun
-      // ipc.ts names). The requester is the source GROUP FOLDER, not a user —
-      // see the separation-of-duty scope note in org-action-handler.ts;
-      // user-level dual control is not enforced.
+      // ipc.ts names). requesterIds is host-attributed, never taken from the
+      // record; see run-requesters.ts.
       await driveOrgActionRequest(
         {
           action: record.action,
@@ -1184,7 +1208,11 @@ async function main(): Promise<void> {
           citation_refs: record.citation_refs,
           canonical_args: record.canonical_args,
         },
-        { sourceGroup, chatJid, requesterGroup: sourceGroup },
+        {
+          sourceGroup,
+          chatJid,
+          requesterIds: getRunRequesters(sourceGroup),
+        },
         orgActionDeps,
       );
     },

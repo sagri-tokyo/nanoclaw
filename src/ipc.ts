@@ -13,7 +13,10 @@ import {
   taskOutcomeIsNew,
   updateTask,
 } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import {
+  isValidGroupFolder,
+  resolveGroupIpcTasksPath,
+} from './group-folder.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -138,7 +141,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
     try {
       groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
         const stat = fs.statSync(path.join(ipcBaseDir, f));
-        return stat.isDirectory() && f !== 'errors';
+        if (!stat.isDirectory() || f === 'errors') return false;
+        // Screened here, not in the loop below: resolving a path from an illegal
+        // name throws, and a throw escapes before the reschedule at the end,
+        // stopping the drain for every group until a restart. Logged at debug
+        // because the drain re-runs every second.
+        if (!isValidGroupFolder(f)) {
+          logger.debug({ sourceGroup: f }, 'IPC: skipping non-group directory');
+          return false;
+        }
+        return true;
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
@@ -157,7 +169,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
     for (const sourceGroup of groupFolders) {
       const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+      const tasksDir = resolveGroupIpcTasksPath(sourceGroup);
 
       // Process messages from this group's IPC directory
       try {

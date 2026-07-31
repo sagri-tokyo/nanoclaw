@@ -173,7 +173,7 @@ CREATE TABLE IF NOT EXISTS pending_actions (
   canonical_args TEXT NOT NULL,      -- JSON, the exact args the host will replay
   summary TEXT NOT NULL,             -- host-rendered approver-facing text
   state TEXT NOT NULL,               -- 'pending' | 'approved' | 'consumed' | 'denied' | 'expired'
-  requester TEXT NOT NULL,           -- requesting GROUP FOLDER (NOT a user id); see separation-of-duty scope note
+  requester TEXT NOT NULL,           -- JSON string[] of the requesting Slack user ids (sagri-ai#296)
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,          -- created_at + TTL
   approved_by TEXT,                  -- approver sender id, set on approve
@@ -221,21 +221,11 @@ CREATE INDEX IF NOT EXISTS idx_pending_actions_state ON pending_actions(state, e
   `is_from_me || is_bot_message`, rejects `requester === approver`, and refuses
   to classify at all while `botUserId` is unresolved (treat unresolved as deny).
 
-  **Separation-of-duty scope (true property, not the aspiration).** The
-  `requester === approver` reject is GROUP-LEVEL only. `requester` holds the
-  requesting group folder, never the triggering Slack user id — that id is not
-  available at the `org_action` IPC drain: the container is launched per group
-  on a BATCH of laundered messages (potentially several senders), and the MCP
-  tool that emits the request runs inside the container with only the group
-  folder as identity, so no user id is forwarded into the container or the
-  request. Consequently this check can never be a user-level "the requesting
-  human cannot self-approve" guard (a group-folder string and a Slack user id
-  never collide); it only excludes the degenerate case where the approver
-  allowlist itself names a group-folder string. The actual dual-control property
-  that holds today is: an action executes only after an **allow-listed approver
-  who is not a bot/self** authorizes it. Real user-level dual control would
-  require new plumbing to carry the triggering sender id through container
-  launch into the org_action request, tracked in sagri-tokyo/sagri-ai#296.
+  **Separation-of-duty scope.** As planned here the `requester === approver`
+  reject was group-level only, because no user id reached the `org_action` drain.
+  sagri-tokyo/sagri-ai#296 closed that: the host attributes each run's human
+  senders (`src/run-requesters.ts`) and the reject is now user-level. See the
+  module docstring in `src/org-action-handler.ts`.
 - **Bot/self source fix (normative, ADR decision 5)**: set
   `is_bot_message = isOwnBotMessage || !!botId` at BOTH `slack.ts:301` and the
   thread-history path `slack.ts:471`.
@@ -380,11 +370,7 @@ Each phase is independently mergeable and reversible.
 - **Approver set membership**: who is in the fail-closed approver allowlist, and
   is requester != approver required for ALL gated actions or only the red-line
   tiers? (ADR decision 5 requires it for the red lines; confirm the broader
-  policy.) NOTE: user-level requester != approver is NOT enforceable today —
-  the triggering user id is not available at the drain (see the separation-of-
-  duty scope note above). The follow-up to plumb the sender id through container
-  launch must land before any user-level requester != approver claim is relied
-  on.
+  policy.) User-level requester != approver is enforced as of sagri-ai#296.
 
 ## Success criteria
 

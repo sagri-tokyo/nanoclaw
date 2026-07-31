@@ -85,7 +85,7 @@ function pendingActionRow(
     citation_refs: '[]',
     canonical_args: '{"property":"Status","value":"Ready for AI"}',
     summary: 's',
-    requester: 'g',
+    requester: '["U_HUMAN"]',
     state: 'pending',
     created_at: '2026-06-22T00:00:00.000Z',
     expires_at: '2026-06-23T00:00:00.000Z',
@@ -110,7 +110,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
       {
         sourceGroup: 'g',
         chatJid: 'slack:C0AAA1111',
-        requesterGroup: 'g',
+        requesterIds: ['U_HUMAN'],
       },
       deps,
     );
@@ -134,17 +134,97 @@ describe('driveOrgActionRequest — safe vs gated', () => {
       {
         sourceGroup: 'g',
         chatJid: 'slack:C0AAA1111',
-        requesterGroup: 'g',
+        requesterIds: ['U_HUMAN'],
       },
       deps,
     );
     expect(rec.executed).toHaveLength(0);
     const row = getPendingAction(TOKEN);
     expect(row?.state).toBe('pending');
-    expect(row?.requester).toBe('g');
+    expect(row?.requester).toBe('["U_HUMAN"]');
     expect(rec.posted).toHaveLength(1);
     expect(rec.posted[0].text).toContain(TOKEN);
     expect(rec.posted[0].text).toContain('Ready for AI');
+  });
+
+  it('refuses a gated action with no requester attribution rather than holding it', async () => {
+    // A host restart drops the attribution. Holding the action would offer it to
+    // an approver who might be the human who asked for it.
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.write_property',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'gated',
+        citation_refs: [],
+        canonical_args: { property: 'Status', value: 'Ready for AI' },
+      },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterIds: undefined,
+      },
+      deps,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('cannot say who asked for it');
+  });
+
+  it('refuses when every approver is a requester rather than holding a row nobody can approve', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_ALICE', 'U_BOB']),
+    });
+    await seedGated(deps, ['U_BOB', 'U_ALICE']);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('took part in the request');
+  });
+
+  it('names the empty approver list as the cause when that is why nobody is eligible', async () => {
+    // Same branch as the all-requesters refusal, different cause: this one sends
+    // the operator to the host config, not to a colleague.
+    const { deps, rec } = makeDeps({ approvers: () => new Set() });
+    await seedGated(deps, ['U_HUMAN']);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.posted[0].text).toContain('the approver list is empty');
+  });
+
+  it('holds when one approver is clear of the request', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_BOB', 'U_CAROL']),
+    });
+    await seedGated(deps, ['U_BOB']);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    expect(rec.posted[0].text).toContain(TOKEN);
+  });
+
+  it('still executes a safe action with no requester attribution', async () => {
+    // A safe action never reaches an approver, so attribution is irrelevant to it
+    // and losing it must not stall ordinary writes.
+    const { deps, rec } = makeDeps();
+    await driveOrgActionRequest(
+      {
+        action: 'notion.append_progress',
+        target_ref: HEX32,
+        reversibility: 'reversible',
+        stakes_hint: 'safe',
+        citation_refs: [],
+        canonical_args: { text: 'hi' },
+      },
+      {
+        sourceGroup: 'g',
+        chatJid: 'slack:C0AAA1111',
+        requesterIds: undefined,
+      },
+      deps,
+    );
+    expect(rec.executed).toEqual([
+      { action: 'notion.append_progress', target_ref: HEX32 },
+    ]);
   });
 
   it('refuses a red-line action: no row, no effect, refusal posted', async () => {
@@ -161,7 +241,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
       {
         sourceGroup: 'g',
         chatJid: 'slack:C0AAA1111',
-        requesterGroup: 'g',
+        requesterIds: ['U_HUMAN'],
       },
       deps,
     );
@@ -174,7 +254,7 @@ describe('driveOrgActionRequest — host-side Notion target resolution', () => {
   const ctx = {
     sourceGroup: 'g',
     chatJid: 'slack:C0AAA1111',
-    requesterGroup: 'g',
+    requesterIds: ['U_HUMAN'],
   };
 
   function resolverReturning(
@@ -375,7 +455,7 @@ describe('driveOrgActionRequest — host-side Notion target resolution', () => {
 
 function seedGated(
   deps: OrgActionGateDeps,
-  requesterGroup = 'g',
+  requesterIds: string[] = ['U_HUMAN'],
 ): Promise<void> {
   return driveOrgActionRequest(
     {
@@ -386,7 +466,7 @@ function seedGated(
       citation_refs: [],
       canonical_args: { property: 'Status', value: 'Ready for AI' },
     },
-    { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requesterGroup },
+    { sourceGroup: 'g', chatJid: 'slack:C0AAA1111', requesterIds },
     deps,
   );
 }
@@ -394,7 +474,9 @@ function seedGated(
 describe('handleApprovalReply — fail-closed approver checks', () => {
   it('rejects an approver not in the allowlist', async () => {
     const { deps, rec } = makeDeps({ approvers: () => new Set() });
-    await seedGated(deps);
+    // Seeded directly: an empty allowlist makes driveOrgActionRequest refuse to
+    // hold at all, and the row under test here is one that was already held.
+    createPendingAction(pendingActionRow());
     const handled = await handleApprovalReply(
       'slack:C0AAA1111',
       approval({ sender: 'U_RANDOM' }),
@@ -459,15 +541,64 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     expect(rec.executed).toHaveLength(0);
   });
 
-  it('rejects an approver whose id equals the requesting group (group-level guard)', async () => {
-    // row.requester holds the requesting GROUP FOLDER, not a user id. This
-    // guard only excludes the degenerate case where the approver allowlist
-    // names a group-folder string. It is NOT user-level self-approval
-    // prevention — see the documented limitation below.
+  it('rejects a user-level self-approval even from an allow-listed approver', async () => {
+    // U_CAROL is the eligible approver that lets the row be held at all; the
+    // point of the test is that U_HUMAN cannot stand in for her.
     const { deps, rec } = makeDeps({
-      approvers: () => new Set(['g']),
+      approvers: () => new Set(['U_HUMAN', 'U_CAROL']),
     });
-    await seedGated(deps, 'g');
+    await seedGated(deps, ['U_HUMAN']);
+    rec.posted.length = 0;
+    await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval({ sender: 'U_HUMAN' }),
+      deps,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    // An approver whose reply looked valid must be told why it did not land,
+    // unlike the allowlist and bot/self rejects which stay silent.
+    expect(rec.posted).toHaveLength(1);
+    expect(rec.posted[0].text).toContain('on record as requesting it');
+  });
+
+  it('rejects a co-sender of the batch, not just the newest requester', async () => {
+    // The batch spanned two humans, so both drove the request and neither may
+    // authorize it — the case a single trigger-sender attribution would miss.
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_BOB', 'U_ALICE', 'U_CAROL']),
+    });
+    await seedGated(deps, ['U_BOB', 'U_ALICE']);
+    // U_BOB is not the newest sender, so a trigger-sender-only attribution would
+    // have cleared him to approve his own request.
+    await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval({ sender: 'U_BOB' }),
+      deps,
+    );
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+  });
+
+  it('lets a second allow-listed human approve a request they did not make', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_APPROVER']),
+    });
+    await seedGated(deps, ['U_HUMAN']);
+    await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval({ sender: 'U_APPROVER' }),
+      deps,
+    );
+    expect(rec.executed).toEqual([
+      { action: 'notion.write_property', target_ref: HEX32 },
+    ]);
+    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
+  });
+
+  it('reads a pre-#296 row bare group-folder requester as a single requester', async () => {
+    const { deps, rec } = makeDeps({ approvers: () => new Set(['g']) });
+    createPendingAction(pendingActionRow({ requester: 'g' }));
     await handleApprovalReply(
       'slack:C0AAA1111',
       approval({ sender: 'g' }),
@@ -475,28 +606,6 @@ describe('handleApprovalReply — fail-closed approver checks', () => {
     );
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)?.state).toBe('pending');
-  });
-
-  it('DOES NOT block a user-level self-approval — the guard is group-level only', async () => {
-    // The triggering Slack user id is not available at the org_action drain,
-    // so the persisted requester is the group folder ('g'), never the user.
-    // An approver who was also the (unknowable) triggering human is therefore
-    // NOT excluded by row.requester !== msg.sender. This test pins the TRUE
-    // property: user-level dual control is enforced by the approver allowlist
-    // membership, not by a requester-vs-approver comparison.
-    const { deps, rec } = makeDeps({
-      approvers: () => new Set(['U_HUMAN']),
-    });
-    await seedGated(deps, 'g');
-    await handleApprovalReply(
-      'slack:C0AAA1111',
-      approval({ sender: 'U_HUMAN' }),
-      deps,
-    );
-    expect(rec.executed).toEqual([
-      { action: 'notion.write_property', target_ref: HEX32 },
-    ]);
-    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
   });
 
   it('returns false (not an approval message) for ordinary text', async () => {
