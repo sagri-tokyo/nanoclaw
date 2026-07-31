@@ -229,10 +229,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
-      // Process tasks from this group's IPC directory. The file set comes from
-      // the same helper a launch pins against, so the two cannot disagree about
-      // which files are requests — a file drained but never pinned would answer
-      // whatever run is going, which is the sagri-ai#630 bug.
+      // Same helper a launch pins against, so the two cannot disagree about
+      // which files are requests (sagri-ai#630).
       try {
         for (const file of listUndrainedIpcRequests(sourceGroup)) {
           const filePath = path.join(tasksDir, file);
@@ -241,7 +239,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             // Pass source group identity to processTaskIpc for authorization
             await processTaskIpc(data, sourceGroup, isMain, deps, file);
             fs.unlinkSync(filePath);
-            // Deliberately not a finally: if the removal below throws, the file
+            // Deliberately not a finally: if the removal above throws, the file
             // is still on disk and its pin has to outlive this tick with it.
             clearRequestPin(sourceGroup, file);
           } catch (err) {

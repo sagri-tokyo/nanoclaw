@@ -97,10 +97,10 @@ interface LaunchScope {
   /** The agent resumes a session, so earlier runs' messages are still in context. */
   resumesSession: boolean;
   /**
-   * Request files the host has not drained yet, by name. Taken here rather than
-   * read from disk inside this module so the pin happens in the same statement
-   * that overwrites the slot: an ordering a caller could get backwards would
-   * silently pin the incoming run onto the outgoing run's requests.
+   * Request files the host has not drained yet, by name. Passed in rather than
+   * read off disk here so this module stays free of `fs` and its rules stay
+   * unit-testable in memory; `setRunRequesters` pins them before it touches the
+   * slot, so the ordering is not a caller's to get wrong.
    */
   undrainedRequests: string[];
 }
@@ -217,10 +217,10 @@ function currentSlot(groupFolder: string): string[] | undefined {
 
 /**
  * The requesters a drained request answers: its pin when it has one, the group's
- * live slot when it does not. `requestFile` is required rather than optional
- * because the group-wide read IS the sagri-ai#630 bug, and an optional parameter
- * would leave it one forgotten argument away. See the module docstring for what
- * a set, `[]`, and `undefined` each mean.
+ * live slot when it does not. `requestFile` is required, not optional, because
+ * the group-wide read IS the sagri-ai#630 bug and an optional parameter leaves it
+ * one forgotten argument away. See the module docstring for what a set, `[]`, and
+ * `undefined` each mean.
  */
 export function getRunRequesters(
   groupFolder: string,
@@ -236,18 +236,13 @@ export function getRunRequesters(
   return currentSlot(groupFolder);
 }
 
-/** @internal - for tests only. The group-wide read; see `getRunRequesters`. */
-export function _currentSlot(groupFolder: string): string[] | undefined {
-  return currentSlot(groupFolder);
-}
-
 /**
  * Drop one group's slot when its session goes away. A launch only replaces the
  * slot when it has senders of its own, so without this a group driven by
  * scheduled tasks alone would hold a dead session's requesters and refuse every
- * gated action. Snapshots survive: a request raised under the dead session is
- * still answering the humans who raised it, and the gate's own recovery path
- * drains it before asking for the drop.
+ * gated action. Pins survive: a request raised under the dead session is still
+ * answering the humans who raised it, and the gate's own recovery path drains it
+ * before asking for the drop.
  */
 export function clearRunRequestersForGroup(groupFolder: string): void {
   requestersByGroupFolder.delete(groupFolder);

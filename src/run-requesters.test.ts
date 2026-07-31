@@ -4,7 +4,6 @@ import { _clearSessionResets, takeSessionReset } from './session-reset.js';
 import {
   addRunRequesters,
   _clearAllRunRequesters,
-  _currentSlot,
   clearRequestPin,
   clearRunRequestersForGroup,
   getRunRequesters,
@@ -19,6 +18,16 @@ function pinning(files: string[], scope = FRESH) {
   return { ...scope, undrainedRequests: files };
 }
 
+/**
+ * The group's live slot, read the way production reads it: a request with no pin
+ * of its own falls through to the slot. Asserting through the real entry point
+ * keeps that fallthrough branch under test and the module free of a group-wide
+ * reader that a caller could reach for instead (sagri-ai#630).
+ */
+function slotOf(groupFolder: string): string[] | undefined {
+  return getRunRequesters(groupFolder, 'never-pinned.json');
+}
+
 beforeEach(() => {
   _clearAllRunRequesters();
   _clearSessionResets();
@@ -27,14 +36,14 @@ beforeEach(() => {
 describe('run requester attribution', () => {
   it('distinguishes an unrecorded group from a run with no human requester', () => {
     setRunRequesters('scheduled', [], FRESH);
-    expect(_currentSlot('scheduled')).toStrictEqual([]);
-    expect(_currentSlot('never-ran')).toBeUndefined();
+    expect(slotOf('scheduled')).toStrictEqual([]);
+    expect(slotOf('never-ran')).toBeUndefined();
   });
 
   it('replaces the previous attribution when the run resumes nothing', () => {
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', ['U_ALICE'], FRESH);
-    expect(_currentSlot('dev')).toStrictEqual(['U_ALICE']);
+    expect(slotOf('dev')).toStrictEqual(['U_ALICE']);
   });
 
   it('keeps the asker of a resumed instruction on record (sagri-ai#629)', () => {
@@ -44,7 +53,7 @@ describe('run requester attribution', () => {
     // leave Carol free to approve her own request.
     setRunRequesters('dev', ['U_CAROL'], FRESH);
     setRunRequesters('dev', ['U_DAVE'], RESUMED);
-    expect(_currentSlot('dev')).toStrictEqual(['U_CAROL', 'U_DAVE']);
+    expect(slotOf('dev')).toStrictEqual(['U_CAROL', 'U_DAVE']);
   });
 
   it('drops the resumed askers once the session is not resumed', () => {
@@ -54,20 +63,20 @@ describe('run requester attribution', () => {
     setRunRequesters('dev', ['U_CAROL'], FRESH);
     setRunRequesters('dev', ['U_DAVE'], RESUMED);
     setRunRequesters('dev', ['U_ERIN'], FRESH);
-    expect(_currentSlot('dev')).toStrictEqual(['U_ERIN']);
+    expect(slotOf('dev')).toStrictEqual(['U_ERIN']);
   });
 
   it('clears the attribution for a run whose context it cannot enumerate', () => {
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', undefined, FRESH);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
   });
 
   it('never lets an isolated task empty set survive into an unattributable run', () => {
     // `[]` excludes nobody, which is worse to inherit than a real set.
     setRunRequesters('dev', [], FRESH);
     setRunRequesters('dev', undefined, FRESH);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
   });
 
   it('asks for a session reset when it declines, so the next launch recovers', () => {
@@ -77,19 +86,19 @@ describe('run requester attribution', () => {
     // branch that would reset. The group refuses every gated action until the
     // process restarts.
     setRunRequesters('dev', ['U_BOB'], RESUMED);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
     expect(takeSessionReset('dev')).toBe(true);
 
     // With the session dropped, the next launch resumes nothing and claims it.
     setRunRequesters('dev', ['U_CAROL'], FRESH);
-    expect(_currentSlot('dev')).toStrictEqual(['U_CAROL']);
+    expect(slotOf('dev')).toStrictEqual(['U_CAROL']);
   });
 
   it('declines to attribute a resumed session with nothing on record', () => {
     // Post-restart with a session still in the DB: the agent resumes context the
     // host can no longer enumerate, so no approver can be cleared of it.
     setRunRequesters('dev', ['U_ALICE'], RESUMED);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
   });
 
   it('keeps an isolated task from trimming a live session to nobody', () => {
@@ -97,28 +106,28 @@ describe('run requester attribution', () => {
     // filled from. Replacing on its `[]` would clear U_BOB and let him approve.
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', [], FRESH);
-    expect(_currentSlot('dev')).toStrictEqual(['U_BOB']);
+    expect(slotOf('dev')).toStrictEqual(['U_BOB']);
   });
 
   it('adds the senders of a batch piped into a running container', () => {
     setRunRequesters('dev', ['U_BOB'], FRESH);
     addRunRequesters('dev', ['U_ALICE', 'U_BOB']);
-    expect(_currentSlot('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
+    expect(slotOf('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
   });
 
   it('does not invent an attribution for a group that has none', () => {
     addRunRequesters('never-ran', ['U_ALICE']);
-    expect(_currentSlot('never-ran')).toBeUndefined();
+    expect(slotOf('never-ran')).toBeUndefined();
   });
 
   it('drops the slot when the group session expires', () => {
     // See clearRunRequestersForGroup's docstring for why a dead slot has to go.
     setRunRequesters('dev', ['U_CAROL'], FRESH);
     clearRunRequestersForGroup('dev');
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
 
     setRunRequesters('dev', [], FRESH);
-    expect(_currentSlot('dev')).toStrictEqual([]);
+    expect(slotOf('dev')).toStrictEqual([]);
   });
 });
 
@@ -131,7 +140,7 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
     setRunRequesters('dev', ['U_ALICE'], pinning(['req-1.json']));
 
     expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
-    expect(_currentSlot('dev')).toStrictEqual(['U_ALICE']);
+    expect(slotOf('dev')).toStrictEqual(['U_ALICE']);
   });
 
   it('leaves an uninvolved approver eligible on an unrelated overlapping run', () => {
@@ -150,7 +159,7 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
     setRunRequesters('dev', undefined, pinning(['req-1.json']));
 
     expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
   });
 
   it('keeps the first pin, which is the launch closest to the writing run', () => {
@@ -167,7 +176,7 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
     setRunRequesters('dev', ['U_ALICE'], pinning(['req-stale.json']));
 
     expect(getRunRequesters('dev', 'req-stale.json')).toBeUndefined();
-    expect(_currentSlot('dev')).toStrictEqual(['U_ALICE']);
+    expect(slotOf('dev')).toStrictEqual(['U_ALICE']);
   });
 
   it('reads the live slot for a request written by the run now going', () => {
@@ -202,7 +211,7 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
     clearRunRequestersForGroup('dev');
 
     expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
-    expect(_currentSlot('dev')).toBeUndefined();
+    expect(slotOf('dev')).toBeUndefined();
   });
 
   it('hands out a copy, so a caller cannot rewrite the pin for every later read', () => {
