@@ -61,7 +61,7 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
+      sessionForNextRun: () => undefined,
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -278,7 +278,7 @@ describe('task scheduler', () => {
 
         startSchedulerLoop({
           registeredGroups: () => ({}),
-          getSessions: () => ({}),
+          sessionForNextRun: () => undefined,
           queue: { enqueueTask } as any,
           onProcess: () => {},
           sendMessage: async () => {},
@@ -559,7 +559,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -605,7 +605,7 @@ describe('runTask consecutive-failure suppression', () => {
         task,
         {
           registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-          getSessions: () => ({}),
+          sessionForNextRun: () => undefined,
           queue: {
             enqueueTask: () => {},
             closeStdin,
@@ -639,7 +639,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -675,7 +675,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -706,7 +706,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -745,7 +745,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -768,7 +768,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -794,7 +794,7 @@ describe('runTask consecutive-failure suppression', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -865,7 +865,7 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1012,7 +1012,7 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1168,7 +1168,7 @@ describe('structured reply mode', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1287,7 +1287,7 @@ describe('structured reply mode', () => {
       task,
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
-        getSessions: () => ({}),
+        sessionForNextRun: () => undefined,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1465,7 +1465,7 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
       getTaskById(base.id) as ScheduledTask,
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
-        getSessions: () => ({ slack_main: 'session-abc' }),
+        sessionForNextRun: () => 'session-abc',
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1482,19 +1482,65 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
     return captured;
   }
 
-  it('claims nobody asked for an isolated run, which runs on its own prompt', async () => {
+  // A task runs on its own prompt in every mode, so it contributes no requesters
+  // of its own. What a group-context run resumes is carried by `sessionId`, which
+  // makes run-requesters widen the group's slot rather than replace it with this
+  // `[]` (sagri-ai#629) — so the mode no longer changes the claim.
+  it('claims nobody asked, whatever the context mode', async () => {
     expect(await capturedRequesterIds('isolated')).toStrictEqual([]);
+    expect(await capturedRequesterIds('group')).toStrictEqual([]);
+    // context_mode is an unvalidated TEXT column; an unexpected value gets no
+    // session either, so it lands on the isolated behaviour.
+    expect(await capturedRequesterIds('something-else')).toStrictEqual([]);
   });
 
-  it('claims no knowledge for a group run, which resumes the humans session', async () => {
-    // `[]` here would tell the gate no approver could be the requester, while the
-    // resumed session still carries whatever a human asked for.
-    expect(await capturedRequesterIds('group')).toBeUndefined();
-  });
+  async function foldersAskedForNextRunSession(
+    contextMode: string,
+  ): Promise<string[]> {
+    const base = {
+      id: `session-read-${contextMode}`,
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do the thing.',
+      schedule_type: 'cron' as const,
+      schedule_value: '*/15 * * * *',
+      context_mode: contextMode as 'isolated' | 'group',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-07-24T00:00:00.000Z',
+    };
+    createTask(base);
+    const asked: string[] = [];
+    await _runTaskForTests(
+      getTaskById(base.id) as ScheduledTask,
+      {
+        registeredGroups: () => ({ 'C123@slack': group() }),
+        sessionForNextRun: (groupFolder) => {
+          asked.push(groupFolder);
+          return 'session-abc';
+        },
+        queue: {
+          enqueueTask: () => {},
+          closeStdin: () => {},
+          notifyIdle: () => {},
+        } as never,
+        onProcess: () => {},
+        sendMessage: async () => {},
+      },
+      async () => ({ status: 'success', result: 'done' }) as ContainerOutput,
+    );
+    return asked;
+  }
 
-  it('claims no knowledge for an unrecognized context_mode', async () => {
-    // context_mode is an unvalidated TEXT column; an unexpected value must not
-    // land on the permissive answer.
-    expect(await capturedRequesterIds('something-else')).toBeUndefined();
+  // `sessionForNextRun` consumes the group's pending org-action gate reset and
+  // drops the session (sagri-ai#629). An isolated run resumes nothing, so calling
+  // it there would spend a reset the group has not had its next run for yet.
+  it('does not reach for a session on a run that resumes none', async () => {
+    expect(await foldersAskedForNextRunSession('isolated')).toStrictEqual([]);
+    expect(await foldersAskedForNextRunSession('group')).toStrictEqual([
+      'slack_main',
+    ]);
   });
 });

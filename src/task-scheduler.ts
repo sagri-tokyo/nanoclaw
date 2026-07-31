@@ -267,7 +267,10 @@ export function shouldPostFailure(
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
+  // Resolves the session a group-context run should resume, and drops it first
+  // if the org-action gate asked for a reset. It WRITES; only call it for a run
+  // that is actually about to resume a session, never to peek.
+  sessionForNextRun: (groupFolder: string) => string | undefined;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -393,10 +396,14 @@ async function runTask(
   let error: string | null = null;
   let errorClass: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
+  // For group context mode, use the group's current session. Kept inside the
+  // ternary deliberately: an isolated task resumes nothing, and hoisting this
+  // would have every isolated tick eat the group's pending gate reset and drop a
+  // session it never touched.
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+    task.context_mode === 'group'
+      ? deps.sessionForNextRun(task.group_folder)
+      : undefined;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -426,13 +433,11 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
         capabilityProfile: task.capability_profile ?? 'operator',
-        // `isolated` runs on its own prompt: nobody asked. Any other mode resumes
-        // the shared session and cannot say which human's message the agent acts
-        // on, so it claims `undefined`, not `[]` (see run-requesters.ts). Tested
-        // for `isolated` rather than against `group` because context_mode is an
-        // unvalidated TEXT column, and an unexpected value must not land on the
-        // permissive answer.
-        requesterIds: task.context_mode === 'isolated' ? [] : undefined,
+        // A task contributes no requesters of its own: nobody asked, it runs on
+        // its own prompt. `[]` is honest in both modes because `sessionId` above
+        // makes run-requesters widen the group's slot rather than replace it, so
+        // the session-scoped humans stay excluded (sagri-ai#629).
+        requesterIds: [],
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
