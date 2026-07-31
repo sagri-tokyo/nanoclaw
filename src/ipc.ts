@@ -15,9 +15,10 @@ import {
 } from './db.js';
 import {
   isValidGroupFolder,
+  listUndrainedIpcRequests,
   resolveGroupIpcTasksPath,
 } from './group-folder.js';
-import { clearRequestSnapshot } from './run-requesters.js';
+import { clearRequestPin } from './run-requesters.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -228,35 +229,33 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
-      // Process tasks from this group's IPC directory
+      // Process tasks from this group's IPC directory. The file set comes from
+      // the same helper a launch pins against, so the two cannot disagree about
+      // which files are requests — a file drained but never pinned would answer
+      // whatever run is going, which is the sagri-ai#630 bug.
       try {
-        if (fs.existsSync(tasksDir)) {
-          const taskFiles = fs
-            .readdirSync(tasksDir)
-            .filter((f) => f.endsWith('.json'));
-          for (const file of taskFiles) {
-            const filePath = path.join(tasksDir, file);
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps, file);
-              fs.unlinkSync(filePath);
-              // Only once the file is gone: while it is still there, its pin is
-              // the only record of who its run was answering (sagri-ai#630).
-              clearRequestSnapshot(sourceGroup, file);
-            } catch (err) {
-              logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC task',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
-              clearRequestSnapshot(sourceGroup, file);
-            }
+        for (const file of listUndrainedIpcRequests(sourceGroup)) {
+          const filePath = path.join(tasksDir, file);
+          try {
+            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            // Pass source group identity to processTaskIpc for authorization
+            await processTaskIpc(data, sourceGroup, isMain, deps, file);
+            fs.unlinkSync(filePath);
+            // Deliberately not a finally: if the removal below throws, the file
+            // is still on disk and its pin has to outlive this tick with it.
+            clearRequestPin(sourceGroup, file);
+          } catch (err) {
+            logger.error(
+              { file, sourceGroup, err },
+              'Error processing IPC task',
+            );
+            const errorDir = path.join(ipcBaseDir, 'errors');
+            fs.mkdirSync(errorDir, { recursive: true });
+            fs.renameSync(
+              filePath,
+              path.join(errorDir, `${sourceGroup}-${file}`),
+            );
+            clearRequestPin(sourceGroup, file);
           }
         }
       } catch (err) {

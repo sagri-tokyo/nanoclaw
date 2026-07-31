@@ -916,11 +916,13 @@ describe('a gated action raised from resumed context (sagri-ai#629)', () => {
   function raiseFromResumedContext(): string[] | undefined {
     setRunRequesters('g', ['U_CAROL'], {
       resumesSession: false,
+      undrainedRequests: [],
     });
     setRunRequesters('g', ['U_DAVE'], {
       resumesSession: true,
+      undrainedRequests: [],
     });
-    return getRunRequesters('g');
+    return getRunRequesters('g', 'req.json');
   }
 
   it('excludes the asker of the earlier run from approving', async () => {

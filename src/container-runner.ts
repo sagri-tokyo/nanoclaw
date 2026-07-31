@@ -47,7 +47,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
-import { setRunRequesters, snapshotPendingRequests } from './run-requesters.js';
+import { setRunRequesters } from './run-requesters.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
 import { CapabilityProfile, RegisteredGroup } from './types.js';
@@ -800,17 +800,14 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  // Pin whatever the last run left undrained before overwriting the slot, or
-  // those requests answer this run's senders instead of the ones who raised them
-  // (sagri-ai#630). Must precede setRunRequesters.
-  snapshotPendingRequests(group.folder, listUndrainedIpcRequests(group.folder));
-
   // Attribute this run before the container can emit an org_action
   // (sagri-ai#296); setRunRequesters owns the widen-vs-replace rule. A resumed
   // session means the agent still holds earlier runs' messages, so this run
-  // cannot speak for the whole slot (sagri-ai#629).
+  // cannot speak for the whole slot (sagri-ai#629), and whatever the last run
+  // left undrained is pinned to the outgoing slot first (sagri-ai#630).
   setRunRequesters(group.folder, input.requesterIds, {
     resumesSession: input.sessionId !== undefined,
+    undrainedRequests: listUndrainedIpcRequests(group.folder),
   });
 
   const groupDir = resolveGroupFolderPath(group.folder);

@@ -28,6 +28,7 @@ let orgActionCalls: {
   record: OrgActionRecordArg;
   sourceGroup: string;
   chatJid: string;
+  requestFile: string;
 }[];
 let deps: IpcDeps;
 
@@ -44,11 +45,12 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
-    onOrgAction: async (record, sourceGroup, chatJid) => {
+    onOrgAction: async (record, sourceGroup, chatJid, requestFile) => {
       orgActionCalls.push({
         record: record as OrgActionRecordArg,
         sourceGroup,
         chatJid,
+        requestFile,
       });
     },
   };
@@ -83,6 +85,10 @@ describe('org_action IPC drain', () => {
         },
         sourceGroup: 'slack_sagri-ai-dev',
         chatJid: 'slack:C0AAA1111',
+        // The name the host pinned this request's requesters under; without it
+        // reaching the handler the gate falls back to the group slot
+        // (sagri-ai#630).
+        requestFile: 'req.json',
       },
     ]);
   });

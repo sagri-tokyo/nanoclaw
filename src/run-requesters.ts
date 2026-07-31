@@ -23,18 +23,16 @@
  * mean something different from what the pending request needs.
  *
  * So a launch pins them apart (sagri-ai#630). Before it touches the slot it
- * SNAPSHOTS every request file already sitting in the group's IPC directory
- * against the slot as it stands, and the drain reads a request's snapshot in
- * preference to the slot. A request raised under run A therefore keeps A's
- * requesters however many runs start before it drains, and run B is free to
- * claim the slot for itself. First snapshot wins: the earliest launch after the
- * file appeared is the one that still holds the writing run's attribution.
+ * pins every request file already sitting in the group's IPC directory to the
+ * slot as it stands, and the drain reads a request's pin in preference to the
+ * slot. A request raised under run A therefore keeps A's requesters however many
+ * runs start before it drains, and run B is free to claim the slot for itself.
  *
- * A snapshot records `undefined` too, and that case is the one carrying weight.
- * After a restart the slot is empty, so a request file that outlived the process
- * snapshots as `undefined` and refuses, instead of being handed the senders of
- * whichever run happens to start next — who did not ask for it, and one of whom
- * could otherwise approve their own request.
+ * A pin records `undefined` too, and that case is the one carrying weight. After
+ * a restart the slot is empty, so a request file that outlived the process pins
+ * as `undefined` and refuses, instead of being handed the senders of whichever
+ * run happens to start next — who did not ask for it, and one of whom could
+ * otherwise approve their own request.
  *
  * Not fixed here: an isolated scheduled task shares the group folder but not the
  * session, and a request IT writes still reads the live interactive slot. That
@@ -94,29 +92,25 @@ function requestKey(groupFolder: string, requestFile: string): string {
   return `${groupFolder}/${requestFile}`;
 }
 
-/** What a launch can still be acting on beyond its own batch. */
+/** What a launch is carrying that its own message batch does not account for. */
 interface LaunchScope {
   /** The agent resumes a session, so earlier runs' messages are still in context. */
   resumesSession: boolean;
+  /**
+   * Request files the host has not drained yet, by name. Taken here rather than
+   * read from disk inside this module so the pin happens in the same statement
+   * that overwrites the slot: an ordering a caller could get backwards would
+   * silently pin the incoming run onto the outgoing run's requests.
+   */
+  undrainedRequests: string[];
 }
 
-/**
- * Pin the current slot to each request file the host has not drained yet, so the
- * launch that follows can claim the slot without rewriting what those requests
- * were raised under (sagri-ai#630). Call this BEFORE `setRunRequesters`, or the
- * snapshot records the incoming run rather than the one that wrote the file.
- *
- * First snapshot wins: a file that already carries one was pinned by an earlier
- * launch, which was closer to the run that wrote it.
- */
-export function snapshotPendingRequests(
-  groupFolder: string,
-  requestFiles: string[],
-): void {
+/** First pin wins: an earlier launch was closer to the run that wrote the file. */
+function pinPendingRequests(groupFolder: string, requestFiles: string[]): void {
   for (const file of requestFiles) {
     const key = requestKey(groupFolder, file);
     if (requestersByRequestFile.has(key)) continue;
-    requestersByRequestFile.set(key, getRunRequesters(groupFolder));
+    requestersByRequestFile.set(key, currentSlot(groupFolder));
   }
 }
 
@@ -125,7 +119,7 @@ export function snapshotPendingRequests(
  * Nothing else may call this: while the file is still there, the pin is the only
  * record of who its run was answering.
  */
-export function clearRequestSnapshot(
+export function clearRequestPin(
   groupFolder: string,
   requestFile: string,
 ): void {
@@ -133,18 +127,21 @@ export function clearRequestSnapshot(
 }
 
 /**
- * Record the requesters of a run being launched. A run that resumes a session
- * may only widen the slot; an `undefined` clears it. See the module docstring.
+ * Record the requesters of a run being launched, pinning whatever it found
+ * undrained first (sagri-ai#630). A run that resumes a session may only widen
+ * the slot; an `undefined` clears it. See the module docstring.
  */
 export function setRunRequesters(
   groupFolder: string,
   requesterIds: string[] | undefined,
-  { resumesSession }: LaunchScope,
+  { resumesSession, undrainedRequests }: LaunchScope,
 ): void {
+  pinPendingRequests(groupFolder, undrainedRequests);
+
   if (requesterIds === undefined) {
-    // Undrained requests are unaffected: they were snapshotted before this call,
-    // so they keep the set they were raised under rather than paying for a run
-    // that cannot enumerate its own context.
+    // Undrained requests are unaffected: they were pinned above, so they keep
+    // the set they were raised under rather than paying for a run that cannot
+    // enumerate its own context.
     requestersByGroupFolder.delete(groupFolder);
     logger.warn(
       { groupFolder },
@@ -213,25 +210,35 @@ export function addRunRequesters(
   for (const id of requesterIds) existing.add(id);
 }
 
+function currentSlot(groupFolder: string): string[] | undefined {
+  const ids = requestersByGroupFolder.get(groupFolder);
+  return ids ? [...ids] : undefined;
+}
+
 /**
- * The requesters a drained request answers. Pass the request's file name and it
- * resolves to that file's snapshot when one exists, so a run that started after
- * the file was written cannot rewrite the answer. Omit it, and it reads the live
- * slot, which is what a caller asking about the group rather than one request
- * wants. See the module docstring for what a set, `[]`, and `undefined` mean.
+ * The requesters a drained request answers: its pin when it has one, the group's
+ * live slot when it does not. `requestFile` is required rather than optional
+ * because the group-wide read IS the sagri-ai#630 bug, and an optional parameter
+ * would leave it one forgotten argument away. See the module docstring for what
+ * a set, `[]`, and `undefined` each mean.
  */
 export function getRunRequesters(
   groupFolder: string,
-  requestFile?: string,
+  requestFile: string,
 ): string[] | undefined {
-  if (requestFile !== undefined) {
-    const key = requestKey(groupFolder, requestFile);
-    if (requestersByRequestFile.has(key)) {
-      return requestersByRequestFile.get(key);
-    }
+  const key = requestKey(groupFolder, requestFile);
+  if (requestersByRequestFile.has(key)) {
+    // Copied, like the slot read below: a caller that mutated what it got back
+    // would rewrite the pin for every later read of the same request.
+    const pinned = requestersByRequestFile.get(key);
+    return pinned ? [...pinned] : undefined;
   }
-  const ids = requestersByGroupFolder.get(groupFolder);
-  return ids ? [...ids] : undefined;
+  return currentSlot(groupFolder);
+}
+
+/** @internal - for tests only. The group-wide read; see `getRunRequesters`. */
+export function _currentSlot(groupFolder: string): string[] | undefined {
+  return currentSlot(groupFolder);
 }
 
 /**

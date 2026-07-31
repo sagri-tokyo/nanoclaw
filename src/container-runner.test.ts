@@ -181,6 +181,7 @@ import {
 import { UNATTRIBUTED_ENDUSER_ID } from './telemetry.js';
 import {
   _clearAllRunRequesters,
+  _currentSlot,
   getRunRequesters,
   setRunRequesters,
 } from './run-requesters.js';
@@ -1611,7 +1612,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
       { ...testInput, requesterIds, sessionId },
       () => {},
     ).catch(() => {});
-    return getRunRequesters(testGroup.folder);
+    return _currentSlot(testGroup.folder);
   }
 
   it('records the run senders so the gate can exclude them', () => {
@@ -1640,6 +1641,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   it('widens the attribution when the run resumes a session', () => {
     setRunRequesters(testGroup.folder, ['U_CAROL'], {
       resumesSession: false,
+      undrainedRequests: [],
     });
     expect(launchWith(['U_DAVE'], 'session-abc')).toStrictEqual([
       'U_CAROL',
@@ -1650,6 +1652,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   it('replaces it when the run resumes no session', () => {
     setRunRequesters(testGroup.folder, ['U_CAROL'], {
       resumesSession: false,
+      undrainedRequests: [],
     });
     expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
   });
@@ -1669,6 +1672,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
 
     setRunRequesters(testGroup.folder, ['U_CAROL'], {
       resumesSession: false,
+      undrainedRequests: [],
     });
     expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
     expect(getRunRequesters(testGroup.folder, 'carol-req.json')).toStrictEqual([
