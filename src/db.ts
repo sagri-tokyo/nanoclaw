@@ -973,15 +973,14 @@ export function deleteSession(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
-export function getAllSessions(): Record<string, string> {
-  const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
-  for (const row of rows) {
-    result[row.group_folder] = row.session_id;
-  }
-  return result;
+/**
+ * Forget every session, called once at boot (sagri-ai#629). Requester
+ * attribution lives in memory, so a session that outlives the process has none
+ * behind it, and a run resuming one could not be attributed to anybody. The
+ * alternative is a group that refuses every gated action until someone notices.
+ */
+export function deleteAllSessions(): number {
+  return db.prepare('DELETE FROM sessions').run().changes;
 }
 
 // --- Registered group accessors ---

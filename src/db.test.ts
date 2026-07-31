@@ -15,6 +15,9 @@ import {
   getTaskById,
   logTaskRun,
   setRegisteredGroup,
+  setSession,
+  getSession,
+  deleteAllSessions,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -1159,5 +1162,17 @@ describe('task outcome dedupe store', () => {
     recordTaskOutcome(outcome());
     deleteTask('dsm-experiment-submitter');
     expect(recordTaskOutcome(outcome())).toBe(true);
+  });
+});
+
+describe('deleteAllSessions (sagri-ai#629)', () => {
+  it('forgets every group, so a restart resumes nothing it cannot attribute', () => {
+    setSession('dev', 'session-abc');
+    setSession('ops', 'session-xyz');
+
+    deleteAllSessions();
+
+    expect(getSession('dev')).toBeUndefined();
+    expect(getSession('ops')).toBeUndefined();
   });
 });

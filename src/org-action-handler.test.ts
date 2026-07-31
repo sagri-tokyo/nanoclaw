@@ -13,6 +13,11 @@ import {
   type OrgActionGateDeps,
 } from './org-action-handler.js';
 import type { NotionTargetResolution } from './org-action-clients.js';
+import {
+  _clearAllRunRequesters,
+  getRunRequesters,
+  setRunRequesters,
+} from './run-requesters.js';
 import type { NewMessage, PendingActionRow } from './types.js';
 
 const HEX32 = 'a'.repeat(32);
@@ -27,13 +32,19 @@ interface Recorder {
   executed: { action: string; target_ref: string }[];
   posted: { jid: string; text: string }[];
   resolveQueries: string[];
+  droppedSessions: string[];
 }
 
 function makeDeps(overrides: Partial<OrgActionGateDeps> = {}): {
   deps: OrgActionGateDeps;
   rec: Recorder;
 } {
-  const rec: Recorder = { executed: [], posted: [], resolveQueries: [] };
+  const rec: Recorder = {
+    executed: [],
+    posted: [],
+    resolveQueries: [],
+    droppedSessions: [],
+  };
   const deps: OrgActionGateDeps = {
     approvers: () => new Set(['U_APPROVER']),
     sendMessage: async (jid, text) => {
@@ -48,6 +59,9 @@ function makeDeps(overrides: Partial<OrgActionGateDeps> = {}): {
     resolveNotionTarget: async (query): Promise<NotionTargetResolution> => {
       rec.resolveQueries.push(query);
       return { kind: 'unresolved', reason: 'no_match' };
+    },
+    requestSessionReset: (groupFolder) => {
+      rec.droppedSessions.push(groupFolder);
     },
     now: () => '2026-06-22T00:00:00.000Z',
     ttlMs: 24 * 60 * 60 * 1000,
@@ -181,7 +195,7 @@ describe('driveOrgActionRequest — safe vs gated', () => {
     expect(rec.executed).toHaveLength(0);
     expect(getPendingAction(TOKEN)).toBeUndefined();
     expect(rec.posted).toHaveLength(1);
-    expect(rec.posted[0].text).toContain('took part in the request');
+    expect(rec.posted[0].text).toContain('took part in the conversation');
   });
 
   it('names the empty approver list as the cause when that is why nobody is eligible', async () => {
@@ -889,5 +903,103 @@ describe('handleApprovalReply — failed execution does not silently drop', () =
         text: `Cannot approve ${TOKEN}: already resolved, denied, or expired.`,
       },
     ]);
+  });
+});
+
+describe('a gated action raised from resumed context (sagri-ai#629)', () => {
+  // Same resumed-session bypass as run-requesters.test.ts, exercised end to end
+  // through the approval gate.
+  beforeEach(() => {
+    _clearAllRunRequesters();
+  });
+
+  function raiseFromResumedContext(): string[] | undefined {
+    setRunRequesters('g', ['U_CAROL'], {
+      hasUndrainedRequests: false,
+      resumesSession: false,
+    });
+    setRunRequesters('g', ['U_DAVE'], {
+      hasUndrainedRequests: false,
+      resumesSession: true,
+    });
+    return getRunRequesters('g');
+  }
+
+  it('excludes the asker of the earlier run from approving', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_CAROL', 'U_APPROVER']),
+    });
+    await seedGated(deps, raiseFromResumedContext());
+    expect(getPendingAction(TOKEN)?.requester).toBe('["U_CAROL","U_DAVE"]');
+
+    const handled = await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval({ sender: 'U_CAROL' }),
+      deps,
+    );
+
+    expect(handled).toBe(true);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+  });
+
+  it('still lets an approver outside the conversation authorize it', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_CAROL', 'U_APPROVER']),
+    });
+    await seedGated(deps, raiseFromResumedContext());
+
+    await handleApprovalReply('slack:C0AAA1111', approval(), deps);
+
+    expect(rec.executed).toEqual([
+      { action: 'notion.write_property', target_ref: HEX32 },
+    ]);
+    expect(getPendingAction(TOKEN)?.approved_by).toBe('U_APPROVER');
+  });
+});
+
+describe('the jam reset (sagri-ai#629)', () => {
+  // The requester set spans the session, so in a busy channel it eventually
+  // names every approver and no reply can authorize anything. Resetting here
+  // rather than on a timer or a proactive coverage check means the conversation
+  // is only lost when the gate has actually stopped working.
+  beforeEach(() => {
+    _clearAllRunRequesters();
+  });
+
+  it('drops the session so the same request goes through on a re-send', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_CAROL', 'U_DAVE']),
+    });
+
+    await seedGated(deps, ['U_CAROL', 'U_DAVE']);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)).toBeUndefined();
+    expect(rec.droppedSessions).toStrictEqual(['g']);
+    expect(rec.posted[0]?.text).toContain('send it again');
+  });
+
+  it('leaves the session alone when the allowlist is empty', async () => {
+    // A missing or malformed allowlist is a host misconfiguration, not a jam.
+    // Resetting on it would forget the conversation on every gated action while
+    // never making one approvable.
+    const { deps, rec } = makeDeps({ approvers: () => new Set() });
+
+    await seedGated(deps, ['U_CAROL']);
+
+    expect(rec.droppedSessions).toStrictEqual([]);
+    expect(rec.posted[0]?.text).toContain('Check approver-allowlist.json');
+  });
+
+  it('leaves the session alone while an approver is still eligible', async () => {
+    const { deps, rec } = makeDeps({
+      approvers: () => new Set(['U_CAROL', 'U_APPROVER']),
+    });
+
+    await seedGated(deps, ['U_CAROL']);
+
+    expect(rec.droppedSessions).toStrictEqual([]);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
   });
 });

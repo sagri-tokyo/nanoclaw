@@ -801,12 +801,13 @@ export async function runContainerAgent(
   const startTime = Date.now();
 
   // Attribute this run before the container can emit an org_action
-  // (sagri-ai#296); setRunRequesters owns the union rule.
-  setRunRequesters(
-    group.folder,
-    input.requesterIds,
-    hasUndrainedIpcRequests(group.folder),
-  );
+  // (sagri-ai#296); setRunRequesters owns the widen-vs-replace rule. A resumed
+  // session means the agent still holds earlier runs' messages, so this run
+  // cannot speak for the whole slot (sagri-ai#629).
+  setRunRequesters(group.folder, input.requesterIds, {
+    hasUndrainedRequests: hasUndrainedIpcRequests(group.folder),
+    resumesSession: input.sessionId !== undefined,
+  });
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
