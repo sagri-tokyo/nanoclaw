@@ -68,6 +68,7 @@
  */
 
 import { logger } from './logger.js';
+import { requestSessionReset } from './session-reset.js';
 
 const requestersByGroupFolder = new Map<string, Set<string>>();
 
@@ -115,6 +116,13 @@ export function setRunRequesters(
       // attribution we hold (a restart). Naming this run's senders would blame
       // them for a request they never made, and clear whoever did make it to
       // approve it.
+      //
+      // Ask for the session to be dropped, or this is permanent: the run still
+      // writes its session id back, so every later launch resumes and lands
+      // here again, `addRunRequesters` refuses to create a slot, and the gate's
+      // unattributed refusal returns before the branch that would reset. The
+      // next launch resumes nothing instead, so it can claim the slot.
+      requestSessionReset(groupFolder);
       logger.warn(
         {
           groupFolder,

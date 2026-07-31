@@ -979,8 +979,8 @@ export function deleteSession(groupFolder: string): void {
  * behind it, and a run resuming one could not be attributed to anybody. The
  * alternative is a group that refuses every gated action until someone notices.
  */
-export function deleteAllSessions(): void {
-  db.prepare('DELETE FROM sessions').run();
+export function deleteAllSessions(): number {
+  return db.prepare('DELETE FROM sessions').run().changes;
 }
 
 export function getAllSessions(): Record<string, string> {

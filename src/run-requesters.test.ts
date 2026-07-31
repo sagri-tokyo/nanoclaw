@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
+  _clearSessionResets,
+  takeSessionReset,
+} from './session-reset.js';
+import {
   addRunRequesters,
   _clearAllRunRequesters,
   clearRunRequestersForGroup,
@@ -17,6 +21,7 @@ const BOTH = { hasUndrainedRequests: true, resumesSession: true };
 
 beforeEach(() => {
   _clearAllRunRequesters();
+  _clearSessionResets();
 });
 
 describe('run requester attribution', () => {
@@ -90,6 +95,21 @@ describe('run requester attribution', () => {
     // real requester to approve it.
     setRunRequesters('dev', ['U_ALICE'], UNDRAINED);
     expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
+  it('asks for a session reset when it declines, so the next launch recovers', () => {
+    // Otherwise this is permanent: the run still writes its session id back, so
+    // every later launch resumes and declines again, addRunRequesters refuses to
+    // create a slot, and the gate's unattributed refusal returns before the
+    // branch that would reset. The group refuses every gated action until the
+    // process restarts.
+    setRunRequesters('dev', ['U_BOB'], UNDRAINED);
+    expect(getRunRequesters('dev')).toBeUndefined();
+    expect(takeSessionReset('dev')).toBe(true);
+
+    // With the session dropped, the next launch resumes nothing and claims it.
+    setRunRequesters('dev', ['U_CAROL'], FRESH);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_CAROL']);
   });
 
   it('declines to attribute a resumed session with nothing on record', () => {

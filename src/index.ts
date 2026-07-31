@@ -40,7 +40,6 @@ import {
   getAllChats,
   botRepliedInThread,
   getAllRegisteredGroups,
-  getAllSessions,
   deleteSession,
   deleteAllSessions,
   getAllTasks,
@@ -151,9 +150,8 @@ function loadState(): void {
   // Sessions do not survive the process, because their requester attribution
   // does not (sagri-ai#629). Resuming one the host can no longer attribute would
   // refuse every gated action in that group with no way back.
-  const carriedOver = Object.keys(getAllSessions()).length;
+  const carriedOver = deleteAllSessions();
   if (carriedOver > 0) {
-    deleteAllSessions();
     logger.info(
       { groupCount: carriedOver },
       'Dropped sessions carried across a restart — attribution does not survive the process',
