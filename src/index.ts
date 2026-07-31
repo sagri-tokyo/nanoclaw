@@ -148,8 +148,11 @@ function loadState(): void {
     lastAgentTimestamp = {};
   }
   // Sessions do not survive the process, because their requester attribution
-  // does not (sagri-ai#629). Resuming one the host can no longer attribute would
-  // refuse every gated action in that group with no way back.
+  // does not (sagri-ai#629). A restored session's first resumed launch would
+  // self-heal on its own (run-requesters.ts asks for a reset when it cannot
+  // attribute a resumed session) — but that costs one unattributed, refused
+  // run per group on every restart before it recovers. Wiping here trades
+  // conversation continuity across restarts for skipping that run.
   const carriedOver = deleteAllSessions();
   if (carriedOver > 0) {
     logger.info(

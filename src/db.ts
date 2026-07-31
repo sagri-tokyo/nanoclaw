@@ -958,6 +958,18 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
+/**
+ * @internal - for tests only. Underscored to match _initTestDatabase: it hands
+ * back a session id in the shape the in-memory map holds, so an unmarked export
+ * is one assignment in loadState away from undoing sagri-ai#629.
+ */
+export function _getSession(groupFolder: string): string | undefined {
+  const row = db
+    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
+    .get(groupFolder) as { session_id: string } | undefined;
+  return row?.session_id;
+}
+
 export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
@@ -976,22 +988,6 @@ export function deleteSession(groupFolder: string): void {
  */
 export function deleteAllSessions(): number {
   return db.prepare('DELETE FROM sessions').run().changes;
-}
-
-/**
- * @internal - for tests only. Underscored to match _initTestDatabase: it returns
- * the same shape as the in-memory session map, so an unmarked export is an
- * invitation to assign it in loadState and undo sagri-ai#629.
- */
-export function _getAllSessions(): Record<string, string> {
-  const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
-  for (const row of rows) {
-    result[row.group_folder] = row.session_id;
-  }
-  return result;
 }
 
 // --- Registered group accessors ---
