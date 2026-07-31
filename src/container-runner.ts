@@ -122,6 +122,16 @@ export type ContainerOutput =
       error_class?: string;
     };
 
+// A resumed session whose .jsonl is missing or truncated (crash mid-write,
+// manual deletion, disk-full) fails this way on every attempt, so the caller
+// must drop the session id rather than retry it.
+const STALE_SESSION_ERROR =
+  /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
+
+export function isStaleSessionError(error: string): boolean {
+  return STALE_SESSION_ERROR.test(error);
+}
+
 // Error-class produced by the agent-runner's 529 retry-budget exit (sagri-ai#245).
 // When the host sees this class, the user-facing `error` text is rewritten by
 // `mapContainerOutputForUser` so Slack does not see the raw SDK overload blob.

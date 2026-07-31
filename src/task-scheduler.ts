@@ -22,6 +22,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { GroupNotFoundError, resolveGroupFolderPath } from './group-folder.js';
 import { hashFailureOutput, hashPayload, logger } from './logger.js';
+import { createSessionTracker, SessionStore } from './session-tracker.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -268,6 +269,7 @@ export function shouldPostFailure(
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  sessionStore: SessionStore;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -395,8 +397,19 @@ async function runTask(
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  const isGroupContext = task.context_mode === 'group';
+  const sessionId = isGroupContext ? sessions[task.group_folder] : undefined;
+
+  // A group-context run must keep the session it established, or the next run
+  // starts a fresh one and orphans the transcript this one wrote. Dropping a
+  // stale one matters just as much: a cron-only group has no human message to
+  // heal it. Isolated runs share no session with the group, so they track
+  // nothing.
+  const track = isGroupContext
+    ? createSessionTracker(task.group_folder, sessionId, deps.sessionStore, {
+        taskId: task.id,
+      })
+    : () => {};
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -430,6 +443,7 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        track(streamedOutput);
         const wrap = (text: string) =>
           formatErrorWrap(text, {
             runId: task.id,
@@ -492,6 +506,10 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
+    // Streaming mode reports the same id it already streamed, so this mostly
+    // repeats a write. It is not redundant: a run that dies before streaming
+    // anything reports only here.
+    track(output);
 
     if (output.status === 'error') {
       error = output.error;

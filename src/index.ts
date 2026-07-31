@@ -83,6 +83,7 @@ import {
   type OrgActionGateDeps,
 } from './org-action-handler.js';
 import { startSessionCleanup } from './session-cleanup.js';
+import { createSessionTracker, SessionStore } from './session-tracker.js';
 import { formatErrorWrap, startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { hashPayload, logger } from './logger.js';
@@ -637,6 +638,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 }
 
+/**
+ * The in-memory map and the DB row must move together: the map is what the
+ * next run resumes from, the row is what survives a restart.
+ */
+const sessionStore: SessionStore = {
+  remember: (groupFolder, sessionId) => {
+    sessions[groupFolder] = sessionId;
+    setSession(groupFolder, sessionId);
+  },
+  forget: (groupFolder) => {
+    delete sessions[groupFolder];
+    deleteSession(groupFolder);
+  },
+};
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -673,13 +689,13 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
+  const track = createSessionTracker(group.folder, sessionId, sessionStore, {
+    groupName: group.name,
+  });
+
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
+        track(output);
         await onOutput(output);
       }
     : undefined;
@@ -705,32 +721,9 @@ async function runAgent(
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
+    track(output);
 
     if (output.status === 'error') {
-      // Detect stale/corrupt session — clear it so the next retry starts fresh.
-      // The session .jsonl can go missing after a crash mid-write, manual
-      // deletion, or disk-full. The existing backoff in group-queue.ts
-      // handles the retry; we just need to remove the broken session ID.
-      const isStaleSession =
-        sessionId &&
-        output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
-          output.error,
-        );
-
-      if (isStaleSession) {
-        logger.warn(
-          { group: group.name, staleSessionId: sessionId, error: output.error },
-          'Stale session detected — clearing for next retry',
-        );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
-      }
-
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
@@ -1114,6 +1107,7 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    sessionStore,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
