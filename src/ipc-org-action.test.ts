@@ -69,6 +69,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toEqual([
       {
@@ -100,6 +101,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(1);
     expect(orgActionCalls[0].record.target_query).toBe('Soil Model Task');
@@ -119,6 +121,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -136,6 +139,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(1);
     expect(orgActionCalls[0].record.citation_refs).toEqual([]);
@@ -155,6 +159,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -165,6 +170,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -182,6 +188,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -199,6 +206,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -218,6 +226,7 @@ describe('org_action IPC drain', () => {
         'slack_sagri-ai-dev',
         false,
         deps,
+        'req.json',
       );
       expect(orgActionCalls).toHaveLength(0);
     }
@@ -236,6 +245,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       noHandler,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });

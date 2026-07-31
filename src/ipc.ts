@@ -17,6 +17,7 @@ import {
   isValidGroupFolder,
   resolveGroupIpcTasksPath,
 } from './group-folder.js';
+import { clearRequestSnapshot } from './run-requesters.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -100,6 +101,10 @@ export interface IpcDeps {
    * executes (safe), holds (gated, posts a Slack approval prompt), or refuses
    * (red line / allowlist). Optional so non-Sagri deployments need not wire it;
    * an `org_action` request with no handler is rejected.
+   *
+   * `requestFile` is the name of the file this record was read from, which is
+   * how the host looks up the requesters it pinned to that request rather than
+   * to the group (sagri-ai#630).
    */
   onOrgAction?: (
     record: {
@@ -113,6 +118,7 @@ export interface IpcDeps {
     },
     sourceGroup: string,
     chatJid: string,
+    requestFile: string,
   ) => Promise<void>;
   /**
    * Optional override for the action-record sink. Defaults to
@@ -233,8 +239,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
+              await processTaskIpc(data, sourceGroup, isMain, deps, file);
               fs.unlinkSync(filePath);
+              // Only once the file is gone: while it is still there, its pin is
+              // the only record of who its run was answering (sagri-ai#630).
+              clearRequestSnapshot(sourceGroup, file);
             } catch (err) {
               logger.error(
                 { file, sourceGroup, err },
@@ -246,6 +255,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 filePath,
                 path.join(errorDir, `${sourceGroup}-${file}`),
               );
+              clearRequestSnapshot(sourceGroup, file);
             }
           }
         }
@@ -298,6 +308,7 @@ export async function processTaskIpc(
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
+  requestFile: string, // The file this request was read from (sagri-ai#630)
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
 
@@ -829,6 +840,7 @@ export async function processTaskIpc(
         },
         sourceGroup,
         chatJid,
+        requestFile,
       );
       emitIpcAction(sink, {
         level: 'info',

@@ -80,19 +80,21 @@ export function resolveGroupIpcPath(folder: string): string {
   return ipcPath;
 }
 
-/** Shared with hasUndrainedIpcRequests so it and the drain cannot disagree. */
+/** Shared with listUndrainedIpcRequests so it and the drain cannot disagree. */
 export function resolveGroupIpcTasksPath(folder: string): string {
   return path.join(resolveGroupIpcPath(folder), 'tasks');
 }
 
 /**
- * Is a request file sitting in the group's IPC directory that the host has not
- * drained yet? Any `.json` counts: deciding this by reading container-written
- * JSON would put a security question in the container's hands. Cost is a needless
- * union of requester sets when the pending file was an unrelated verb.
+ * The request files sitting in the group's IPC directory that the host has not
+ * drained yet, by name — the same name the drain hands to `processTaskIpc`, so
+ * a launch can pin each one's requesters before it touches the group's slot
+ * (sagri-ai#630). Any `.json` counts: deciding this by reading container-written
+ * JSON would put a security question in the container's hands. Cost is a
+ * needless snapshot when the pending file was an unrelated verb.
  */
-export function hasUndrainedIpcRequests(folder: string): boolean {
+export function listUndrainedIpcRequests(folder: string): string[] {
   const tasksDir = resolveGroupIpcTasksPath(folder);
-  if (!fs.existsSync(tasksDir)) return false;
-  return fs.readdirSync(tasksDir).some((file) => file.endsWith('.json'));
+  if (!fs.existsSync(tasksDir)) return [];
+  return fs.readdirSync(tasksDir).filter((file) => file.endsWith('.json'));
 }

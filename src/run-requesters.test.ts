@@ -4,17 +4,15 @@ import { _clearSessionResets, takeSessionReset } from './session-reset.js';
 import {
   addRunRequesters,
   _clearAllRunRequesters,
+  clearRequestSnapshot,
   clearRunRequestersForGroup,
   getRunRequesters,
   setRunRequesters,
+  snapshotPendingRequests,
 } from './run-requesters.js';
 
-// The launch scopes these tests use. Both reasons to widen can hold at once and
-// are handled identically, which BOTH pins.
-const FRESH = { hasUndrainedRequests: false, resumesSession: false };
-const RESUMED = { hasUndrainedRequests: false, resumesSession: true };
-const UNDRAINED = { hasUndrainedRequests: true, resumesSession: false };
-const BOTH = { hasUndrainedRequests: true, resumesSession: true };
+const FRESH = { resumesSession: false };
+const RESUMED = { resumesSession: true };
 
 beforeEach(() => {
   _clearAllRunRequesters();
@@ -32,12 +30,6 @@ describe('run requester attribution', () => {
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', ['U_ALICE'], FRESH);
     expect(getRunRequesters('dev')).toStrictEqual(['U_ALICE']);
-  });
-
-  it('unions the previous attribution while a request is still undrained', () => {
-    setRunRequesters('dev', ['U_BOB'], FRESH);
-    setRunRequesters('dev', ['U_ALICE'], UNDRAINED);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
   });
 
   it('keeps the asker of a resumed instruction on record (sagri-ai#629)', () => {
@@ -60,37 +52,16 @@ describe('run requester attribution', () => {
     expect(getRunRequesters('dev')).toStrictEqual(['U_ERIN']);
   });
 
-  it('widens once, not twice, when both reasons to widen hold', () => {
-    setRunRequesters('dev', ['U_BOB'], FRESH);
-    setRunRequesters('dev', ['U_ALICE'], BOTH);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB', 'U_ALICE']);
-  });
-
   it('clears the attribution for a run whose context it cannot enumerate', () => {
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', undefined, FRESH);
     expect(getRunRequesters('dev')).toBeUndefined();
   });
 
-  it('clears even while a request is undrained, rather than handing it to this run', () => {
-    // Mid-drain version of the rule above (see run-requesters.ts).
-    setRunRequesters('dev', ['U_BOB'], FRESH);
-    setRunRequesters('dev', undefined, UNDRAINED);
-    expect(getRunRequesters('dev')).toBeUndefined();
-  });
-
   it('never lets an isolated task empty set survive into an unattributable run', () => {
     // `[]` excludes nobody, which is worse to inherit than a real set.
     setRunRequesters('dev', [], FRESH);
-    setRunRequesters('dev', undefined, UNDRAINED);
-    expect(getRunRequesters('dev')).toBeUndefined();
-  });
-
-  it('declines to attribute an undrained request to the run that follows it', () => {
-    // Post-restart: a request is pending but nothing is on record. Naming this
-    // run's senders would blame them for somebody else's request and clear the
-    // real requester to approve it.
-    setRunRequesters('dev', ['U_ALICE'], UNDRAINED);
+    setRunRequesters('dev', undefined, FRESH);
     expect(getRunRequesters('dev')).toBeUndefined();
   });
 
@@ -100,7 +71,7 @@ describe('run requester attribution', () => {
     // create a slot, and the gate's unattributed refusal returns before the
     // branch that would reset. The group refuses every gated action until the
     // process restarts.
-    setRunRequesters('dev', ['U_BOB'], UNDRAINED);
+    setRunRequesters('dev', ['U_BOB'], RESUMED);
     expect(getRunRequesters('dev')).toBeUndefined();
     expect(takeSessionReset('dev')).toBe(true);
 
@@ -114,12 +85,6 @@ describe('run requester attribution', () => {
     // host can no longer enumerate, so no approver can be cleared of it.
     setRunRequesters('dev', ['U_ALICE'], RESUMED);
     expect(getRunRequesters('dev')).toBeUndefined();
-  });
-
-  it('keeps a scheduled run from clearing an undrained run requesters', () => {
-    setRunRequesters('dev', ['U_BOB'], FRESH);
-    setRunRequesters('dev', [], UNDRAINED);
-    expect(getRunRequesters('dev')).toStrictEqual(['U_BOB']);
   });
 
   it('keeps an isolated task from trimming a live session to nobody', () => {
@@ -149,5 +114,97 @@ describe('run requester attribution', () => {
 
     setRunRequesters('dev', [], FRESH);
     expect(getRunRequesters('dev')).toStrictEqual([]);
+  });
+});
+
+describe('per-request requester correlation (sagri-ai#630)', () => {
+  it('answers a request with the run that raised it, not the run draining beside it', () => {
+    // Bob's run writes the request and exits. Alice's run launches before the
+    // 1s drain picks the file up. Without the pin the request would name Alice,
+    // and Bob, who actually asked, would be free to approve it.
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    setRunRequesters('dev', ['U_ALICE'], FRESH);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('dev')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('leaves an uninvolved approver eligible on an unrelated overlapping run', () => {
+    // The other half of the same story: Alice never touched Bob's request, so
+    // she must not appear in its requester set at all.
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    setRunRequesters('dev', ['U_ALICE'], RESUMED);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+  });
+
+  it('holds the pin through a launch that cannot enumerate its own context', () => {
+    // A session-resuming scheduled task clears the slot. The pending request
+    // used to refuse along with it; it now still answers the run that raised it.
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    setRunRequesters('dev', undefined, FRESH);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('dev')).toBeUndefined();
+  });
+
+  it('keeps the first pin, which is the launch closest to the writing run', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    setRunRequesters('dev', ['U_ALICE'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+  });
+
+  it('refuses a request that outlived the process rather than blaming the next run', () => {
+    // After a restart the slot is empty, so the pin records `undefined`. Handing
+    // the file to the next run's senders would both blame people who never asked
+    // and clear whoever did ask to approve their own request.
+    snapshotPendingRequests('dev', ['req-stale.json']);
+    setRunRequesters('dev', ['U_ALICE'], FRESH);
+
+    expect(getRunRequesters('dev', 'req-stale.json')).toBeUndefined();
+    expect(getRunRequesters('dev')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('reads the live slot for a request written by the run now going', () => {
+    // The ordinary case: the container wrote the file during this run, so no
+    // launch has pinned it and the slot is the right answer.
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    expect(getRunRequesters('dev', 'req-live.json')).toStrictEqual(['U_BOB']);
+  });
+
+  it('keeps pins for one group out of another group with the same file name', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    setRunRequesters('ops', ['U_CAROL'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    snapshotPendingRequests('ops', ['req-1.json']);
+    setRunRequesters('dev', ['U_ALICE'], FRESH);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('ops', 'req-1.json')).toStrictEqual(['U_CAROL']);
+  });
+
+  it('forgets the pin once the drain has removed the file', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    setRunRequesters('dev', ['U_ALICE'], FRESH);
+    clearRequestSnapshot('dev', 'req-1.json');
+
+    // A container that reuses the name gets this run's slot, not the dead pin.
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('survives the session drop, because the request is still answering its askers', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    snapshotPendingRequests('dev', ['req-1.json']);
+    clearRunRequestersForGroup('dev');
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('dev')).toBeUndefined();
   });
 });

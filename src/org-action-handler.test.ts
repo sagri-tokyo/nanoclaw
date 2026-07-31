@@ -915,11 +915,9 @@ describe('a gated action raised from resumed context (sagri-ai#629)', () => {
 
   function raiseFromResumedContext(): string[] | undefined {
     setRunRequesters('g', ['U_CAROL'], {
-      hasUndrainedRequests: false,
       resumesSession: false,
     });
     setRunRequesters('g', ['U_DAVE'], {
-      hasUndrainedRequests: false,
       resumesSession: true,
     });
     return getRunRequesters('g');

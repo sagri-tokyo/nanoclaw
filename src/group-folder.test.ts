@@ -7,7 +7,7 @@ import {
   GroupNotFoundError,
   InvalidGroupFolderError,
   PathEscapeError,
-  hasUndrainedIpcRequests,
+  listUndrainedIpcRequests,
   isValidGroupFolder,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
@@ -75,7 +75,7 @@ describe('group folder validation', () => {
   });
 });
 
-describe('hasUndrainedIpcRequests', () => {
+describe('listUndrainedIpcRequests', () => {
   // Runs against the real filesystem, not a mocked one: what it has to get right
   // is agreeing with the drain about where requests land.
   const FOLDER = 'undrained-probe';
@@ -89,29 +89,35 @@ describe('hasUndrainedIpcRequests', () => {
     fs.rmSync(path.dirname(tasksDir), { recursive: true, force: true });
   });
 
-  it('is false when the group has never written a request', () => {
-    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+  it('is empty when the group has never written a request', () => {
+    expect(listUndrainedIpcRequests(FOLDER)).toStrictEqual([]);
   });
 
-  it('is false for a drained directory', () => {
+  it('is empty for a drained directory', () => {
     fs.mkdirSync(tasksDir, { recursive: true });
-    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+    expect(listUndrainedIpcRequests(FOLDER)).toStrictEqual([]);
   });
 
-  it('is true while a request file is still there', () => {
+  it('names each request file still sitting there', () => {
     fs.mkdirSync(tasksDir, { recursive: true });
-    fs.writeFileSync(path.join(tasksDir, 'req.json'), '{}');
-    expect(hasUndrainedIpcRequests(FOLDER)).toBe(true);
+    fs.writeFileSync(path.join(tasksDir, 'req-a.json'), '{}');
+    fs.writeFileSync(path.join(tasksDir, 'req-b.json'), '{}');
+    // The name is what the drain passes to processTaskIpc, so it is the key the
+    // requester pin has to be stored under (sagri-ai#630).
+    expect(listUndrainedIpcRequests(FOLDER).sort()).toStrictEqual([
+      'req-a.json',
+      'req-b.json',
+    ]);
   });
 
   it('ignores a half-written .tmp file the writer has not renamed yet', () => {
     fs.mkdirSync(tasksDir, { recursive: true });
     fs.writeFileSync(path.join(tasksDir, 'req.json.tmp'), '{}');
-    expect(hasUndrainedIpcRequests(FOLDER)).toBe(false);
+    expect(listUndrainedIpcRequests(FOLDER)).toStrictEqual([]);
   });
 
   it('rejects a folder name that is not a legal group identity', () => {
-    expect(() => hasUndrainedIpcRequests('../escape')).toThrow(
+    expect(() => listUndrainedIpcRequests('../escape')).toThrow(
       InvalidGroupFolderError,
     );
   });
