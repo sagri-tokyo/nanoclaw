@@ -80,6 +80,8 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
+      -- Diagnostic mirror of the in-memory session map. Boot clears it and
+      -- nothing resumes from it; see deleteAllSessions (sagri-ai#629).
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
@@ -956,13 +958,6 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
-  const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
-  return row?.session_id;
-}
-
 export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
@@ -983,7 +978,12 @@ export function deleteAllSessions(): number {
   return db.prepare('DELETE FROM sessions').run().changes;
 }
 
-export function getAllSessions(): Record<string, string> {
+/**
+ * @internal - for tests only. Underscored to match _initTestDatabase: it returns
+ * the same shape as the in-memory session map, so an unmarked export is an
+ * invitation to assign it in loadState and undo sagri-ai#629.
+ */
+export function _getAllSessions(): Record<string, string> {
   const rows = db
     .prepare('SELECT group_folder, session_id FROM sessions')
     .all() as Array<{ group_folder: string; session_id: string }>;
