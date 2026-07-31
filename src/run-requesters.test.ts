@@ -1,9 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
-import {
-  _clearSessionResets,
-  takeSessionReset,
-} from './session-reset.js';
+import { _clearSessionResets, takeSessionReset } from './session-reset.js';
 import {
   addRunRequesters,
   _clearAllRunRequesters,
