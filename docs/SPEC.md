@@ -459,7 +459,7 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 
 ### How Sessions Work
 
-1. Each group has a session ID held in memory, mirrored to SQLite (`sessions` table, keyed by `group_folder`) for inspection only
+1. Each group has a session ID held in memory, mirrored to SQLite (`sessions` table, keyed by `group_folder`) so out-of-process tools can tell which sessions are live
 2. Session ID is passed to Claude Agent SDK's `resume` option, within the process lifetime
 3. Claude continues the conversation with full context
 4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
@@ -480,6 +480,10 @@ request again works unless the new conversation draws in every approver too.
 
 The second one is recovery, not a bound, and the agent container picks the
 moment. `src/run-requesters.ts` carries the reasoning and the limits.
+
+Nothing reads a session id back out of the table to resume it, but the table is
+not dead weight: `scripts/cleanup-sessions.sh` queries it so retention skips
+transcripts and debug logs belonging to sessions live in the current process.
 
 ---
 
