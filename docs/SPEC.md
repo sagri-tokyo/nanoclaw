@@ -460,7 +460,7 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 ### How Sessions Work
 
 1. Each group has a session ID held in memory, mirrored to SQLite (`sessions` table, keyed by `group_folder`) for inspection only
-2. Session ID is passed to Claude Agent SDK's `resume` option
+2. Session ID is passed to Claude Agent SDK's `resume` option, within the process lifetime
 3. Claude continues the conversation with full context
 4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
 
@@ -782,7 +782,7 @@ chmod 700 groups/
 | No response to messages | Service not running | Check `launchctl list | grep nanoclaw` |
 | "Claude Code process exited with code 1" | Container runtime failed to start | Check logs; NanoClaw auto-starts container runtime but may fail |
 | "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
-| Session not continuing | In-memory session lost | Check `sqlite3 store/messages.db "SELECT * FROM sessions"` while the process is up. Boot clears the table, so empty after a restart is by design |
+| Session not continuing | In-memory session lost | Check `sqlite3 store/messages.db "SELECT * FROM sessions"` while the process is up; boot clears the table, so empty after a restart is expected |
 | Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
 | "QR code expired" | WhatsApp session expired | Delete store/auth/ and restart |
 | "No groups registered" | Haven't added groups | Use `@Andy add group "Name"` in main |

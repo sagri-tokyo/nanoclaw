@@ -958,11 +958,7 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-/**
- * @internal - for tests only. Underscored to match _initTestDatabase: it hands
- * back a session id in the shape the in-memory map holds, so an unmarked export
- * is one assignment in loadState away from undoing sagri-ai#629.
- */
+/** @internal - tests only. Wiring this into loadState re-introduces sagri-ai#629. */
 export function _getSession(groupFolder: string): string | undefined {
   const row = db
     .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
