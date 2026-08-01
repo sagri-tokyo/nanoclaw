@@ -82,6 +82,7 @@ describe('schedule_task authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     // Verify task was created in DB for the other group
@@ -102,6 +103,7 @@ describe('schedule_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
 
     const allTasks = getAllTasks();
@@ -121,6 +123,7 @@ describe('schedule_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
 
     const allTasks = getAllTasks();
@@ -139,6 +142,7 @@ describe('schedule_task authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const allTasks = getAllTasks();
@@ -182,6 +186,7 @@ describe('pause_task authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-other')!.status).toBe('paused');
   });
@@ -192,6 +197,7 @@ describe('pause_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-other')!.status).toBe('paused');
   });
@@ -202,6 +208,7 @@ describe('pause_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-main')!.status).toBe('active');
   });
@@ -231,6 +238,7 @@ describe('resume_task authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-paused')!.status).toBe('active');
   });
@@ -241,6 +249,7 @@ describe('resume_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-paused')!.status).toBe('active');
   });
@@ -251,6 +260,7 @@ describe('resume_task authorization', () => {
       'third-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-paused')!.status).toBe('paused');
   });
@@ -278,6 +288,7 @@ describe('cancel_task authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-to-cancel')).toBeUndefined();
   });
@@ -301,6 +312,7 @@ describe('cancel_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-own')).toBeUndefined();
   });
@@ -324,6 +336,7 @@ describe('cancel_task authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     expect(getTaskById('task-foreign')).toBeDefined();
   });
@@ -344,6 +357,7 @@ describe('register_group authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
 
     // registeredGroups should not have changed
@@ -362,6 +376,7 @@ describe('register_group authorization', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(groups['new@g.us']).toBeUndefined();
@@ -378,6 +393,7 @@ describe('refresh_groups authorization', () => {
       'other-group',
       false,
       deps,
+      'req.json',
     );
     // If we got here without error, the auth gate worked
   });
@@ -452,6 +468,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -476,6 +493,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(getAllTasks()).toHaveLength(0);
@@ -495,6 +513,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -518,6 +537,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(getAllTasks()).toHaveLength(0);
@@ -535,6 +555,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(getAllTasks()).toHaveLength(0);
@@ -552,6 +573,7 @@ describe('schedule_task schedule types', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(getAllTasks()).toHaveLength(0);
@@ -574,6 +596,7 @@ describe('schedule_task context_mode', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -593,6 +616,7 @@ describe('schedule_task context_mode', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -612,6 +636,7 @@ describe('schedule_task context_mode', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -630,6 +655,7 @@ describe('schedule_task context_mode', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     const tasks = getAllTasks();
@@ -652,6 +678,7 @@ describe('register_group success', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     // Verify group was registered in DB
@@ -673,6 +700,7 @@ describe('register_group success', () => {
       'whatsapp_main',
       true,
       deps,
+      'req.json',
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
@@ -729,6 +757,7 @@ describe('rejected IPC paths emit distinct outputs_hash per error_class', () => 
       'whatsapp_main',
       true,
       capture.deps,
+      'req.json',
     );
 
     // pause_task with no matching task and non-main source → Unauthorized
@@ -737,6 +766,7 @@ describe('rejected IPC paths emit distinct outputs_hash per error_class', () => 
       'other-group',
       false,
       capture.deps,
+      'req.json',
     );
 
     const targetMissing = capture.records.find(
@@ -779,6 +809,7 @@ describe('silent-drop reject record full shape', () => {
       'whatsapp_main',
       true,
       capture.deps,
+      'req.json',
     );
 
     expect(capture.records).toHaveLength(1);
@@ -998,7 +1029,13 @@ describe('silent-drop reject branches emit ipcAction', () => {
     '$name emits $errorClass on $tool',
     async ({ payload, sourceGroup, isMain, tool, errorClass }) => {
       const capture = withCapturedIpcActions();
-      await processTaskIpc(payload, sourceGroup, isMain, capture.deps);
+      await processTaskIpc(
+        payload,
+        sourceGroup,
+        isMain,
+        capture.deps,
+        'req.json',
+      );
 
       const record = findIpcAction(capture.records, tool);
       expect(record).toBeDefined();
@@ -1037,6 +1074,7 @@ describe('update_task schedule-validation reject branches', () => {
       'whatsapp_main',
       true,
       capture.deps,
+      'req.json',
     );
 
     const record = findIpcAction(capture.records, 'ipc_update_task');
@@ -1074,6 +1112,7 @@ describe('update_task schedule-validation reject branches', () => {
       'whatsapp_main',
       true,
       capture.deps,
+      'req.json',
     );
 
     const record = findIpcAction(capture.records, 'ipc_update_task');

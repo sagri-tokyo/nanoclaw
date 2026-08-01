@@ -18,17 +18,31 @@
  *     to an approver who might be the requester.
  *
  * The drain is a 1s poll decoupled from container lifetime, so it can pick up a
- * request after that container exited and the next run already started. There is
- * one slot per group, shared by a pending request's exclusions, every session the
- * group has open, and the next run's attribution. A launch therefore either
- * widens the slot (unioning its own senders in) or empties it, and never trims it
- * to a smaller non-empty set. That is the invariant: a pending request can be
- * over-excluded, or refused outright, but is never handed a set that omits one of
- * its real requesters.
+ * request after that container exited and the next run already started. The slot
+ * alone cannot answer for both: it holds one value, and the next run needs it to
+ * mean something different from what the pending request needs.
  *
- * Making a pending request keep exactly the set it was raised under would need
- * per-request correlation the drain does not have (it sees a file, not the run
- * that wrote it) or no launch overlap at all. sagri-ai#630 holds that.
+ * So a launch pins them apart (sagri-ai#630). Before it touches the slot it
+ * pins every request file already sitting in the group's IPC directory to the
+ * slot as it stands, and the drain reads a request's pin in preference to the
+ * slot. A request raised under run A therefore keeps A's requesters however many
+ * runs start before it drains, and run B is free to claim the slot for itself.
+ *
+ * A pin records `undefined` too, and that case is the one carrying weight. After
+ * a restart the slot is empty, so a request file that outlived the process pins
+ * as `undefined` and refuses, instead of being handed the senders of whichever
+ * run happens to start next — who did not ask for it, and one of whom could
+ * otherwise approve their own request.
+ *
+ * A pin dies when a poll stops seeing its file name (`retainRequestPins`), so it
+ * cannot be parked under a name a later request reuses. Identity is that name
+ * sampled at poll boundaries, not the file: content swapped in under a name that
+ * survives a tick keeps the pin, which needs beating the drain to the launch that
+ * set it.
+ *
+ * Not fixed here: an isolated scheduled task shares the group folder but not the
+ * session, and a request IT writes still reads the live interactive slot. That
+ * needs a per-lane slot, which sagri-ai#640 holds.
  *
  * The set is scoped to the SESSION, not the run (sagri-ai#629). A run that
  * resumes the group's session still holds the prior runs' messages in the
@@ -72,29 +86,90 @@ import { requestSessionReset } from './session-reset.js';
 
 const requestersByGroupFolder = new Map<string, Set<string>>();
 
-/** What a launch can still be acting on beyond its own batch. */
+/**
+ * Requesters pinned to one undrained request file, keyed `<folder>/<file>`.
+ * A value of `undefined` is a recorded answer ("the host could not say who asked
+ * when this launch found the file"), which is why membership is tested with
+ * `has` and never by truthiness.
+ */
+const requestersByRequestFile = new Map<string, string[] | undefined>();
+
+function requestKey(groupFolder: string, requestFile: string): string {
+  return `${groupFolder}/${requestFile}`;
+}
+
+/** What a launch is carrying that its own message batch does not account for. */
 interface LaunchScope {
-  /** A request raised under the current slot has not been drained yet. */
-  hasUndrainedRequests: boolean;
   /** The agent resumes a session, so earlier runs' messages are still in context. */
   resumesSession: boolean;
+  /**
+   * Request files the host has not drained yet, by name. Passed in rather than
+   * read off disk here, so this module stays free of `fs`.
+   */
+  undrainedRequests: string[];
+}
+
+/** First pin wins: an earlier launch was closer to the run that wrote the file. */
+function pinPendingRequests(groupFolder: string, requestFiles: string[]): void {
+  for (const file of requestFiles) {
+    const key = requestKey(groupFolder, file);
+    if (requestersByRequestFile.has(key)) continue;
+    requestersByRequestFile.set(key, currentSlot(groupFolder));
+  }
 }
 
 /**
- * Record the requesters of a run being launched. A run that resumes a session or
- * overlaps an undrained request may only widen the slot; an `undefined` clears
- * it whatever is pending. See the module docstring.
+ * Forget a request file's pinned requesters once the drain has removed the file.
+ * Nothing else may call this: while the file is still there, the pin is the only
+ * record of who its run was answering.
+ */
+export function clearRequestPin(
+  groupFolder: string,
+  requestFile: string,
+): void {
+  requestersByRequestFile.delete(requestKey(groupFolder, requestFile));
+}
+
+/**
+ * Drop the group's pins for request files the drain can no longer see, so a pin
+ * cannot outlive its file and be inherited by a later request reusing the name.
+ *
+ * The drain is the only caller. Pass the file set it just listed, in the same
+ * synchronous block as the listing: a launch that pinned between the two would
+ * have that pin dropped here, and its request would fall back to the slot it was
+ * pinned away from.
+ */
+export function retainRequestPins(
+  groupFolder: string,
+  requestFiles: string[],
+): void {
+  const keep = new Set(
+    requestFiles.map((file) => requestKey(groupFolder, file)),
+  );
+  const prefix = `${groupFolder}/`;
+  for (const key of requestersByRequestFile.keys()) {
+    if (key.startsWith(prefix) && !keep.has(key)) {
+      requestersByRequestFile.delete(key);
+    }
+  }
+}
+
+/**
+ * Record the requesters of a run being launched, pinning whatever it found
+ * undrained first (sagri-ai#630). A run that resumes a session may only widen
+ * the slot; an `undefined` clears it. See the module docstring.
  */
 export function setRunRequesters(
   groupFolder: string,
   requesterIds: string[] | undefined,
-  { hasUndrainedRequests, resumesSession }: LaunchScope,
+  { resumesSession, undrainedRequests }: LaunchScope,
 ): void {
+  pinPendingRequests(groupFolder, undrainedRequests);
+
   if (requesterIds === undefined) {
-    // Clears even mid-drain: keeping the set to spare a pending request would
-    // hand it to this run instead (see the module docstring), and an inherited
-    // `[]` from a preceding isolated task would exclude nobody at all. The
-    // pending request pays for it by refusing too.
+    // Undrained requests are unaffected: they were pinned above, so they keep
+    // the set they were raised under rather than paying for a run that cannot
+    // enumerate its own context.
     requestersByGroupFolder.delete(groupFolder);
     logger.warn(
       { groupFolder },
@@ -105,17 +180,11 @@ export function setRunRequesters(
 
   const existing = requestersByGroupFolder.get(groupFolder);
 
-  // Two reasons a launch may not speak for the whole slot: it resumes context
-  // this slot already attributes, or a request raised under the slot is still
-  // undrained. Either way it may only widen.
-  const mustWiden = resumesSession || hasUndrainedRequests;
-
   if (!existing) {
-    if (mustWiden) {
-      // Nothing to widen means the context or the pending request predates the
-      // attribution we hold (a restart). Naming this run's senders would blame
-      // them for a request they never made, and clear whoever did make it to
-      // approve it.
+    if (resumesSession) {
+      // Nothing to widen means the context predates the attribution we hold (a
+      // restart). Naming this run's senders would blame them for an instruction
+      // they never gave, and clear whoever did give it to approve it.
       //
       // Ask for the session to be dropped, or this is permanent: the run still
       // writes its session id back, so every later launch resumes and lands
@@ -124,13 +193,8 @@ export function setRunRequesters(
       // next launch resumes nothing instead, so it can claim the slot.
       requestSessionReset(groupFolder);
       logger.warn(
-        {
-          groupFolder,
-          requesterCount: requesterIds.length,
-          resumesSession,
-          hasUndrainedRequests,
-        },
-        'run-requesters: run resumes context or a request with no attribution on record (restart?) — group left unattributed, gated actions will refuse',
+        { groupFolder, requesterCount: requesterIds.length },
+        'run-requesters: run resumes context with no attribution on record (restart?) — group left unattributed, gated actions will refuse',
       );
       return;
     }
@@ -141,9 +205,9 @@ export function setRunRequesters(
   // An empty set is a positive "no human is in THIS run's context" — true of an
   // isolated scheduled task, which shares the group folder but not the session
   // the slot was filled from. Replacing on it would trim a live session's
-  // attribution to nobody, so it widens by nothing instead (sagri-ai#630 holds
+  // attribution to nobody, so it widens by nothing instead (sagri-ai#640 holds
   // the per-lane split that would let it keep its own empty set).
-  if (mustWiden || requesterIds.length === 0) {
+  if (resumesSession || requesterIds.length === 0) {
     for (const id of requesterIds) existing.add(id);
     return;
   }
@@ -174,18 +238,39 @@ export function addRunRequesters(
   for (const id of requesterIds) existing.add(id);
 }
 
-/** See the module docstring for what a set, `[]`, and `undefined` each mean. */
-export function getRunRequesters(groupFolder: string): string[] | undefined {
+function currentSlot(groupFolder: string): string[] | undefined {
   const ids = requestersByGroupFolder.get(groupFolder);
   return ids ? [...ids] : undefined;
+}
+
+/**
+ * The requesters a drained request answers: its pin when it has one, the group's
+ * live slot when it does not. `requestFile` is required, not optional, because
+ * the group-wide read IS the sagri-ai#630 bug and an optional parameter leaves it
+ * one forgotten argument away. See the module docstring for what a set, `[]`, and
+ * `undefined` each mean.
+ */
+export function getRunRequesters(
+  groupFolder: string,
+  requestFile: string,
+): string[] | undefined {
+  const key = requestKey(groupFolder, requestFile);
+  if (requestersByRequestFile.has(key)) {
+    // Copied, like the slot read below: a caller that mutated what it got back
+    // would rewrite the pin for every later read of the same request.
+    const pinned = requestersByRequestFile.get(key);
+    return pinned ? [...pinned] : undefined;
+  }
+  return currentSlot(groupFolder);
 }
 
 /**
  * Drop one group's slot when its session goes away. A launch only replaces the
  * slot when it has senders of its own, so without this a group driven by
  * scheduled tasks alone would hold a dead session's requesters and refuse every
- * gated action. A request still undrained at that point refuses too, the same
- * fail-closed answer an unenumerable launch gets.
+ * gated action. Pins survive: a request raised under the dead session is still
+ * answering the humans who raised it, and the gate's own recovery path drains it
+ * before asking for the drop.
  */
 export function clearRunRequestersForGroup(groupFolder: string): void {
   requestersByGroupFolder.delete(groupFolder);
@@ -194,4 +279,5 @@ export function clearRunRequestersForGroup(groupFolder: string): void {
 /** @internal - for tests only. */
 export function _clearAllRunRequesters(): void {
   requestersByGroupFolder.clear();
+  requestersByRequestFile.clear();
 }

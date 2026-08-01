@@ -1236,7 +1236,7 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
-    onOrgAction: async (record, sourceGroup, chatJid) => {
+    onOrgAction: async (record, sourceGroup, chatJid, requestFile) => {
       // ipc.ts hard-rejects every malformed field (reversibility/stakes_hint
       // outside their enums, non-object canonical_args, non-string[]
       // citation_refs) before this handler is called, so the record arrives
@@ -1257,7 +1257,9 @@ async function main(): Promise<void> {
         {
           sourceGroup,
           chatJid,
-          requesterIds: getRunRequesters(sourceGroup),
+          // By request file, not by group: a run that started after this one was
+          // written must not rewrite who it answers (sagri-ai#630).
+          requesterIds: getRunRequesters(sourceGroup, requestFile),
         },
         orgActionDeps,
       );

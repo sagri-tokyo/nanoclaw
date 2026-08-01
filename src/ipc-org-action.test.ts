@@ -28,6 +28,7 @@ let orgActionCalls: {
   record: OrgActionRecordArg;
   sourceGroup: string;
   chatJid: string;
+  requestFile: string;
 }[];
 let deps: IpcDeps;
 
@@ -44,11 +45,12 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
-    onOrgAction: async (record, sourceGroup, chatJid) => {
+    onOrgAction: async (record, sourceGroup, chatJid, requestFile) => {
       orgActionCalls.push({
         record: record as OrgActionRecordArg,
         sourceGroup,
         chatJid,
+        requestFile,
       });
     },
   };
@@ -69,6 +71,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toEqual([
       {
@@ -82,6 +85,10 @@ describe('org_action IPC drain', () => {
         },
         sourceGroup: 'slack_sagri-ai-dev',
         chatJid: 'slack:C0AAA1111',
+        // The name the host pinned this request's requesters under; without it
+        // reaching the handler the gate falls back to the group slot
+        // (sagri-ai#630).
+        requestFile: 'req.json',
       },
     ]);
   });
@@ -100,6 +107,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(1);
     expect(orgActionCalls[0].record.target_query).toBe('Soil Model Task');
@@ -119,6 +127,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -136,6 +145,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(1);
     expect(orgActionCalls[0].record.citation_refs).toEqual([]);
@@ -155,6 +165,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -165,6 +176,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -182,6 +194,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -199,6 +212,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       deps,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });
@@ -218,6 +232,7 @@ describe('org_action IPC drain', () => {
         'slack_sagri-ai-dev',
         false,
         deps,
+        'req.json',
       );
       expect(orgActionCalls).toHaveLength(0);
     }
@@ -236,6 +251,7 @@ describe('org_action IPC drain', () => {
       'slack_sagri-ai-dev',
       false,
       noHandler,
+      'req.json',
     );
     expect(orgActionCalls).toHaveLength(0);
   });

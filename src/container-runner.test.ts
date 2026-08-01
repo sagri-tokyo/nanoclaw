@@ -184,6 +184,7 @@ import {
   getRunRequesters,
   setRunRequesters,
 } from './run-requesters.js';
+import { resolveGroupIpcTasksPath } from './group-folder.js';
 import type { RegisteredGroup } from './types.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -1590,6 +1591,8 @@ describe('container-runner capability profile write-token gating', () => {
 });
 
 describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
+  const FRESH = { resumesSession: false, undrainedRequests: [] };
+
   // The three units are covered separately (task-scheduler emits the value, the
   // registry stores it, the gate refuses on undefined). This pins the line that
   // joins them, which is the only place the gate's input is actually set.
@@ -1610,7 +1613,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
       { ...testInput, requesterIds, sessionId },
       () => {},
     ).catch(() => {});
-    return getRunRequesters(testGroup.folder);
+    return getRunRequesters(testGroup.folder, 'never-pinned.json');
   }
 
   it('records the run senders so the gate can exclude them', () => {
@@ -1637,10 +1640,7 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   // directly rather than launched, because a second concurrent launch would race
   // this suite's single fake process.
   it('widens the attribution when the run resumes a session', () => {
-    setRunRequesters(testGroup.folder, ['U_CAROL'], {
-      hasUndrainedRequests: false,
-      resumesSession: false,
-    });
+    setRunRequesters(testGroup.folder, ['U_CAROL'], FRESH);
     expect(launchWith(['U_DAVE'], 'session-abc')).toStrictEqual([
       'U_CAROL',
       'U_DAVE',
@@ -1648,10 +1648,27 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
   });
 
   it('replaces it when the run resumes no session', () => {
-    setRunRequesters(testGroup.folder, ['U_CAROL'], {
-      hasUndrainedRequests: false,
-      resumesSession: false,
-    });
+    setRunRequesters(testGroup.folder, ['U_CAROL'], FRESH);
     expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
+  });
+
+  // The drain is a 1s poll decoupled from container lifetime, so Carol's request
+  // can still be sitting there when Dave's run launches. The launch has to pin it
+  // before it claims the slot (sagri-ai#630), and it has to find the file at the
+  // path the drain reads: probing anywhere else would silently pin nothing.
+  it('pins a request Carol left undrained before Dave claims the slot', () => {
+    const tasksDir = resolveGroupIpcTasksPath(testGroup.folder);
+    // Once, so the rest of the launch keeps the suite's shared fs mock. Both
+    // land on the pin probe because it is the first thing the launch does.
+    vi.mocked(fs.existsSync).mockImplementationOnce((p) => p === tasksDir);
+    vi.mocked(fs.readdirSync).mockImplementationOnce((p) =>
+      p === tasksDir ? (['carol-req.json'] as never) : ([] as never),
+    );
+
+    setRunRequesters(testGroup.folder, ['U_CAROL'], FRESH);
+    expect(launchWith(['U_DAVE'])).toStrictEqual(['U_DAVE']);
+    expect(getRunRequesters(testGroup.folder, 'carol-req.json')).toStrictEqual([
+      'U_CAROL',
+    ]);
   });
 });

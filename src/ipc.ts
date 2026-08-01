@@ -15,8 +15,10 @@ import {
 } from './db.js';
 import {
   isValidGroupFolder,
+  listUndrainedIpcRequests,
   resolveGroupIpcTasksPath,
 } from './group-folder.js';
+import { clearRequestPin, retainRequestPins } from './run-requesters.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -100,6 +102,10 @@ export interface IpcDeps {
    * executes (safe), holds (gated, posts a Slack approval prompt), or refuses
    * (red line / allowlist). Optional so non-Sagri deployments need not wire it;
    * an `org_action` request with no handler is rejected.
+   *
+   * `requestFile` is the name of the file this record was read from, which is
+   * how the host looks up the requesters it pinned to that request rather than
+   * to the group (sagri-ai#630).
    */
   onOrgAction?: (
     record: {
@@ -113,6 +119,7 @@ export interface IpcDeps {
     },
     sourceGroup: string,
     chatJid: string,
+    requestFile: string,
   ) => Promise<void>;
   /**
    * Optional override for the action-record sink. Defaults to
@@ -222,32 +229,35 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
-      // Process tasks from this group's IPC directory
       try {
-        if (fs.existsSync(tasksDir)) {
-          const taskFiles = fs
-            .readdirSync(tasksDir)
-            .filter((f) => f.endsWith('.json'));
-          for (const file of taskFiles) {
-            const filePath = path.join(tasksDir, file);
-            try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
-              fs.unlinkSync(filePath);
-            } catch (err) {
-              logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC task',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
-            }
+        // Same helper a launch pins against, so the two cannot disagree about
+        // which files are requests (sagri-ai#630).
+        const requestFiles = listUndrainedIpcRequests(sourceGroup);
+        // Same synchronous block as the listing, per retainRequestPins.
+        retainRequestPins(sourceGroup, requestFiles);
+
+        for (const file of requestFiles) {
+          const filePath = path.join(tasksDir, file);
+          try {
+            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            // Pass source group identity to processTaskIpc for authorization
+            await processTaskIpc(data, sourceGroup, isMain, deps, file);
+            fs.unlinkSync(filePath);
+          } catch (err) {
+            logger.error(
+              { file, sourceGroup, err },
+              'Error processing IPC task',
+            );
+            const errorDir = path.join(ipcBaseDir, 'errors');
+            fs.mkdirSync(errorDir, { recursive: true });
+            fs.renameSync(
+              filePath,
+              path.join(errorDir, `${sourceGroup}-${file}`),
+            );
           }
+          // Not a finally: if the quarantine above also throws, the file is
+          // still in tasks/ and its pin has to outlive this tick with it.
+          clearRequestPin(sourceGroup, file);
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
@@ -298,6 +308,7 @@ export async function processTaskIpc(
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
+  requestFile: string, // The file this request was read from (sagri-ai#630)
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
 
@@ -829,6 +840,7 @@ export async function processTaskIpc(
         },
         sourceGroup,
         chatJid,
+        requestFile,
       );
       emitIpcAction(sink, {
         level: 'info',

@@ -56,6 +56,7 @@ async function drain(record: object): Promise<void> {
     'slack_sagri-ai-dev',
     false,
     deps,
+    'req.json',
   );
 }
 

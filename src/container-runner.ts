@@ -31,7 +31,7 @@ import {
 } from './config.js';
 import { FETCH_UNTRUSTED_SUBCLASS_USER_MESSAGES } from './fetch-untrusted.js';
 import {
-  hasUndrainedIpcRequests,
+  listUndrainedIpcRequests,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
 } from './group-folder.js';
@@ -813,10 +813,11 @@ export async function runContainerAgent(
   // Attribute this run before the container can emit an org_action
   // (sagri-ai#296); setRunRequesters owns the widen-vs-replace rule. A resumed
   // session means the agent still holds earlier runs' messages, so this run
-  // cannot speak for the whole slot (sagri-ai#629).
+  // cannot speak for the whole slot (sagri-ai#629), and whatever the last run
+  // left undrained is pinned to the outgoing slot first (sagri-ai#630).
   setRunRequesters(group.folder, input.requesterIds, {
-    hasUndrainedRequests: hasUndrainedIpcRequests(group.folder),
     resumesSession: input.sessionId !== undefined,
+    undrainedRequests: listUndrainedIpcRequests(group.folder),
   });
 
   const groupDir = resolveGroupFolderPath(group.folder);
