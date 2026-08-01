@@ -7,6 +7,7 @@ import {
   clearRequestPin,
   clearRunRequestersForGroup,
   getRunRequesters,
+  retainRequestPins,
   setRunRequesters,
 } from './run-requesters.js';
 
@@ -19,10 +20,10 @@ function pinning(files: string[], scope = FRESH) {
 }
 
 /**
- * The group's live slot, read the way production reads it: a request with no pin
- * of its own falls through to the slot. Asserting through the real entry point
- * keeps that fallthrough branch under test and the module free of a group-wide
- * reader that a caller could reach for instead (sagri-ai#630).
+ * The group's live slot, read the way production reads it: an unpinned request
+ * falls through to the slot. Asserting through the real entry point keeps that
+ * branch under test and the module free of a group-wide reader a caller could
+ * reach for instead (sagri-ai#630).
  */
 function slotOf(groupFolder: string): string[] | undefined {
   return getRunRequesters(groupFolder, 'never-pinned.json');
@@ -221,5 +222,37 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
     getRunRequesters('dev', 'req-1.json')!.push('U_MALLORY');
 
     expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+  });
+
+  it('drops the pin of a request the container deleted before the drain read it', () => {
+    // The IPC directory is a writable mount. Left behind, this pin would answer
+    // for the next request that reuses the name — a set the container picked by
+    // choosing when to delete, rather than one the host attributed.
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    setRunRequesters('dev', ['U_ALICE'], pinning(['req-1.json']));
+    retainRequestPins('dev', []);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('keeps the pins of requests still sitting in the directory', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    setRunRequesters('dev', ['U_ALICE'], pinning(['req-1.json', 'req-2.json']));
+    retainRequestPins('dev', ['req-1.json']);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_BOB']);
+    expect(getRunRequesters('dev', 'req-2.json')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('leaves the pins of another group alone', () => {
+    setRunRequesters('dev', ['U_BOB'], FRESH);
+    setRunRequesters('ops', ['U_CAROL'], FRESH);
+    setRunRequesters('dev', ['U_ALICE'], pinning(['req-1.json']));
+    setRunRequesters('ops', ['U_ERIN'], pinning(['req-1.json']));
+
+    retainRequestPins('dev', []);
+
+    expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_ALICE']);
+    expect(getRunRequesters('ops', 'req-1.json')).toStrictEqual(['U_CAROL']);
   });
 });

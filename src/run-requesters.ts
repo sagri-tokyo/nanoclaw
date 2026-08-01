@@ -34,6 +34,9 @@
  * run happens to start next — who did not ask for it, and one of whom could
  * otherwise approve their own request.
  *
+ * A pin lives exactly as long as its file, or a container could pick a stale set
+ * for a request by deleting a file and reusing its name (`retainRequestPins`).
+ *
  * Not fixed here: an isolated scheduled task shares the group folder but not the
  * session, and a request IT writes still reads the live interactive slot. That
  * needs a per-lane slot, which sagri-ai#640 holds.
@@ -98,9 +101,7 @@ interface LaunchScope {
   resumesSession: boolean;
   /**
    * Request files the host has not drained yet, by name. Passed in rather than
-   * read off disk here so this module stays free of `fs` and its rules stay
-   * unit-testable in memory; `setRunRequesters` pins them before it touches the
-   * slot, so the ordering is not a caller's to get wrong.
+   * read off disk here, so this module stays free of `fs`.
    */
   undrainedRequests: string[];
 }
@@ -124,6 +125,32 @@ export function clearRequestPin(
   requestFile: string,
 ): void {
   requestersByRequestFile.delete(requestKey(groupFolder, requestFile));
+}
+
+/**
+ * Drop the group's pins for request files the drain can no longer see. The IPC
+ * directory is a writable mount, so a container can delete a request file it
+ * wrote before the drain reads it; the pin would then outlive its file and be
+ * inherited by a later request that reuses the name — a set chosen by the
+ * container rather than by the host.
+ *
+ * Call it with the file set the drain just listed, in the same synchronous block
+ * as the listing: a launch that pinned between the two would have that pin
+ * dropped here, and its request would fall back to the slot it was pinned away
+ * from.
+ */
+export function retainRequestPins(
+  groupFolder: string,
+  requestFiles: string[],
+): void {
+  const keep = new Set(requestFiles);
+  const prefix = `${groupFolder}/`;
+  for (const key of requestersByRequestFile.keys()) {
+    if (!key.startsWith(prefix)) continue;
+    if (!keep.has(key.slice(prefix.length))) {
+      requestersByRequestFile.delete(key);
+    }
+  }
 }
 
 /**

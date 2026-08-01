@@ -18,7 +18,7 @@ import {
   listUndrainedIpcRequests,
   resolveGroupIpcTasksPath,
 } from './group-folder.js';
-import { clearRequestPin } from './run-requesters.js';
+import { clearRequestPin, retainRequestPins } from './run-requesters.js';
 import {
   hashFailureOutput,
   hashPayload,
@@ -229,19 +229,22 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
-      // Same helper a launch pins against, so the two cannot disagree about
-      // which files are requests (sagri-ai#630).
       try {
-        for (const file of listUndrainedIpcRequests(sourceGroup)) {
+        // Same helper a launch pins against, so the two cannot disagree about
+        // which files are requests (sagri-ai#630).
+        const requestFiles = listUndrainedIpcRequests(sourceGroup);
+        // Synchronous with the listing above, so no launch can pin between the
+        // two: a container may delete a request file it wrote, and a pin that
+        // outlived its file would answer for a later request reusing the name.
+        retainRequestPins(sourceGroup, requestFiles);
+
+        for (const file of requestFiles) {
           const filePath = path.join(tasksDir, file);
           try {
             const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
             // Pass source group identity to processTaskIpc for authorization
             await processTaskIpc(data, sourceGroup, isMain, deps, file);
             fs.unlinkSync(filePath);
-            // Deliberately not a finally: if the removal above throws, the file
-            // is still on disk and its pin has to outlive this tick with it.
-            clearRequestPin(sourceGroup, file);
           } catch (err) {
             logger.error(
               { file, sourceGroup, err },
@@ -253,8 +256,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
               filePath,
               path.join(errorDir, `${sourceGroup}-${file}`),
             );
-            clearRequestPin(sourceGroup, file);
           }
+          // Not a finally: if the quarantine above also throws, the file is
+          // still in tasks/ and its pin has to outlive this tick with it.
+          clearRequestPin(sourceGroup, file);
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
