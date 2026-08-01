@@ -22,6 +22,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { GroupNotFoundError, resolveGroupFolderPath } from './group-folder.js';
 import { hashFailureOutput, hashPayload, logger } from './logger.js';
+import { createSessionTracker, SessionStore } from './session-tracker.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -271,6 +272,7 @@ export interface SchedulerDependencies {
   // if the org-action gate asked for a reset. It WRITES; only call it for a run
   // that is actually about to resume a session, never to peek.
   sessionForNextRun: (groupFolder: string) => string | undefined;
+  sessionStore: SessionStore;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -396,14 +398,23 @@ async function runTask(
   let error: string | null = null;
   let errorClass: string | null = null;
 
-  // For group context mode, use the group's current session. Kept inside the
-  // ternary deliberately: an isolated task resumes nothing, and hoisting this
-  // would have every isolated tick eat the group's pending gate reset and drop a
-  // session it never touched.
-  const sessionId =
-    task.context_mode === 'group'
-      ? deps.sessionForNextRun(task.group_folder)
-      : undefined;
+  // The call is kept behind the branch deliberately: an isolated task resumes
+  // nothing, and hoisting it would have every isolated tick eat the group's
+  // pending gate reset and drop a session it never touched.
+  const isGroupContext = task.context_mode === 'group';
+  const sessionId = isGroupContext
+    ? deps.sessionForNextRun(task.group_folder)
+    : undefined;
+
+  // Keeping the session this run established stops the next one starting fresh
+  // and orphaning the transcript. Dropping a stale one matters as much: a
+  // cron-only group has no human message to heal it. Isolated runs share no
+  // session with the group, so they track nothing.
+  const track = isGroupContext
+    ? createSessionTracker(task.group_folder, sessionId, deps.sessionStore, {
+        taskId: task.id,
+      })
+    : () => {};
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -442,6 +453,7 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        track(streamedOutput);
         const wrap = (text: string) =>
           formatErrorWrap(text, {
             runId: task.id,
@@ -504,6 +516,9 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
+    // Usually repeats the id already streamed, but a run that dies before
+    // streaming anything reports only here.
+    track(output);
 
     if (output.status === 'error') {
       error = output.error;

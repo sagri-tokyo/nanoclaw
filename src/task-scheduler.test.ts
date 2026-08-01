@@ -28,6 +28,9 @@ import {
   TASK_OUTCOME_FAILURE_ERROR_CLASS,
 } from './task-scheduler.js';
 
+/** For the cases that assert something other than session bookkeeping. */
+const noSessionStore = { remember: () => {}, forget: () => {} };
+
 describe('task scheduler', () => {
   beforeEach(() => {
     _initTestDatabase();
@@ -62,6 +65,7 @@ describe('task scheduler', () => {
     startSchedulerLoop({
       registeredGroups: () => ({}),
       sessionForNextRun: () => undefined,
+      sessionStore: noSessionStore,
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -279,6 +283,7 @@ describe('task scheduler', () => {
         startSchedulerLoop({
           registeredGroups: () => ({}),
           sessionForNextRun: () => undefined,
+          sessionStore: noSessionStore,
           queue: { enqueueTask } as any,
           onProcess: () => {},
           sendMessage: async () => {},
@@ -560,6 +565,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -606,6 +612,7 @@ describe('runTask consecutive-failure suppression', () => {
         {
           registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
           sessionForNextRun: () => undefined,
+          sessionStore: noSessionStore,
           queue: {
             enqueueTask: () => {},
             closeStdin,
@@ -640,6 +647,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -676,6 +684,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -707,6 +716,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -746,6 +756,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -769,6 +780,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -795,6 +807,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -866,6 +879,7 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1013,6 +1027,7 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1169,6 +1184,7 @@ describe('structured reply mode', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1288,6 +1304,7 @@ describe('structured reply mode', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => undefined,
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1428,6 +1445,166 @@ describe('deriveStructuredRunError', () => {
   });
 });
 
+describe('runTask group session persistence (sagri-ai#633)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  const group: RegisteredGroup = {
+    name: 'slack_main',
+    folder: 'slack_main',
+    trigger: '@bot',
+    added_at: '2026-07-31T00:00:00.000Z',
+  };
+
+  function makeTask(
+    id: string,
+    contextMode: 'group' | 'isolated',
+  ): ScheduledTask {
+    createTask({
+      id,
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Do work.',
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: contextMode,
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      status: 'active',
+      created_at: '2026-07-31T00:00:00.000Z',
+    });
+    return getTaskById(id) as ScheduledTask;
+  }
+
+  /**
+   * One container run: what the agent streams back, and what
+   * `runContainerAgent` then resolves. Production never resolves the streamed
+   * marker itself — in streaming mode it resolves a synthetic completion
+   * carrying the accumulated session id, or an exit-code error carrying no
+   * session id at all. Echoing the marker instead would let either `track`
+   * call site alone satisfy every assertion here.
+   */
+  interface FakeRun {
+    streamed?: ContainerOutput[];
+    resolved: ContainerOutput;
+  }
+
+  const ESTABLISHES_SESSION: FakeRun = {
+    streamed: [
+      { status: 'success', result: '__SILENT__', newSessionId: 'session-abc' },
+    ],
+    resolved: { status: 'success', result: null, newSessionId: 'session-abc' },
+  };
+
+  /** Runs tasks against one session store, recording the resumed session id. */
+  function harness(runs: FakeRun[] = []) {
+    const store: Record<string, string> = {};
+    const resumed: Array<string | undefined> = [];
+    const runner = async (
+      _group: RegisteredGroup,
+      input: ContainerInput,
+      _onProcess: unknown,
+      onOutput?: (output: ContainerOutput) => Promise<void>,
+    ): Promise<ContainerOutput> => {
+      resumed.push(input.sessionId);
+      const fakeRun = runs[resumed.length - 1] ?? ESTABLISHES_SESSION;
+      for (const streamed of fakeRun.streamed ?? []) {
+        if (onOutput) await onOutput(streamed);
+      }
+      return fakeRun.resolved;
+    };
+    const run = (task: ScheduledTask) =>
+      _runTaskForTests(
+        task,
+        {
+          registeredGroups: () => ({ 'C123@slack': group }),
+          sessionForNextRun: (folder: string) => store[folder],
+          sessionStore: {
+            remember: (folder: string, sessionId: string) => {
+              store[folder] = sessionId;
+            },
+            forget: (folder: string) => {
+              delete store[folder];
+            },
+          },
+          queue: {
+            enqueueTask: () => {},
+            closeStdin: () => {},
+            notifyIdle: () => {},
+          } as never,
+          onProcess: () => {},
+          sendMessage: async () => {},
+        },
+        runner,
+      );
+    return { store, resumed, run };
+  }
+
+  it('resumes the session a previous group-context run established', async () => {
+    const { store, resumed, run } = harness();
+    await run(makeTask('group-first', 'group'));
+    await run(makeTask('group-second', 'group'));
+    expect(resumed).toEqual([undefined, 'session-abc']);
+    expect(store).toEqual({ slack_main: 'session-abc' });
+  });
+
+  it('drops a session the agent reports it cannot resume', async () => {
+    const { store, resumed, run } = harness([
+      ESTABLISHES_SESSION,
+      {
+        // The agent-runner echoes the id it was asked to resume on the
+        // session-update marker it emits after the query ends, so the failure
+        // is followed by the dead id all over again.
+        streamed: [
+          {
+            status: 'error',
+            result: null,
+            error: 'No conversation found with session ID: session-abc',
+          },
+          { status: 'success', result: null, newSessionId: 'session-abc' },
+        ],
+        resolved: {
+          status: 'success',
+          result: null,
+          newSessionId: 'session-abc',
+        },
+      },
+    ]);
+    await run(makeTask('stale-establish', 'group'));
+    await run(makeTask('stale-resume', 'group'));
+    // Without the drop, every later run resumes the same dead session and the
+    // group never recovers on its own.
+    expect(resumed).toEqual([undefined, 'session-abc']);
+    expect(store).toEqual({});
+  });
+
+  it('drops a session the container failed to resume before streaming anything', async () => {
+    const { store, resumed, run } = harness([
+      ESTABLISHES_SESSION,
+      {
+        resolved: {
+          status: 'error',
+          result: null,
+          error:
+            'Container exited with code 1: No conversation found with session ID: session-abc',
+        },
+      },
+    ]);
+    await run(makeTask('exit-establish', 'group'));
+    await run(makeTask('exit-resume', 'group'));
+    expect(resumed).toEqual([undefined, 'session-abc']);
+    expect(store).toEqual({});
+  });
+
+  it('leaves the group session unwritten for an isolated-context run', async () => {
+    const { store, resumed, run } = harness();
+    await run(makeTask('isolated-first', 'isolated'));
+    await run(makeTask('isolated-second', 'isolated'));
+    expect(resumed).toEqual([undefined, undefined]);
+    expect(store).toEqual({});
+  });
+});
+
 describe('requester attribution per context mode (sagri-ai#296)', () => {
   beforeEach(() => {
     _initTestDatabase();
@@ -1466,6 +1643,7 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => 'session-abc',
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1521,6 +1699,7 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
           asked.push(groupFolder);
           return 'session-abc';
         },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
