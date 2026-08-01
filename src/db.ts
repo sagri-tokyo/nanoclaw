@@ -83,7 +83,7 @@ function createSchema(database: Database.Database): void {
       -- Mirror of the in-memory session map. Nothing resumes from it and boot
       -- clears every row (deleteAllSessions, sagri-ai#629). Do not drop it:
       -- scripts/cleanup-sessions.sh reads it so the retention pruner spares
-      -- transcripts and debug logs of sessions live in the current process.
+      -- the artifacts of sessions live in the current process.
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
