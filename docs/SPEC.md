@@ -484,7 +484,8 @@ moment. `src/run-requesters.ts` carries the reasoning and the limits.
 Nothing reads a session id back out of the table to resume it, but the table is
 not dead weight: `scripts/cleanup-sessions.sh`, which the service itself runs
 every 24 hours, queries it so retention spares the artifacts (transcripts, debug
-logs, todos, telemetry) of sessions live in the current process.
+logs, todos, telemetry) of sessions live in the current process. If that query
+fails the script prunes nothing and exits non-zero.
 
 ---
 

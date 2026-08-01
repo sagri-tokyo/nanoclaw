@@ -54,15 +54,23 @@ remove() {
 
 # --- Collect active session IDs from the database ---
 
+# Errors go to stderr: execFile in src/session-cleanup.ts drops stdout, so only
+# stderr reaches an operator.
 if [ ! -f "$STORE_DB" ]; then
-  log "ERROR: database not found at $STORE_DB"
+  log "ERROR: database not found at $STORE_DB" >&2
   exit 1
 fi
 
-ACTIVE_IDS=$(sqlite3 "$STORE_DB" "SELECT session_id FROM sessions;" 2>/dev/null || true)
+# Unknown liveness is not "nothing is live": a failed query or a missing sqlite3
+# must abort, not prune. .timeout rides out the write lock the service holds.
+if ! ACTIVE_IDS=$(sqlite3 -cmd '.timeout 5000' "$STORE_DB" \
+  "SELECT session_id FROM sessions;"); then
+  log "ERROR: cannot read live sessions from $STORE_DB, pruning nothing" >&2
+  exit 1
+fi
 
 is_active() {
-  echo "$ACTIVE_IDS" | grep -qF "$1"
+  echo "$ACTIVE_IDS" | grep -qxF "$1"
 }
 
 # --- Prune session JSONLs and tool-results dirs ---
