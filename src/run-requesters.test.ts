@@ -225,14 +225,26 @@ describe('per-request requester correlation (sagri-ai#630)', () => {
   });
 
   it('drops the pin of a request the container deleted before the drain read it', () => {
-    // The IPC directory is a writable mount. Left behind, this pin would answer
-    // for the next request that reuses the name — a set the container picked by
-    // choosing when to delete, rather than one the host attributed.
     setRunRequesters('dev', ['U_BOB'], FRESH);
     setRunRequesters('dev', ['U_ALICE'], pinning(['req-1.json']));
     retainRequestPins('dev', []);
 
     expect(getRunRequesters('dev', 'req-1.json')).toStrictEqual(['U_ALICE']);
+  });
+
+  it('drops an `undefined` pin too, which is a value and not an absence', () => {
+    // The refusing pin is stored as `undefined` and found with `has`, so a sweep
+    // written against truthiness would leave exactly this one immortal. Dropping
+    // it is safe because the file it refused for is gone: a later file reusing
+    // the name is a different request, and answers the slot it was raised under.
+    setRunRequesters('dev', ['U_ALICE'], pinning(['req-stale.json']));
+    expect(getRunRequesters('dev', 'req-stale.json')).toBeUndefined();
+
+    retainRequestPins('dev', []);
+
+    expect(getRunRequesters('dev', 'req-stale.json')).toStrictEqual([
+      'U_ALICE',
+    ]);
   });
 
   it('keeps the pins of requests still sitting in the directory', () => {

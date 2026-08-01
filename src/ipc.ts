@@ -233,9 +233,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
         // Same helper a launch pins against, so the two cannot disagree about
         // which files are requests (sagri-ai#630).
         const requestFiles = listUndrainedIpcRequests(sourceGroup);
-        // Synchronous with the listing above, so no launch can pin between the
-        // two: a container may delete a request file it wrote, and a pin that
-        // outlived its file would answer for a later request reusing the name.
+        // Same synchronous block as the listing, per retainRequestPins.
         retainRequestPins(sourceGroup, requestFiles);
 
         for (const file of requestFiles) {

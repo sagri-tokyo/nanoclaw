@@ -34,8 +34,11 @@
  * run happens to start next — who did not ask for it, and one of whom could
  * otherwise approve their own request.
  *
- * A pin lives exactly as long as its file, or a container could pick a stale set
- * for a request by deleting a file and reusing its name (`retainRequestPins`).
+ * A pin dies when a poll stops seeing its file name (`retainRequestPins`), so it
+ * cannot be parked under a name a later request reuses. Identity is that name
+ * sampled at poll boundaries, not the file: content swapped in under a name that
+ * survives a tick keeps the pin, which needs beating the drain to the launch that
+ * set it.
  *
  * Not fixed here: an isolated scheduled task shares the group folder but not the
  * session, and a request IT writes still reads the live interactive slot. That
@@ -128,26 +131,24 @@ export function clearRequestPin(
 }
 
 /**
- * Drop the group's pins for request files the drain can no longer see. The IPC
- * directory is a writable mount, so a container can delete a request file it
- * wrote before the drain reads it; the pin would then outlive its file and be
- * inherited by a later request that reuses the name — a set chosen by the
- * container rather than by the host.
+ * Drop the group's pins for request files the drain can no longer see, so a pin
+ * cannot outlive its file and be inherited by a later request reusing the name.
  *
- * Call it with the file set the drain just listed, in the same synchronous block
- * as the listing: a launch that pinned between the two would have that pin
- * dropped here, and its request would fall back to the slot it was pinned away
- * from.
+ * The drain is the only caller. Pass the file set it just listed, in the same
+ * synchronous block as the listing: a launch that pinned between the two would
+ * have that pin dropped here, and its request would fall back to the slot it was
+ * pinned away from.
  */
 export function retainRequestPins(
   groupFolder: string,
   requestFiles: string[],
 ): void {
-  const keep = new Set(requestFiles);
+  const keep = new Set(
+    requestFiles.map((file) => requestKey(groupFolder, file)),
+  );
   const prefix = `${groupFolder}/`;
   for (const key of requestersByRequestFile.keys()) {
-    if (!key.startsWith(prefix)) continue;
-    if (!keep.has(key.slice(prefix.length))) {
+    if (key.startsWith(prefix) && !keep.has(key)) {
       requestersByRequestFile.delete(key);
     }
   }
