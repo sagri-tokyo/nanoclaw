@@ -13,7 +13,7 @@ describe('createSessionTracker', () => {
         remember: (_folder, sessionId) => calls.push({ remembered: sessionId }),
         forget: (folder) => calls.push({ forgotten: folder }),
       },
-      { group: 'main' },
+      {},
     );
     return { calls, track };
   }

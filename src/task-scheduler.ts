@@ -398,20 +398,18 @@ async function runTask(
   let error: string | null = null;
   let errorClass: string | null = null;
 
-  // For group context mode, use the group's current session. The call is kept
-  // behind the branch deliberately: an isolated task resumes nothing, and
-  // hoisting it would have every isolated tick eat the group's pending gate
-  // reset and drop a session it never touched.
+  // The call is kept behind the branch deliberately: an isolated task resumes
+  // nothing, and hoisting it would have every isolated tick eat the group's
+  // pending gate reset and drop a session it never touched.
   const isGroupContext = task.context_mode === 'group';
   const sessionId = isGroupContext
     ? deps.sessionForNextRun(task.group_folder)
     : undefined;
 
-  // A group-context run must keep the session it established, or the next run
-  // starts a fresh one and orphans the transcript this one wrote. Dropping a
-  // stale one matters just as much: a cron-only group has no human message to
-  // heal it. Isolated runs share no session with the group, so they track
-  // nothing.
+  // Keeping the session this run established stops the next one starting fresh
+  // and orphaning the transcript. Dropping a stale one matters as much: a
+  // cron-only group has no human message to heal it. Isolated runs share no
+  // session with the group, so they track nothing.
   const track = isGroupContext
     ? createSessionTracker(task.group_folder, sessionId, deps.sessionStore, {
         taskId: task.id,
@@ -518,9 +516,8 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
-    // Streaming mode reports the same id it already streamed, so this mostly
-    // repeats a write. It is not redundant: a run that dies before streaming
-    // anything reports only here.
+    // Usually repeats the id already streamed, but a run that dies before
+    // streaming anything reports only here.
     track(output);
 
     if (output.status === 'error') {

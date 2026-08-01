@@ -28,6 +28,9 @@ import {
   TASK_OUTCOME_FAILURE_ERROR_CLASS,
 } from './task-scheduler.js';
 
+/** For the cases that assert something other than session bookkeeping. */
+const noSessionStore = { remember: () => {}, forget: () => {} };
+
 describe('task scheduler', () => {
   beforeEach(() => {
     _initTestDatabase();
@@ -62,7 +65,7 @@ describe('task scheduler', () => {
     startSchedulerLoop({
       registeredGroups: () => ({}),
       sessionForNextRun: () => undefined,
-      sessionStore: { remember: () => {}, forget: () => {} },
+      sessionStore: noSessionStore,
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -280,7 +283,7 @@ describe('task scheduler', () => {
         startSchedulerLoop({
           registeredGroups: () => ({}),
           sessionForNextRun: () => undefined,
-          sessionStore: { remember: () => {}, forget: () => {} },
+          sessionStore: noSessionStore,
           queue: { enqueueTask } as any,
           onProcess: () => {},
           sendMessage: async () => {},
@@ -562,7 +565,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -609,7 +612,7 @@ describe('runTask consecutive-failure suppression', () => {
         {
           registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
           sessionForNextRun: () => undefined,
-          sessionStore: { remember: () => {}, forget: () => {} },
+          sessionStore: noSessionStore,
           queue: {
             enqueueTask: () => {},
             closeStdin,
@@ -644,7 +647,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -681,7 +684,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -713,7 +716,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -753,7 +756,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -777,7 +780,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -804,7 +807,7 @@ describe('runTask consecutive-failure suppression', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -876,7 +879,7 @@ describe('runTask capability-profile forwarding (sagri-ai#312)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1024,7 +1027,7 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': makeGroup('slack_main') }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1181,7 +1184,7 @@ describe('structured reply mode', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1301,7 +1304,7 @@ describe('structured reply mode', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => undefined,
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1478,8 +1481,8 @@ describe('runTask group session persistence (sagri-ai#633)', () => {
    * `runContainerAgent` then resolves. Production never resolves the streamed
    * marker itself — in streaming mode it resolves a synthetic completion
    * carrying the accumulated session id, or an exit-code error carrying no
-   * session id at all. Echoing the marker instead would let either
-   * `trackGroupSession` call site alone satisfy every assertion here.
+   * session id at all. Echoing the marker instead would let either `track`
+   * call site alone satisfy every assertion here.
    */
   interface FakeRun {
     streamed?: ContainerOutput[];
@@ -1640,7 +1643,7 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
       {
         registeredGroups: () => ({ 'C123@slack': group() }),
         sessionForNextRun: () => 'session-abc',
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},
@@ -1696,7 +1699,7 @@ describe('requester attribution per context mode (sagri-ai#296)', () => {
           asked.push(groupFolder);
           return 'session-abc';
         },
-        sessionStore: { remember: () => {}, forget: () => {} },
+        sessionStore: noSessionStore,
         queue: {
           enqueueTask: () => {},
           closeStdin: () => {},

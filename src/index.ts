@@ -719,9 +719,8 @@ const sessionStore: SessionStore = {
     sessions[groupFolder] = sessionId;
     setSession(groupFolder, sessionId);
   },
-  // dropSession rather than a bare delete: the requester attribution has to go
-  // with the session it was scoped to, or the group holds a dead session's
-  // requesters and refuses every gated action (sagri-ai#629).
+  // dropSession rather than a bare delete: see its doc for what else has to go
+  // with the session (sagri-ai#629).
   forget: dropSession,
 };
 

@@ -11,7 +11,7 @@ export interface SessionStore {
  *
  * Feed it every output the run produces, streamed markers and the final
  * resolved output alike: the id can arrive on either, and in streaming mode a
- * clean exit resolves a synthetic success that carries no error, so a failed
+ * clean exit resolves a synthetic success carrying no error, so a failed
  * resume is only ever visible mid-stream.
  *
  * The drop is latched because the agent-runner keeps echoing the id it was
@@ -36,7 +36,7 @@ export function createSessionTracker(
       logger.warn(
         {
           ...logContext,
-          group: groupFolder,
+          groupFolder,
           staleSessionId: resumedSessionId,
           error: output.error,
         },
