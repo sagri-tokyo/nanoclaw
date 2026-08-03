@@ -54,8 +54,8 @@ remove() {
 
 # --- Collect active session IDs from the database ---
 
-# Errors go to stderr: execFile in src/session-cleanup.ts drops stdout, so only
-# stderr reaches an operator.
+# Errors go to stderr: on failure src/session-cleanup.ts logs the execFile error
+# alone, and only stderr rides along in its message.
 if [ ! -f "$STORE_DB" ]; then
   log "ERROR: database not found at $STORE_DB" >&2
   exit 1
@@ -71,6 +71,20 @@ fi
 
 is_active() {
   echo "$ACTIVE_IDS" | grep -qxF "$1"
+}
+
+# Artifacts name their session in a field of the filename: todos lead with it
+# ("<id>-agent-<id>.json"), telemetry carries it dot-delimited
+# ("1p_failed_events.<id>.<id>.json"). Anchor on those field boundaries: a
+# substring test spares "not-<id>-agent-x.json", which no live session owns.
+names_active_session() {
+  local name="$1" aid
+  for aid in $ACTIVE_IDS; do
+    case "$name" in
+      "$aid" | "$aid"[-.]* | *."$aid".*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # --- Prune session JSONLs and tool-results dirs ---
@@ -117,12 +131,7 @@ for group_dir in "$SESSIONS_DIR"/*/; do
   [ -d "$todos_dir" ] || continue
   while IFS= read -r -d '' f; do
     fname=$(basename "$f" .json)
-    # Todo filenames are like {session_id}-agent-{session_id}.json
-    for aid in $ACTIVE_IDS; do
-      if [[ "$fname" == *"$aid"* ]]; then
-        continue 2
-      fi
-    done
+    names_active_session "$fname" && continue
     remove "$f"
   done < <(find "$todos_dir" -type f -mtime +3 -print0 2>/dev/null)
 done
@@ -134,11 +143,7 @@ for group_dir in "$SESSIONS_DIR"/*/; do
   [ -d "$telem_dir" ] || continue
   while IFS= read -r -d '' f; do
     fname=$(basename "$f")
-    for aid in $ACTIVE_IDS; do
-      if [[ "$fname" == *"$aid"* ]]; then
-        continue 2
-      fi
-    done
+    names_active_session "$fname" && continue
     remove "$f"
   done < <(find "$telem_dir" -type f -mtime +7 -print0 2>/dev/null)
 done

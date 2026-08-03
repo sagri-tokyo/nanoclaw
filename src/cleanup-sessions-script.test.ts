@@ -30,6 +30,8 @@ describe('cleanup-sessions.sh live-session guard', () => {
   let deadTranscript: string;
   // Inside every retention window, so tightening one is not mistaken for pruning.
   let youngTranscript: string;
+  // Contain a live id only as a substring, the shape the old match spared.
+  let substringDecoys: string[];
 
   function sessionPath(relative: string): string {
     return path.join(projectRoot, 'data/sessions/dev/.claude', relative);
@@ -54,6 +56,9 @@ describe('cleanup-sessions.sh live-session guard', () => {
       sessionPath(`debug/${LIVE_ID}.txt`),
       sessionPath(`todos/${LIVE_ID}-agent-${LIVE_ID}.json`),
       sessionPath(`telemetry/${LIVE_ID}-metrics.json`),
+      // Claude Code's own telemetry shape, where the id is a dot-delimited field
+      // rather than the leading one.
+      sessionPath(`telemetry/1p_failed_events.${LIVE_ID}.export-990.json`),
     ];
     secondLiveTranscript = sessionPath(
       `projects/-workspace-group/${SECOND_LIVE_ID}.jsonl`,
@@ -62,6 +67,11 @@ describe('cleanup-sessions.sh live-session guard', () => {
     youngTranscript = sessionPath(
       `projects/-workspace-group/${YOUNG_DEAD_ID}.jsonl`,
     );
+    substringDecoys = [
+      sessionPath(`todos/not-${LIVE_ID}-agent-not-${LIVE_ID}.json`),
+      sessionPath(`telemetry/metrics-not-${LIVE_ID}.json`),
+      sessionPath(`telemetry/1p_failed_events.not-${LIVE_ID}.export-990.json`),
+    ];
 
     fs.mkdirSync(path.dirname(scriptCopy), { recursive: true });
     fs.mkdirSync(shimDirectory, { recursive: true });
@@ -76,6 +86,7 @@ describe('cleanup-sessions.sh live-session guard', () => {
 
     for (const artifact of [
       ...liveArtifacts,
+      ...substringDecoys,
       secondLiveTranscript,
       deadTranscript,
     ]) {
@@ -120,6 +131,7 @@ describe('cleanup-sessions.sh live-session guard', () => {
   function everyArtifact(): string[] {
     return [
       ...liveArtifacts,
+      ...substringDecoys,
       secondLiveTranscript,
       deadTranscript,
       youngTranscript,
@@ -173,6 +185,15 @@ describe('cleanup-sessions.sh live-session guard', () => {
       secondLiveTranscript,
       youngTranscript,
     ]);
+  });
+
+  it('prunes an aged artifact whose name only contains a live id', () => {
+    stubSqlite3(`echo ${LIVE_ID}`);
+
+    const { status } = runCleanup();
+
+    expect(status).toBe(0);
+    expect(survivingArtifacts()).toEqual([...liveArtifacts, youngTranscript]);
   });
 
   it('sends the busy timeout and the sessions query to sqlite3', () => {
