@@ -80,6 +80,10 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
+      -- Mirror of the in-memory session map. Nothing resumes from it and boot
+      -- clears every row (deleteAllSessions, sagri-ai#629). Do not drop it:
+      -- scripts/cleanup-sessions.sh reads it so the retention pruner spares
+      -- the artifacts of sessions live in the current process.
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
@@ -956,7 +960,8 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+/** @internal - tests only. Wiring this into loadState re-introduces sagri-ai#629. */
+export function _getSession(groupFolder: string): string | undefined {
   const row = db
     .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
     .get(groupFolder) as { session_id: string } | undefined;

@@ -16,7 +16,7 @@ import {
   logTaskRun,
   setRegisteredGroup,
   setSession,
-  getSession,
+  _getSession,
   deleteAllSessions,
   storeChatMetadata,
   storeMessage,
@@ -1169,10 +1169,12 @@ describe('deleteAllSessions (sagri-ai#629)', () => {
   it('forgets every group, so a restart resumes nothing it cannot attribute', () => {
     setSession('dev', 'session-abc');
     setSession('ops', 'session-xyz');
+    expect(_getSession('dev')).toBe('session-abc');
+    expect(_getSession('ops')).toBe('session-xyz');
 
     deleteAllSessions();
 
-    expect(getSession('dev')).toBeUndefined();
-    expect(getSession('ops')).toBeUndefined();
+    expect(_getSession('dev')).toBeUndefined();
+    expect(_getSession('ops')).toBeUndefined();
   });
 });

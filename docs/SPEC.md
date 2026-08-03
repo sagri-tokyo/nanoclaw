@@ -459,8 +459,8 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 
 ### How Sessions Work
 
-1. Each group has a session ID stored in SQLite (`sessions` table, keyed by `group_folder`)
-2. Session ID is passed to Claude Agent SDK's `resume` option
+1. Each group has a session ID held in memory, mirrored to SQLite (`sessions` table, keyed by `group_folder`)
+2. Session ID is passed to Claude Agent SDK's `resume` option, within the process lifetime
 3. Claude continues the conversation with full context
 4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
 
@@ -480,6 +480,12 @@ request again works unless the new conversation draws in every approver too.
 
 The second one is recovery, not a bound, and the agent container picks the
 moment. `src/run-requesters.ts` carries the reasoning and the limits.
+
+Nothing reads a session id back out of the table to resume it, but the table is
+not dead weight: `scripts/cleanup-sessions.sh`, which the service itself runs
+every 24 hours, queries it so retention spares the artifacts (transcripts, debug
+logs, todos, telemetry) of sessions live in the current process. If that query
+fails the script prunes nothing and exits non-zero.
 
 ---
 
@@ -660,7 +666,7 @@ NanoClaw runs as a single macOS launchd service.
 When NanoClaw starts, it:
 1. **Ensures container runtime is running** - Automatically starts it if needed; kills orphaned NanoClaw containers from previous runs
 2. Initializes the SQLite database (migrates from JSON files if they exist)
-3. Loads state from SQLite (registered groups, sessions, router state)
+3. Loads state from SQLite (registered groups, router state) and clears the `sessions` table — sessions are never resumed across a restart
 4. **Connects channels** — loops through registered channels, instantiates those with credentials, calls `connect()` on each
 5. Once at least one channel is connected:
    - Starts the scheduler loop
@@ -782,7 +788,7 @@ chmod 700 groups/
 | No response to messages | Service not running | Check `launchctl list | grep nanoclaw` |
 | "Claude Code process exited with code 1" | Container runtime failed to start | Check logs; NanoClaw auto-starts container runtime but may fail |
 | "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
-| Session not continuing | Session ID not saved | Check SQLite: `sqlite3 store/messages.db "SELECT * FROM sessions"` |
+| Session not continuing | In-memory session lost | Check `sqlite3 store/messages.db "SELECT * FROM sessions"` while the process is up; boot clears the table, so empty after a restart is expected |
 | Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
 | "QR code expired" | WhatsApp session expired | Delete store/auth/ and restart |
 | "No groups registered" | Haven't added groups | Use `@Andy add group "Name"` in main |
