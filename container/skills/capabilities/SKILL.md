@@ -34,16 +34,12 @@ Each directory is an installed skill. The directory name is the skill name (e.g.
 
 ### 2. Available tools
 
-Read the allowed tools from your SDK configuration. The surface depends on the
-container's capability profile — the list below is the `operator` profile.
-`trusted-writer` containers get a strict subset (no WebFetch, no orchestration
-tools, no scheduler tools); the reviewed manifest for both is
-`container/agent-runner/tool-allowlist.json`.
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **Other:** TodoWrite, ToolSearch, Skill, NotebookEdit
-- **MCP:** mcp__nanoclaw__* (messaging, tasks, group management)
+Your tools depend on the container's capability profile: `operator` gets the
+full surface, `trusted-writer` a subset. Read both lists rather than assuming:
+
+```bash
+cat /app/tool-allowlist.json
+```
 
 ### 3. MCP server tools
 
@@ -56,6 +52,10 @@ The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
 - `cancel_task` — cancel and delete a task
 - `update_task` — update an existing task
 - `register_group` — register a new chat/group (main only)
+- `fetch_untrusted` — host-side fetch and launder of one untrusted source
+- `fetch_untrusted_list` — the same for a list query
+- `org_action` — request a host-executed org write (the only write path without a token)
+- `report_outcome` — record a scheduled task's per-item outcome
 
 ### 4. Container skills (Bash tools)
 

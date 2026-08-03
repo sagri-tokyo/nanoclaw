@@ -2,21 +2,19 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import {
-  TOOL_ALLOWLIST_MANIFEST_PATH,
-  allowedToolsFor,
-  toolAllowlistByProfile,
-} from './tool-allowlist.js';
+import { allowedToolsFor, toolAllowlistByProfile } from './tool-allowlist.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function readManifest(): Record<string, string[]> {
-  return JSON.parse(fs.readFileSync(TOOL_ALLOWLIST_MANIFEST_PATH, 'utf-8'));
+  return JSON.parse(
+    fs.readFileSync(path.join(here, '..', 'tool-allowlist.json'), 'utf-8'),
+  );
 }
 
 function registeredMcpTools(): string[] {
   const source = fs.readFileSync(path.join(here, 'ipc-mcp-stdio.ts'), 'utf-8');
-  return [...source.matchAll(/^server\.tool\(\n\s+'([a-z_]+)',/gm)].map(
+  return [...source.matchAll(/server\.tool\(\s*'([a-z0-9_]+)'/g)].map(
     (match) => `mcp__nanoclaw__${match[1]}`,
   );
 }
@@ -26,28 +24,32 @@ describe('capability profiles resolve to separate tool lists', () => {
     const operator = allowedToolsFor('operator');
     const trustedWriter = allowedToolsFor('trusted-writer');
 
-    expect(trustedWriter).not.toEqual(operator);
     expect(operator).toEqual(expect.arrayContaining(trustedWriter));
     expect(trustedWriter.length).toBeLessThan(operator.length);
   });
 
   it('denies the token-holding profile the scheduler and team surface', () => {
-    expect(allowedToolsFor('trusted-writer')).toEqual([
-      'Bash',
-      'Read',
-      'Write',
-      'Edit',
-      'Glob',
-      'Grep',
-      'WebSearch',
-      'TodoWrite',
-      'ToolSearch',
-      'Skill',
-      'mcp__nanoclaw__send_message',
-      'mcp__nanoclaw__fetch_untrusted',
-      'mcp__nanoclaw__fetch_untrusted_list',
-      'mcp__nanoclaw__org_action',
-      'mcp__nanoclaw__report_outcome',
+    const trustedWriter = allowedToolsFor('trusted-writer');
+    const denied = allowedToolsFor('operator').filter(
+      (tool) => !trustedWriter.includes(tool),
+    );
+
+    expect(denied).toEqual([
+      'WebFetch',
+      'Task',
+      'TaskOutput',
+      'TaskStop',
+      'TeamCreate',
+      'TeamDelete',
+      'SendMessage',
+      'NotebookEdit',
+      'mcp__nanoclaw__schedule_task',
+      'mcp__nanoclaw__list_tasks',
+      'mcp__nanoclaw__pause_task',
+      'mcp__nanoclaw__resume_task',
+      'mcp__nanoclaw__cancel_task',
+      'mcp__nanoclaw__update_task',
+      'mcp__nanoclaw__register_group',
     ]);
   });
 
@@ -56,7 +58,7 @@ describe('capability profiles resolve to separate tool lists', () => {
   });
 
   it('throws on a profile it does not know', () => {
-    expect(() => allowedToolsFor('root' as 'operator')).toThrow(
+    expect(() => allowedToolsFor('root')).toThrow(
       /unknown capability profile: root/,
     );
   });

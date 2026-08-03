@@ -1,6 +1,3 @@
-import path from 'path';
-import { fileURLToPath } from 'url';
-
 /**
  * Per-capability-profile tool allowlist (sagri-ai#649, closing the #312 TODO).
  *
@@ -8,14 +5,20 @@ import { fileURLToPath } from 'url';
  * so every write already has to route through the host-executed `org_action`
  * gate, and the human driving it needs the full research and subagent surface.
  *
- * `trusted-writer` is the opposite trade. It runs only the four registered
- * ScheduledTask prompts (notion-poller, dsm-experiment-poller,
- * dsm-experiment-submitter, raw-ingest) and it is the profile that has the
- * Notion and GitHub tokens mounted, so it gets the strict subset: no raw
- * WebFetch (untrusted bytes must arrive laundered via `fetch_untrusted`, per
- * the D4.1 reader/actor split), no subagent teams, and none of the scheduler
- * administration tools — an injected prompt must not be able to reprogram or
- * cancel the fleet's own cron entries while holding a write credential.
+ * `trusted-writer` runs only the four registered ScheduledTask prompts
+ * (notion-poller, dsm-experiment-poller, dsm-experiment-submitter, raw-ingest)
+ * and is the profile that has the Notion and GitHub tokens mounted, so it gets
+ * the subset those four prompts actually use: no WebFetch, no subagent teams,
+ * none of the scheduler administration tools.
+ *
+ * What that subset is and is not worth: it narrows what an injected prompt
+ * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
+ * the image ships curl, and container egress is unrestricted, so dropping
+ * WebFetch does not make laundered reads the only way bytes arrive
+ * (sagri-ai#86). Nor does denying `trusted-writer` the scheduler tools protect
+ * the cron entries: `operator` keeps them, and the host authorizes a main-group
+ * container to update any task's prompt (`src/ipc.ts`, the `!isMain &&` guard),
+ * which is a cross-profile escalation this file cannot close (sagri-ai#651).
  *
  * The lists below are mirrored by the reviewed manifest at
  * `container/agent-runner/tool-allowlist.json`; `tool-allowlist.test.ts` fails
@@ -75,24 +78,21 @@ export const toolAllowlistByProfile = {
 
 export type CapabilityProfile = keyof typeof toolAllowlistByProfile;
 
-export const TOOL_ALLOWLIST_MANIFEST_PATH = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'tool-allowlist.json',
-);
-
 /**
  * An absent profile resolves to `operator`, matching the host: `buildContainerPlan`
  * resolves the same absence the same way, so a container with no declared profile
  * was mounted without either write token.
+ *
+ * The parameter is `string`, not `CapabilityProfile`, because that is what the
+ * caller has: `capabilityProfile` arrives as unvalidated stdin JSON. Hence
+ * `hasOwn` rather than an `undefined` check, since a value like `constructor`
+ * resolves through the prototype and would throw a TypeError instead of naming
+ * the input.
  */
-export function allowedToolsFor(
-  profile: CapabilityProfile | undefined,
-): string[] {
+export function allowedToolsFor(profile: string | undefined): string[] {
   const resolved = profile ?? 'operator';
-  const tools = toolAllowlistByProfile[resolved];
-  if (tools === undefined) {
+  if (!Object.hasOwn(toolAllowlistByProfile, resolved)) {
     throw new Error(`unknown capability profile: ${resolved}`);
   }
-  return [...tools];
+  return [...toolAllowlistByProfile[resolved as CapabilityProfile]];
 }

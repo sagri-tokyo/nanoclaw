@@ -45,12 +45,12 @@ ls /workspace/ipc/ 2>/dev/null
 
 ### 3. Tool availability
 
-Confirm which tool families are available to you:
+Confirm which tools are available to you. What you get depends on the
+container's capability profile:
 
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
+```bash
+cat /app/tool-allowlist.json
+```
 
 ### 4. Container utilities
 
