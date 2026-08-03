@@ -34,7 +34,11 @@ Each directory is an installed skill. The directory name is the skill name (e.g.
 
 ### 2. Available tools
 
-Read the allowed tools from your SDK configuration. You always have access to:
+Read the allowed tools from your SDK configuration. The surface depends on the
+container's capability profile — the list below is the `operator` profile.
+`trusted-writer` containers get a strict subset (no WebFetch, no orchestration
+tools, no scheduler tools); the reviewed manifest for both is
+`container/agent-runner/tool-allowlist.json`.
 - **Core:** Bash, Read, Write, Edit, Glob, Grep
 - **Web:** WebSearch, WebFetch
 - **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
