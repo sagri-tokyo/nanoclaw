@@ -46,6 +46,7 @@
     "mcp__nanoclaw__fetch_untrusted",
     "mcp__nanoclaw__fetch_untrusted_list",
     "mcp__nanoclaw__org_action",
-    "mcp__nanoclaw__report_outcome"
+    "mcp__nanoclaw__report_outcome",
+    "mcp__nanoclaw__cancel_task"
   ]
 }
