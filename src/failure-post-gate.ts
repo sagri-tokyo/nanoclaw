@@ -90,9 +90,14 @@ export function failureClearsPostThreshold(
         taskId: task.id,
         threshold,
         priorStatuses,
-        entityId: outcome?.entity_id,
-        status: outcome?.status,
-        errorClass: outcome?.error_class,
+        // Spread, not three optional fields: the log formatter renders a
+        // present-but-undefined key as the text `undefined`, and a task-level
+        // failure has no entity to name.
+        ...(outcome && {
+          entityId: outcome.entity_id,
+          status: outcome.status,
+          errorClass: outcome.error_class,
+        }),
       },
       'Scheduled task failed but consecutive-failure threshold not met; suppressing Slack post',
     );
