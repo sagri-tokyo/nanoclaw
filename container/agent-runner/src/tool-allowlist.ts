@@ -44,7 +44,9 @@
  * `allowedTools` stays as the written record of intent. It is not the granted
  * set: the denial is a complement of these two lists, so a built-in on neither
  * one is denied to nobody, and a tool a future SDK adds is granted by default.
- * The SDK's positive `tools` base set would fail closed instead (nanoclaw#115).
+ * The SDK's positive `tools` base set would fail closed instead. Switching to it
+ * needs a container run to pin down which built-ins the runner needs (`tools`
+ * disables every name it omits), which nothing in this repo can exercise.
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
