@@ -84,8 +84,9 @@ Present the report as a clean, readable message. Example:
 • /capabilities — This report
 (list all found skills)
 
-*Tools:* (capability profile: operator or trusted-writer)
-• (list the tools this profile has, from /app/tool-allowlist.json)
+*Tools:*
+• (both profiles from /app/tool-allowlist.json; the container is not told which
+  one it runs as, so report both rather than guessing)
 
 *Container Tools:*
 • agent-browser: ✓

@@ -25,7 +25,11 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { RetryBudget, readMax529Retries } from './retry-budget.js';
-import { allowedToolsFor, type CapabilityProfile } from './tool-allowlist.js';
+import {
+  allowedToolsFor,
+  deniedToolsFor,
+  type CapabilityProfile,
+} from './tool-allowlist.js';
 import { HTTP_STATUS_529_ERROR_CLASS } from './message-loop.js';
 
 interface ContainerInput {
@@ -497,6 +501,7 @@ async function runQuery(
           }
         : undefined,
       allowedTools: allowedToolsFor(containerInput.capabilityProfile),
+      disallowedTools: deniedToolsFor(containerInput.capabilityProfile),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,

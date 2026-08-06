@@ -15,22 +15,33 @@
  * with curl through the reader RPC, so a search tool would be an unlaundered
  * read straight into the token-holding container.
  *
- * A granted-but-unused tool would mean this list was never really reviewed, so
- * each one that stays has a reason:
+ * Two kinds of entry stay on the `trusted-writer` list, and they are worth
+ * telling apart. These have a named consumer today:
  *   Bash                    every prompt runs shell blocks
- *   Read Write Edit         raw-ingest writes and re-reads its dumps
- *   Glob Grep               local workspace search
  *   Skill                   org-actions, notion-writer, dsm-experiment
- *   TodoWrite ToolSearch    agent-internal bookkeeping, no external reach
- *   send_message            operator progress outside the structured reply
+ *   Read Write Edit         raw-ingest writes and re-reads its dumps
  *   fetch_untrusted_list    the laundered enumeration path, used by all four
  *   fetch_untrusted         the laundered per-item read, used by raw-ingest
  *   org_action              notion-poller's write-back contract
- *   report_outcome          host-enforced. A tick that reports nothing is
- *                           logged failed (`src/task-scheduler.ts`), so a
- *                           scheduled task cannot run without it
- * The file tools grant nothing `Bash` does not already reach, and `Bash` has to
- * stay, so they are here for ergonomics rather than capability.
+ *
+ * These have none, and ride along because they add no reach over `Bash`, which
+ * has to stay: Glob, Grep, TodoWrite, ToolSearch, send_message. Denying them
+ * would buy nothing an attacker could not do with a shell.
+ *
+ * `report_outcome` is the honest exception. The host derives a scheduled run's
+ * status from it and logs a silent tick as failed, but only for `reply_mode =
+ * structured` (`deriveStructuredRunError`, `src/task-scheduler.ts`), and every
+ * registered task today runs the default text mode and never calls it. It is
+ * granted for the structured-mode tasks this profile is meant to carry, not
+ * because anything uses it yet.
+ *
+ * How this is enforced matters, because the obvious reading is wrong. The SDK's
+ * `allowedTools` only auto-approves without prompting ("To restrict which tools
+ * are available, use the `tools` option instead"), and the runner already sets
+ * `permissionMode: 'bypassPermissions'`, so a name's absence from `allowedTools`
+ * removes nothing. `deniedToolsFor` supplies the complement to `disallowedTools`,
+ * which the SDK does remove from the model's context. That is the option doing
+ * the work; `allowedTools` is kept only so the granted set stays explicit.
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -115,4 +126,16 @@ export function allowedToolsFor(profile: string | undefined): string[] {
     throw new Error(`unknown capability profile: ${resolved}`);
   }
   return [...toolAllowlistByProfile[resolved as CapabilityProfile]];
+}
+
+/**
+ * The tools this profile does not get, as `disallowedTools` wants them.
+ *
+ * Taken against `operator` because that is the widest profile, so the result is
+ * what this profile gives up relative to the full surface. `operator` itself
+ * denies nothing.
+ */
+export function deniedToolsFor(profile: string | undefined): string[] {
+  const granted = new Set(allowedToolsFor(profile));
+  return toolAllowlistByProfile.operator.filter((tool) => !granted.has(tool));
 }

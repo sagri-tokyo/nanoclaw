@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { allowedToolsFor, toolAllowlistByProfile } from './tool-allowlist.js';
+import {
+  allowedToolsFor,
+  deniedToolsFor,
+  toolAllowlistByProfile,
+} from './tool-allowlist.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,11 +44,12 @@ describe('capability profiles resolve to separate tool lists', () => {
     expect(trustedWriter.length).toBeLessThan(operator.length);
   });
 
+  it('denies operator nothing, since it is the widest profile', () => {
+    expect(deniedToolsFor('operator')).toEqual([]);
+  });
+
   it('denies the token-holding profile the scheduler and team surface', () => {
-    const trustedWriter = allowedToolsFor('trusted-writer');
-    const denied = allowedToolsFor('operator').filter(
-      (tool) => !trustedWriter.includes(tool),
-    );
+    const denied = deniedToolsFor('trusted-writer');
 
     expect(denied).toEqual([
       'WebSearch',
@@ -88,6 +93,13 @@ describe('the checked-in manifest matches the runtime surface', () => {
       'allowedTools: allowedToolsFor(containerInput.capabilityProfile)',
     );
     expect(source).not.toMatch(/allowedTools: \[/);
+  });
+
+  it('hands the denied set to the option that actually restricts', () => {
+    const source = fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
+    expect(source).toContain(
+      'disallowedTools: deniedToolsFor(containerInput.capabilityProfile)',
+    );
   });
 
   it('grants the same profiles the host will send', () => {
