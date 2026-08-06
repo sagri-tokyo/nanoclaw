@@ -57,6 +57,12 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached)).toBe(true);
   });
 
+  it('refreshes a missing copy even when the repo source is empty', () => {
+    expect(needsAgentRunnerRefresh(source, path.join(root, 'absent'))).toBe(
+      true,
+    );
+  });
+
   it('keeps a group customization newer than the repo', () => {
     write(source, 'index.ts', 'a', 1_000_000);
     write(cached, 'index.ts', 'customized', 3_000_000);

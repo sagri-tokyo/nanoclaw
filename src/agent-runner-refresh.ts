@@ -2,9 +2,6 @@ import fs from 'fs';
 import path from 'path';
 
 function newestMtime(dir: string): number {
-  if (!fs.existsSync(dir)) {
-    return 0;
-  }
   return fs
     .readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -18,10 +15,10 @@ function newestMtime(dir: string): number {
 /**
  * Whether a group's cached agent-runner copy is behind the repo source.
  *
- * Compares the whole directory rather than `index.ts` alone: the tool allowlist
- * lives in `tool-allowlist.ts`, so a commit that tightens a capability profile
- * and touches nothing else would otherwise leave every existing group compiling
- * the old list.
+ * Whole-directory compare, not `index.ts` alone: the tool allowlist lives in
+ * `tool-allowlist.ts`, so a profile-only change has to invalidate the copy too.
+ *
+ * Throws if `sourceDir` is missing; the caller checks that first.
  */
 export function needsAgentRunnerRefresh(
   sourceDir: string,
