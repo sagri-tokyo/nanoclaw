@@ -70,10 +70,10 @@ export function shouldPostFailure(
  */
 export function failureClearsPostThreshold(
   task: ScheduledTask,
-  // What was held, when the caller knows. A task-level failure has nothing to
-  // add; an outcome record does, and this is the only info line either emits,
-  // so without it a tick holding several entities logs identical lines.
-  held: Record<string, unknown> = {},
+  // Only an outcome record can say what was held, and this is the sole info
+  // line either caller emits, so without it a tick holding several entities
+  // logs identical lines.
+  outcome?: Pick<TaskOutcome, 'entity_id' | 'status' | 'error_class'>,
 ): boolean {
   const threshold = task.failure_post_threshold ?? 2;
   const priorStatuses = getRecentTaskRunStatuses(
@@ -86,7 +86,14 @@ export function failureClearsPostThreshold(
     // not reach anyone, and LOG_LEVEL defaults to info. Suppression is rare by
     // construction, so it does not add routine noise.
     logger.info(
-      { taskId: task.id, threshold, priorStatuses, ...held },
+      {
+        taskId: task.id,
+        threshold,
+        priorStatuses,
+        entityId: outcome?.entity_id,
+        status: outcome?.status,
+        errorClass: outcome?.error_class,
+      },
       'Scheduled task failed but consecutive-failure threshold not met; suppressing Slack post',
     );
   }
@@ -108,11 +115,5 @@ export function decideOutcomeDisposition(
     return 'repeat';
   }
   if (!RUN_FAILING_OUTCOME_STATUSES.has(outcome.status)) return 'posted';
-  return failureClearsPostThreshold(task, {
-    entityId: outcome.entity_id,
-    status: outcome.status,
-    errorClass: outcome.error_class,
-  })
-    ? 'posted'
-    : 'held';
+  return failureClearsPostThreshold(task, outcome) ? 'posted' : 'held';
 }

@@ -944,11 +944,13 @@ export function commitTaskOutcome(
     | undefined;
 
   // `repeat` only comes from a `taskOutcomeIsNew` that saw a row with a stamp,
-  // and the drain runs both synchronously, so no in-repo path can clear the row
-  // in between. This guards out-of-band deletion and a corrupt DB. Throwing
-  // costs the commit, so `recorded_at` is not refreshed and the run may log
-  // green, resetting the streak; that is still better than inventing a stamp,
-  // which would mark the record reported and silence it for good.
+  // and the repeat branch runs peek and commit synchronously, so no in-repo
+  // path clears the row in between. This guards out-of-band deletion and a
+  // corrupt DB. Throwing is expensive: it skips the commit and the audit
+  // record, and the drain quarantines the request into ipc/errors, which is
+  // excluded from every later scan, so only the container re-emitting recovers
+  // it. Still better than inventing a stamp, which marks the record reported
+  // and silences it for good.
   if (disposition === 'repeat' && existing === undefined) {
     throw new Error(
       `commitTaskOutcome: repeat disposition for ${row.task_id}/${row.entity_id}/${row.status} but the row is gone`,

@@ -157,6 +157,17 @@ describe('decideOutcomeDisposition', () => {
     ).toBe('posted');
   });
 
+  // Two runs so `previousRunCutoff` (OFFSET 1) resolves to 01:00 rather than
+  // the empty string, which is what makes the recency half testable at all.
+  function postedAt(taskId: string, recordedAt: string) {
+    commitTaskOutcome(
+      { ...failure, group_folder: 'slack_main', recorded_at: recordedAt },
+      'posted',
+    );
+    priorRun(taskId, 'error', '2026-05-15T01:00:00.000Z');
+    priorRun(taskId, 'error', '2026-05-15T02:00:00.000Z');
+  }
+
   it('reports a repeat without consulting the threshold', () => {
     const scheduled = task(2);
     commitTaskOutcome(
@@ -170,24 +181,22 @@ describe('decideOutcomeDisposition', () => {
     expect(decideOutcomeDisposition(scheduled, failure)).toBe('repeat');
   });
 
-  it('treats a posted record older than the previous run as news again', () => {
-    // The repeat rule has two halves: a stamp AND recency. The test above only
-    // has one prior run, so the cutoff is empty and recency passes trivially.
-    // With enough history for a real cutoff, a stamped record that predates it
-    // is a later outage, not a repeat, which is what stops dedupe from
-    // becoming permanent silence.
+  it('still calls a record posted inside the previous run a repeat', () => {
+    // The recency boundary. `previousRunCutoff` is OFFSET 1, the end of run
+    // N-2, so a record stamped after it belongs to the run that reported it
+    // and must stay suppressed. Seeding a record older than every run would
+    // pass under OFFSET 0 too and pin nothing.
     const scheduled = task(2);
-    commitTaskOutcome(
-      {
-        ...failure,
-        group_folder: 'slack_main',
-        recorded_at: '2026-05-15T00:00:00.000Z',
-      },
-      'posted',
-    );
-    priorRun(scheduled.id, 'error', '2026-05-15T01:00:00.000Z');
-    priorRun(scheduled.id, 'error', '2026-05-15T02:00:00.000Z');
-    expect(decideOutcomeDisposition(scheduled, failure)).toBe('posted');
+    postedAt(scheduled.id, '2026-05-15T01:30:00.000Z');
+    expect(decideOutcomeDisposition(scheduled, failure)).toBe('repeat');
+  });
+
+  it('treats a record posted before the previous run as news again', () => {
+    // The other side of that boundary: an older stamp is a later outage, not a
+    // repeat, which is what stops dedupe becoming permanent silence.
+    const scheduled = task(2);
+    postedAt(scheduled.id, '2026-05-15T00:30:00.000Z');
+    expect(decideOutcomeDisposition(scheduled, failure)).not.toBe('repeat');
   });
 
   it('keeps a held record eligible instead of collapsing it into a repeat', () => {
