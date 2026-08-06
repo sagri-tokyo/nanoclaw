@@ -68,13 +68,10 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
-  it('cannot be vetoed by the container touching its own copy', () => {
+  it('re-copies when the stamp is unreadable rather than skipping', () => {
     syncFromRepo();
-    write(path.join(cached, 'tool-allowlist.ts'), 'self-granted', 9_000_000);
+    fs.writeFileSync(stamp, '');
 
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
-
-    write(path.join(source, 'tool-allowlist.ts'), 'tightened', 2_000_000);
     expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 

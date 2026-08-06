@@ -85,8 +85,9 @@ Present the report as a clean, readable message. Example:
 (list all found skills)
 
 *Tools:*
-• (both profiles from /app/tool-allowlist.json; the container is not told which
-  one it runs as, so report both rather than guessing)
+• (the tools you actually have. Denied ones are absent from your context, so
+  match what you have against /app/tool-allowlist.json to see which profile you
+  are, and report only that profile's list)
 
 *Container Tools:*
 • agent-browser: ✓

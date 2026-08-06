@@ -36,21 +36,27 @@
  * because anything uses it yet.
  *
  * How this is enforced matters, because the obvious reading is wrong. The SDK's
- * `allowedTools` only auto-approves without prompting ("To restrict which tools
- * are available, use the `tools` option instead"), and the runner already sets
- * `permissionMode: 'bypassPermissions'`, so a name's absence from `allowedTools`
- * removes nothing. `deniedToolsFor` supplies the complement to `disallowedTools`,
- * which the SDK does remove from the model's context. That is the option doing
- * the work; `allowedTools` is kept only so the granted set stays explicit.
+ * `allowedTools` only auto-approves without prompting, and the runner already
+ * sets `permissionMode: 'bypassPermissions'`, so a name's absence from it
+ * removes nothing. `deniedToolsFor` feeds `disallowedTools`, which the SDK does
+ * remove from the model's context, and that is the option doing the work.
+ *
+ * `allowedTools` stays as the written record of intent. It is not the granted
+ * set: the denial is a complement of these two lists, so a built-in on neither
+ * one is denied to nobody, and a tool a future SDK adds is granted by default.
+ * The SDK's positive `tools` base set would fail closed instead (nanoclaw#115).
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
  * the image ships curl, and container egress is unrestricted, so dropping
  * WebFetch does not make laundered reads the only way bytes arrive
- * (sagri-ai#86). Nor does denying `trusted-writer` the scheduler tools protect
- * the cron entries: `operator` keeps them, and the host authorizes a main-group
- * container to update any task's prompt (`src/ipc.ts`, the `!isMain &&` guard),
- * which is a cross-profile escalation this file cannot close (sagri-ai#651).
+ * (sagri-ai#86). Nor does denying the scheduler tools protect the cron entries.
+ * Those tools deliver by writing a JSON file into the `/workspace/ipc` mount,
+ * and `Bash` writes that file just as well, so the denial takes them off the
+ * model's menu without taking them out of the container's reach. The host does
+ * recompute `isMain` from the directory path, so a forged file cannot claim to
+ * be the main group, but a task already running there can still rewrite any
+ * task's prompt (sagri-ai#651).
  *
  * The lists below are mirrored by the reviewed manifest at
  * `container/agent-runner/tool-allowlist.json`; `tool-allowlist.test.ts` fails
