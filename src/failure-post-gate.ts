@@ -62,10 +62,12 @@ export function shouldPostFailure(
  * Meant for a run that is still in flight: it reads `task_run_logs`, where the
  * current run's row is not yet written, so every row it sees is prior.
  *
- * A record the drain handles late miscounts by one tick in either direction
- * depending on which landmark it missed — past `logTaskRun` the current run's
- * own red row reads as prior, past `getTaskOutcomesSince` the run logs green
- * and resets the streak. Neither is worth a shared clock.
+ * A record the drain handles after the run has moved on miscounts by one tick.
+ * The two landmarks are sequential, so late past `getTaskOutcomesSince` means
+ * the record does not colour this run and the run can log green, resetting the
+ * streak. Late past `logTaskRun` as well, a run already red for some other
+ * reason counts as prior history and clears the threshold a tick early. Both
+ * are bounded by one tick and neither is worth a shared clock.
  */
 export function failureClearsPostThreshold(task: ScheduledTask): boolean {
   const threshold = task.failure_post_threshold ?? 2;

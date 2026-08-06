@@ -902,18 +902,19 @@ export async function processTaskIpc(
       if (disposition === 'posted') {
         // Post before committing the dedupe row. If the post throws, the outer
         // watcher moves this file to ipc/errors and no row is written, so the
-        // next tick re-derives isNew and retries rather than dropping the
-        // outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105).
+        // next tick re-derives the disposition and retries rather than dropping
+        // the outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105).
         // Cron output replies to no message, so it must not staple onto
         // whichever human last spoke in the channel (sagri-ai#371).
         await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
           target: { kind: 'topLevel' },
         });
       } else {
-        // Covers both non-posting dispositions. `held` is already logged at
-        // info by the gate with the run history behind it, so this adds which
-        // entity; a dropped `repeat` is only ever debug.
-        logger.debug(
+        // `held` at info: the gate's own info line carries the run history but
+        // not the entity, and LOG_LEVEL defaults to info, so without this a
+        // tick holding several entities prints identical lines. A dropped
+        // `repeat` is routine, so it stays at debug.
+        logger[disposition === 'held' ? 'info' : 'debug'](
           {
             sourceGroup,
             taskId: outcome.task_id,

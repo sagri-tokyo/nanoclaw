@@ -943,9 +943,18 @@ export function commitTaskOutcome(
     | { id: number; posted_at: string | null }
     | undefined;
 
-  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row, so `existing`
-  // is there to read the stamp back off. If it somehow is not, NULL is the safe
-  // answer: the record reads as unreported and the next tick retries it.
+  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row with a stamp,
+  // so `existing` is there to read that stamp back off. Reaching here without
+  // it means the row vanished between the peek and the commit, which breaks the
+  // single-threaded-drain assumption the split relies on. Throw rather than
+  // substitute a stamp: the drain moves the file to ipc/errors and the next
+  // tick retries, where guessing would quietly mislabel the record.
+  if (disposition === 'repeat' && existing === undefined) {
+    throw new Error(
+      `commitTaskOutcome: repeat disposition for ${row.task_id}/${row.entity_id}/${row.status} but the row is gone`,
+    );
+  }
+
   const postedAt = {
     posted: row.recorded_at,
     repeat: existing?.posted_at ?? null,

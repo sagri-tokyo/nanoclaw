@@ -1,16 +1,30 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  decideOutcomeDisposition,
   failureClearsPostThreshold,
   shouldPostFailure,
 } from './failure-post-gate.js';
 import {
   _initTestDatabase,
+  commitTaskOutcome,
   createTask,
   getTaskById,
   logTaskRun,
 } from './db.js';
+import type { TaskOutcome } from './task-outcome.js';
 import type { ScheduledTask } from './types.js';
+
+function priorRun(taskId: string, status: 'success' | 'error', at: string) {
+  logTaskRun({
+    task_id: taskId,
+    run_at: at,
+    duration_ms: 1,
+    status,
+    result: null,
+    error: status === 'error' ? 'boom' : null,
+  });
+}
 
 describe('shouldPostFailure', () => {
   it('returns true on every failure when threshold is 1 (opt-out)', () => {
@@ -73,17 +87,6 @@ describe('failureClearsPostThreshold', () => {
     return getTaskById(`thr-${threshold}`) as ScheduledTask;
   }
 
-  function priorRun(taskId: string, status: 'success' | 'error', at: string) {
-    logTaskRun({
-      task_id: taskId,
-      run_at: at,
-      duration_ms: 1,
-      status,
-      result: null,
-      error: status === 'error' ? 'boom' : null,
-    });
-  }
-
   it('holds a first-ever failure at the default threshold', () => {
     expect(failureClearsPostThreshold(task(2))).toBe(false);
   });
@@ -113,5 +116,85 @@ describe('failureClearsPostThreshold', () => {
 
   it('posts every failure at threshold 1', () => {
     expect(failureClearsPostThreshold(task(1))).toBe(true);
+  });
+});
+
+describe('decideOutcomeDisposition', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  function task(threshold: number): ScheduledTask {
+    createTask({
+      id: 'poller',
+      group_folder: 'slack_main',
+      chat_jid: 'C123@slack',
+      prompt: 'Poll and report.',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-15T00:15:00.000Z',
+      status: 'active',
+      created_at: '2026-05-15T00:00:00.000Z',
+      failure_post_threshold: threshold,
+    });
+    return getTaskById('poller') as ScheduledTask;
+  }
+
+  const failure: TaskOutcome = {
+    task_id: 'poller',
+    entity_id: 'exp-001',
+    status: 'failed',
+    error_class: 'skill_failed',
+    detail: null,
+  };
+
+  it('holds a run-failing status that has not cleared the threshold', () => {
+    expect(decideOutcomeDisposition(task(2), failure)).toBe('held');
+  });
+
+  it('posts a run-failing status once the prior run was also red', () => {
+    const scheduled = task(2);
+    priorRun(scheduled.id, 'error', '2026-05-15T00:00:00.000Z');
+    expect(decideOutcomeDisposition(scheduled, failure)).toBe('posted');
+  });
+
+  it('never gates a status that leaves the run green', () => {
+    // `rejected` never turns a run red, so gating it would suppress it forever.
+    expect(
+      decideOutcomeDisposition(task(2), {
+        ...failure,
+        status: 'rejected',
+        error_class: 'rejected_injection',
+      }),
+    ).toBe('posted');
+  });
+
+  it('reports a repeat without consulting the threshold', () => {
+    const scheduled = task(2);
+    commitTaskOutcome(
+      {
+        ...failure,
+        group_folder: 'slack_main',
+        recorded_at: '2026-05-15T00:15:00.000Z',
+      },
+      'posted',
+    );
+    expect(decideOutcomeDisposition(scheduled, failure)).toBe('repeat');
+  });
+
+  it('keeps a held record eligible instead of collapsing it into a repeat', () => {
+    const scheduled = task(2);
+    commitTaskOutcome(
+      {
+        ...failure,
+        group_folder: 'slack_main',
+        recorded_at: '2026-05-15T00:15:00.000Z',
+      },
+      'held',
+    );
+    priorRun(scheduled.id, 'error', '2026-05-15T00:00:00.000Z');
+    expect(decideOutcomeDisposition(scheduled, failure)).toBe('posted');
   });
 });
