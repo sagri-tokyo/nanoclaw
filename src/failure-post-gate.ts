@@ -62,14 +62,19 @@ export function shouldPostFailure(
  * Meant for a run that is still in flight: it reads `task_run_logs`, where the
  * current run's row is not yet written, so every row it sees is prior.
  *
- * A record the drain handles after the run has moved on miscounts by one tick.
- * The two landmarks are sequential, so late past `getTaskOutcomesSince` means
- * the record does not colour this run and the run can log green, resetting the
- * streak. Late past `logTaskRun` as well, a run already red for some other
- * reason counts as prior history and clears the threshold a tick early. Both
- * are bounded by one tick and neither is worth a shared clock.
+ * A record drained after the run moved on miscounts by one tick. Past
+ * `getTaskOutcomesSince` it does not colour this run, so the run can log green
+ * and reset the streak. Past `logTaskRun` too, a run already red for another
+ * reason counts as prior history and clears the threshold a tick early. Neither
+ * is worth a shared clock.
  */
-export function failureClearsPostThreshold(task: ScheduledTask): boolean {
+export function failureClearsPostThreshold(
+  task: ScheduledTask,
+  // What was held, when the caller knows. A task-level failure has nothing to
+  // add; an outcome record does, and this is the only info line either emits,
+  // so without it a tick holding several entities logs identical lines.
+  held: Record<string, unknown> = {},
+): boolean {
   const threshold = task.failure_post_threshold ?? 2;
   const priorStatuses = getRecentTaskRunStatuses(
     task.id,
@@ -81,7 +86,7 @@ export function failureClearsPostThreshold(task: ScheduledTask): boolean {
     // not reach anyone, and LOG_LEVEL defaults to info. Suppression is rare by
     // construction, so it does not add routine noise.
     logger.info(
-      { taskId: task.id, threshold, priorStatuses },
+      { taskId: task.id, threshold, priorStatuses, ...held },
       'Scheduled task failed but consecutive-failure threshold not met; suppressing Slack post',
     );
   }
@@ -103,5 +108,11 @@ export function decideOutcomeDisposition(
     return 'repeat';
   }
   if (!RUN_FAILING_OUTCOME_STATUSES.has(outcome.status)) return 'posted';
-  return failureClearsPostThreshold(task) ? 'posted' : 'held';
+  return failureClearsPostThreshold(task, {
+    entityId: outcome.entity_id,
+    status: outcome.status,
+    errorClass: outcome.error_class,
+  })
+    ? 'posted'
+    : 'held';
 }

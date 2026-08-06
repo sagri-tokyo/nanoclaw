@@ -944,11 +944,11 @@ export function commitTaskOutcome(
     | undefined;
 
   // `repeat` only comes from a `taskOutcomeIsNew` that saw a row with a stamp,
-  // so `existing` is there to read that stamp back off. Reaching here without
-  // it means the row vanished between the peek and the commit, which breaks the
-  // single-threaded-drain assumption the split relies on. Throw rather than
-  // substitute a stamp: the drain moves the file to ipc/errors and the next
-  // tick retries, where guessing would quietly mislabel the record.
+  // and the drain runs both synchronously, so no in-repo path can clear the row
+  // in between. This guards out-of-band deletion and a corrupt DB. Throwing
+  // costs the commit, so `recorded_at` is not refreshed and the run may log
+  // green, resetting the streak; that is still better than inventing a stamp,
+  // which would mark the record reported and silence it for good.
   if (disposition === 'repeat' && existing === undefined) {
     throw new Error(
       `commitTaskOutcome: repeat disposition for ${row.task_id}/${row.entity_id}/${row.status} but the row is gone`,

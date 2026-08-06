@@ -910,11 +910,9 @@ export async function processTaskIpc(
           target: { kind: 'topLevel' },
         });
       } else {
-        // `held` at info: the gate's own info line carries the run history but
-        // not the entity, and LOG_LEVEL defaults to info, so without this a
-        // tick holding several entities prints identical lines. A dropped
-        // `repeat` is routine, so it stays at debug.
-        logger[disposition === 'held' ? 'info' : 'debug'](
+        // Both non-posting dispositions. `held` already has its operator-facing
+        // info line from the gate, entity included, so this stays at debug.
+        logger.debug(
           {
             sourceGroup,
             taskId: outcome.task_id,

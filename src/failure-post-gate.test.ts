@@ -15,6 +15,24 @@ import {
 import type { TaskOutcome } from './task-outcome.js';
 import type { ScheduledTask } from './types.js';
 
+function makeTask(id: string, threshold: number): ScheduledTask {
+  createTask({
+    id,
+    group_folder: 'slack_main',
+    chat_jid: 'C123@slack',
+    prompt: 'Do work.',
+    script: null,
+    schedule_type: 'cron',
+    schedule_value: '*/15 * * * *',
+    context_mode: 'isolated',
+    next_run: '2026-05-15T00:15:00.000Z',
+    status: 'active',
+    created_at: '2026-05-15T00:00:00.000Z',
+    failure_post_threshold: threshold,
+  });
+  return getTaskById(id) as ScheduledTask;
+}
+
 function priorRun(taskId: string, status: 'success' | 'error', at: string) {
   logTaskRun({
     task_id: taskId,
@@ -69,23 +87,7 @@ describe('failureClearsPostThreshold', () => {
     _initTestDatabase();
   });
 
-  function task(threshold: number): ScheduledTask {
-    createTask({
-      id: `thr-${threshold}`,
-      group_folder: 'slack_main',
-      chat_jid: 'C123@slack',
-      prompt: 'Do work.',
-      script: null,
-      schedule_type: 'cron',
-      schedule_value: '*/15 * * * *',
-      context_mode: 'isolated',
-      next_run: '2026-05-15T00:15:00.000Z',
-      status: 'active',
-      created_at: '2026-05-15T00:00:00.000Z',
-      failure_post_threshold: threshold,
-    });
-    return getTaskById(`thr-${threshold}`) as ScheduledTask;
-  }
+  const task = (threshold: number) => makeTask(`thr-${threshold}`, threshold);
 
   it('holds a first-ever failure at the default threshold', () => {
     expect(failureClearsPostThreshold(task(2))).toBe(false);
@@ -124,23 +126,7 @@ describe('decideOutcomeDisposition', () => {
     _initTestDatabase();
   });
 
-  function task(threshold: number): ScheduledTask {
-    createTask({
-      id: 'poller',
-      group_folder: 'slack_main',
-      chat_jid: 'C123@slack',
-      prompt: 'Poll and report.',
-      script: null,
-      schedule_type: 'cron',
-      schedule_value: '*/15 * * * *',
-      context_mode: 'isolated',
-      next_run: '2026-05-15T00:15:00.000Z',
-      status: 'active',
-      created_at: '2026-05-15T00:00:00.000Z',
-      failure_post_threshold: threshold,
-    });
-    return getTaskById('poller') as ScheduledTask;
-  }
+  const task = (threshold: number) => makeTask('poller', threshold);
 
   const failure: TaskOutcome = {
     task_id: 'poller',
@@ -182,6 +168,26 @@ describe('decideOutcomeDisposition', () => {
       'posted',
     );
     expect(decideOutcomeDisposition(scheduled, failure)).toBe('repeat');
+  });
+
+  it('treats a posted record older than the previous run as news again', () => {
+    // The repeat rule has two halves: a stamp AND recency. The test above only
+    // has one prior run, so the cutoff is empty and recency passes trivially.
+    // With enough history for a real cutoff, a stamped record that predates it
+    // is a later outage, not a repeat, which is what stops dedupe from
+    // becoming permanent silence.
+    const scheduled = task(2);
+    commitTaskOutcome(
+      {
+        ...failure,
+        group_folder: 'slack_main',
+        recorded_at: '2026-05-15T00:00:00.000Z',
+      },
+      'posted',
+    );
+    priorRun(scheduled.id, 'error', '2026-05-15T01:00:00.000Z');
+    priorRun(scheduled.id, 'error', '2026-05-15T02:00:00.000Z');
+    expect(decideOutcomeDisposition(scheduled, failure)).toBe('posted');
   });
 
   it('keeps a held record eligible instead of collapsing it into a repeat', () => {
