@@ -47,7 +47,10 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
-import { needsAgentRunnerRefresh } from './agent-runner-refresh.js';
+import {
+  needsAgentRunnerRefresh,
+  recordAgentRunnerRefresh,
+} from './agent-runner-refresh.js';
 import { setRunRequesters } from './run-requesters.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { buildTelemetryEnv } from './telemetry.js';
@@ -508,11 +511,18 @@ function buildContainerPlan(
     group.folder,
     'agent-runner-src',
   );
+  const agentRunnerStamp = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    'agent-runner-src.stamp',
+  );
   if (
     fs.existsSync(agentRunnerSrc) &&
-    needsAgentRunnerRefresh(agentRunnerSrc, groupAgentRunnerDir)
+    needsAgentRunnerRefresh(agentRunnerSrc, agentRunnerStamp)
   ) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+    recordAgentRunnerRefresh(agentRunnerSrc, agentRunnerStamp);
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

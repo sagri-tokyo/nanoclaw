@@ -2,24 +2,35 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { needsAgentRunnerRefresh } from './agent-runner-refresh.js';
+import {
+  needsAgentRunnerRefresh,
+  recordAgentRunnerRefresh,
+} from './agent-runner-refresh.js';
 
 let root: string;
 let source: string;
 let cached: string;
+let stamp: string;
 
-function write(dir: string, name: string, body: string, mtimeMs: number): void {
-  const file = path.join(dir, name);
+function write(file: string, body: string, mtimeMs: number): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, body);
   fs.utimesSync(file, mtimeMs / 1000, mtimeMs / 1000);
+}
+
+function syncFromRepo(): void {
+  fs.cpSync(source, cached, { recursive: true });
+  recordAgentRunnerRefresh(source, stamp);
 }
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-runner-refresh-'));
   source = path.join(root, 'source');
   cached = path.join(root, 'cached');
+  stamp = path.join(root, 'agent-runner-src.stamp');
   fs.mkdirSync(source);
-  fs.mkdirSync(cached);
+  write(path.join(source, 'index.ts'), 'a', 1_000_000);
+  write(path.join(source, 'tool-allowlist.ts'), 'old', 1_000_000);
 });
 
 afterEach(() => {
@@ -27,45 +38,49 @@ afterEach(() => {
 });
 
 describe('agent-runner copy staleness', () => {
-  it('refreshes a group that has no copy yet', () => {
-    write(source, 'index.ts', 'a', 1_000_000);
-    expect(needsAgentRunnerRefresh(source, path.join(root, 'absent'))).toBe(
-      true,
-    );
+  it('refreshes a group that has never been stamped', () => {
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
   it('leaves an up-to-date copy alone', () => {
-    write(source, 'index.ts', 'a', 1_000_000);
-    write(cached, 'index.ts', 'a', 1_000_000);
-    expect(needsAgentRunnerRefresh(source, cached)).toBe(false);
+    syncFromRepo();
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
   });
 
   it('refreshes when only the allowlist changed and index.ts did not', () => {
-    write(source, 'index.ts', 'a', 1_000_000);
-    write(source, 'tool-allowlist.ts', 'new', 2_000_000);
-    write(cached, 'index.ts', 'a', 1_000_000);
-    write(cached, 'tool-allowlist.ts', 'old', 1_000_000);
+    syncFromRepo();
+    write(path.join(source, 'tool-allowlist.ts'), 'tightened', 2_000_000);
 
-    expect(needsAgentRunnerRefresh(source, cached)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
-  it('refreshes when the repo adds a file the copy has never seen', () => {
-    write(source, 'index.ts', 'a', 1_000_000);
-    write(source, 'tool-allowlist.ts', 'new', 1_500_000);
-    write(cached, 'index.ts', 'a', 1_000_000);
+  it('refreshes when the change is confined to a subdirectory', () => {
+    syncFromRepo();
+    write(path.join(source, 'tools', 'nested.ts'), 'new', 2_000_000);
 
-    expect(needsAgentRunnerRefresh(source, cached)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
-  it('refreshes a missing copy even when the repo source is empty', () => {
-    expect(needsAgentRunnerRefresh(source, path.join(root, 'absent'))).toBe(
-      true,
-    );
+  it('refreshes when a source file is deleted', () => {
+    syncFromRepo();
+    fs.rmSync(path.join(source, 'tool-allowlist.ts'));
+
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
-  it('keeps a group customization newer than the repo', () => {
-    write(source, 'index.ts', 'a', 1_000_000);
-    write(cached, 'index.ts', 'customized', 3_000_000);
-    expect(needsAgentRunnerRefresh(source, cached)).toBe(false);
+  it('cannot be vetoed by the container touching its own copy', () => {
+    syncFromRepo();
+    write(path.join(cached, 'tool-allowlist.ts'), 'self-granted', 9_000_000);
+
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
+
+    write(path.join(source, 'tool-allowlist.ts'), 'tightened', 2_000_000);
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+  });
+
+  it('names the missing directory rather than failing deep in fs', () => {
+    expect(() =>
+      needsAgentRunnerRefresh(path.join(root, 'absent'), stamp),
+    ).toThrow(/agent-runner source missing/);
   });
 });
