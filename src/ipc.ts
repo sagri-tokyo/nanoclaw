@@ -12,7 +12,9 @@ import {
   getTaskById,
   taskOutcomeIsNew,
   updateTask,
+  type TaskOutcomeDisposition,
 } from './db.js';
+import { failureClearsPostThreshold } from './failure-post-gate.js';
 import {
   isValidGroupFolder,
   listUndrainedIpcRequests,
@@ -33,7 +35,11 @@ import {
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
-import { parseTaskOutcome, renderTaskOutcome } from './task-outcome.js';
+import {
+  parseTaskOutcome,
+  renderTaskOutcome,
+  RUN_FAILING_OUTCOME_STATUSES,
+} from './task-outcome.js';
 import { RegisteredGroup, SendOptions } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
@@ -896,12 +902,29 @@ export async function processTaskIpc(
         emitReject('ipc_task_outcome', 'TargetGroupNotRegistered');
         break;
       }
+      // An outcome line reaches Slack from here, never from the scheduler's
+      // reply path, so the per-task consecutive-failure threshold has to be
+      // applied here too or it covers only one of the two ways a poller reports
+      // failure (sagri-tokyo/sagri-ai#659).
+      //
+      // Only RUN_FAILING_OUTCOME_STATUSES is gated — see its doc in
+      // task-outcome.ts for why that set, and only that set, is what the gate
+      // can hold back.
+      //
+      // The gate reads task_run_logs, so it is called only on the branch whose
+      // answer it decides; a repeat is dropped either way.
       const isNew = taskOutcomeIsNew(
         outcome.task_id,
         outcome.entity_id,
         outcome.status,
       );
-      if (isNew) {
+      const disposition: TaskOutcomeDisposition = !isNew
+        ? 'repeat'
+        : !RUN_FAILING_OUTCOME_STATUSES.has(outcome.status) ||
+            failureClearsPostThreshold(task)
+          ? 'posted'
+          : 'held';
+      if (disposition === 'posted') {
         // Post before committing the dedupe row. If the post throws, the outer
         // watcher moves this file to ipc/errors and no row is written, so the
         // next tick re-derives isNew and retries rather than dropping the
@@ -911,7 +934,7 @@ export async function processTaskIpc(
         await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
           target: { kind: 'topLevel' },
         });
-      } else {
+      } else if (disposition === 'repeat') {
         logger.debug(
           {
             sourceGroup,
@@ -919,18 +942,33 @@ export async function processTaskIpc(
             entityId: outcome.entity_id,
             status: outcome.status,
           },
-          'task_outcome already posted for this status on the previous run; dropping the repeat',
+          'task_outcome already reported on the previous run; dropping the repeat',
+        );
+      } else {
+        // The gate already logged the suppression at info with the run history
+        // behind it; this adds which entity was held.
+        logger.debug(
+          {
+            sourceGroup,
+            taskId: outcome.task_id,
+            entityId: outcome.entity_id,
+            status: outcome.status,
+            errorClass: outcome.error_class,
+          },
+          'task_outcome held back: consecutive-failure threshold not met',
         );
       }
-      // Reached only after a successful post (isNew) or with no post at all
-      // (repeat). The repeat still commits to refresh recorded_at into the
-      // current run's window, which is where the scheduler reads a structured
-      // run's status from.
-      commitTaskOutcome({
-        ...outcome,
-        group_folder: sourceGroup,
-        recorded_at: new Date().toISOString(),
-      });
+      // Reached after a post or with no post at all. The unposted cases still
+      // commit to refresh recorded_at into the current run's window, which is
+      // where the scheduler reads the run's status from.
+      commitTaskOutcome(
+        {
+          ...outcome,
+          group_folder: sourceGroup,
+          recorded_at: new Date().toISOString(),
+        },
+        disposition,
+      );
       emitIpcAction(sink, {
         level: 'info',
         session_id: outcome.task_id,

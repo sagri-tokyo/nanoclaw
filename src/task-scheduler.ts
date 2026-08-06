@@ -12,17 +12,18 @@ import {
 import {
   getAllTasks,
   getDueTasks,
-  getRecentTaskRunStatuses,
   getTaskById,
   getTaskOutcomesSince,
   logTaskRun,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
+import { failureClearsPostThreshold } from './failure-post-gate.js';
 import { GroupQueue } from './group-queue.js';
 import { GroupNotFoundError, resolveGroupFolderPath } from './group-folder.js';
 import { hashFailureOutput, hashPayload, logger } from './logger.js';
 import { createSessionTracker, SessionStore } from './session-tracker.js';
+import { RUN_FAILING_OUTCOME_STATUSES } from './task-outcome.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -152,16 +153,33 @@ export function isErrorReply(result: string): boolean {
 export const NO_TASK_OUTCOME_ERROR_CLASS = 'NoTaskOutcomeReported';
 export const TASK_OUTCOME_FAILURE_ERROR_CLASS = 'TaskOutcomeFailure';
 
-const RUN_FAILING_OUTCOME_STATUSES: ReadonlySet<string> = new Set([
-  'failed',
-  'stalled',
-]);
+/**
+ * Derive the run-level error a tick's `report_outcome` records imply, or null
+ * when none is in `RUN_FAILING_OUTCOME_STATUSES` (see that doc for why
+ * `rejected` does not count).
+ *
+ * Applies in both reply modes: `report_outcome` is offered to every scheduled
+ * task, not just a `structured` one (sagri-tokyo/sagri-ai#659).
+ */
+function deriveOutcomeRunError(
+  outcomes: Array<{ status: string; error_class: string | null }>,
+): { error: string; error_class: string } | null {
+  const failure = outcomes.find((outcome) =>
+    RUN_FAILING_OUTCOME_STATUSES.has(outcome.status),
+  );
+  if (!failure) return null;
+  const suffix = failure.error_class ? ` [${failure.error_class}]` : '';
+  return {
+    error: `Task reported ${failure.status}${suffix}`,
+    error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
+  };
+}
 
 /**
- * Derive the run-level error for a `structured` task from the outcomes it
- * recorded during the run, or null when the run is a success. `rejected` is
- * NOT a run failure: a refusal (injection, failed extraction) is the tick
- * doing its job, and the record itself is the operator-visible signal.
+ * {@link deriveOutcomeRunError} plus the rule that only a `structured` task can
+ * be held to: silence is a failure, not a pass. A tick that reported nothing
+ * either crashed before reporting or skipped the contract. A text-mode tick
+ * that reports nothing is just an ordinary tick.
  */
 export function deriveStructuredRunError(
   outcomes: Array<{ status: string; error_class: string | null }>,
@@ -172,15 +190,7 @@ export function deriveStructuredRunError(
       error_class: NO_TASK_OUTCOME_ERROR_CLASS,
     };
   }
-  const failure = outcomes.find((outcome) =>
-    RUN_FAILING_OUTCOME_STATUSES.has(outcome.status),
-  );
-  if (!failure) return null;
-  const suffix = failure.error_class ? ` [${failure.error_class}]` : '';
-  return {
-    error: `Structured task reported ${failure.status}${suffix}`,
-    error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
-  };
+  return deriveOutcomeRunError(outcomes);
 }
 
 export function formatErrorWrap(
@@ -238,32 +248,6 @@ export function slackTextForError(output: {
 }): string | null {
   if (output.error_class !== HTTP_STATUS_529_ERROR_CLASS) return null;
   return output.error;
-}
-
-/**
- * Decide whether a failing scheduled-task tick should produce a Slack post.
- *
- * Single isolated transients (e.g. one-off 30s Notion timeout) generate noise
- * with no operator value when the next tick recovers. We post only once the
- * current tick PLUS enough prior consecutive failures clear the per-task
- * `failure_post_threshold`. See sagri-tokyo/sagri-ai#254.
- *
- * @param priorStatuses last (threshold - 1) `task_run_logs` rows for this
- *   task, NEWEST FIRST, NOT including the current run.
- * @param threshold per-task threshold from `scheduled_tasks.failure_post_threshold`.
- *   Must be >= 1; enforced by `register-task --post-after-fails`.
- * @returns true iff (1 current failure + leading prior errors) >= threshold.
- */
-export function shouldPostFailure(
-  priorStatuses: Array<'success' | 'error'>,
-  threshold: number,
-): boolean {
-  let consecutive = 1; // the current failing tick
-  for (const status of priorStatuses) {
-    if (status !== 'error') break;
-    consecutive += 1;
-  }
-  return consecutive >= threshold;
 }
 
 export interface SchedulerDependencies {
@@ -489,27 +473,11 @@ async function runTask(
             streamedOutput.error_class ??
             classifyContainerError(streamedOutput.error);
           const slackText = slackTextForError(streamedOutput);
-          if (slackText !== null) {
+          if (slackText !== null && failureClearsPostThreshold(task)) {
             // Suppress single-transient failures from Slack until a per-task
             // consecutive-failure threshold is met. The `task_run_logs` row
             // and action record are still written below. sagri-tokyo/sagri-ai#254.
-            const threshold = task.failure_post_threshold ?? 2;
-            const priorStatuses = getRecentTaskRunStatuses(
-              task.id,
-              Math.max(0, threshold - 1),
-            );
-            if (shouldPostFailure(priorStatuses, threshold)) {
-              await deps.sendMessage(task.chat_jid, wrap(slackText));
-            } else {
-              logger.debug(
-                {
-                  taskId: task.id,
-                  threshold,
-                  priorStatuses,
-                },
-                'Scheduled task failed but consecutive-failure threshold not met; suppressing Slack post',
-              );
-            }
+            await deps.sendMessage(task.chat_jid, wrap(slackText));
           }
         }
       },
@@ -564,10 +532,15 @@ async function runTask(
       } else if (runOutcomes.length > 0) {
         // This text-mode tick already routed its operator lines through the
         // `task_outcome` channel, which the host renders and posts. Posting
-        // the agent's prose too would duplicate them. A record whose post was
-        // collapsed as a previous-run repeat still refreshed its `recorded_at`
-        // into this run's window, so it counts here — the operator already saw
-        // that line, so the host still owns the reply.
+        // the agent's prose too would duplicate them.
+        //
+        // A record that did NOT post also counts here, because it still
+        // refreshed its `recorded_at` into this run's window: a previous-run
+        // repeat (the operator saw that line already) and, since
+        // sagri-tokyo/sagri-ai#659, one the failure gate held back. The held
+        // case drops the prose for a tick nobody heard from, which is a delay
+        // rather than a loss — the run still logs red below, so the streak
+        // advances and the next tick posts. Tracked separately.
         logger.debug(
           { taskId: task.id },
           'task_outcome recorded this run; not posting agent prose',
@@ -577,7 +550,12 @@ async function runTask(
           { taskId: task.id },
           'Scheduled task produced silent-result marker; skipping chat post',
         );
-      } else {
+      } else if (!isErrorReply(result) || failureClearsPostThreshold(task)) {
+        // A text-mode task reports failure by making its whole reply a single
+        // `ERROR:` line, which posts from here rather than from the
+        // container-error branch above — the path a poller's self-healing blip
+        // took past the #254 gate (sagri-tokyo/sagri-ai#659). A held-back reply
+        // still logs status=error below.
         await deps.sendMessage(
           task.chat_jid,
           formatErrorWrap(result, {
@@ -607,19 +585,29 @@ async function runTask(
     }
   }
 
-  if (task.reply_mode === 'structured' && error === null) {
-    const derived = deriveStructuredRunError(runOutcomes);
-    if (derived) {
-      error = derived.error;
-      errorClass = derived.error_class;
+  if (error === null) {
+    if (task.reply_mode === 'structured') {
+      const derived = deriveStructuredRunError(runOutcomes);
+      if (derived) {
+        error = derived.error;
+        errorClass = derived.error_class;
+      }
+    } else if (result !== null && isErrorReply(result)) {
+      // The container exited cleanly but the agent reported failure via the
+      // single-line ERROR: reply convention. Without this, the tick logs
+      // status=success / outcome=ok and every monitor built on
+      // task_run_logs.status reads green (sagri-tokyo/sagri-ai#504).
+      error = result.trim();
+      errorClass = AGENT_ERROR_REPLY_CLASS;
+    } else {
+      // Same blind spot, reached through the other channel: a text-mode tick
+      // can call `report_outcome` too (sagri-tokyo/sagri-ai#659).
+      const derived = deriveOutcomeRunError(runOutcomes);
+      if (derived) {
+        error = derived.error;
+        errorClass = derived.error_class;
+      }
     }
-  } else if (error === null && result !== null && isErrorReply(result)) {
-    // The container exited cleanly but the agent reported failure via the
-    // single-line ERROR: reply convention. Without this, the tick logs
-    // status=success / outcome=ok and every monitor built on
-    // task_run_logs.status reads green (sagri-tokyo/sagri-ai#504).
-    error = result.trim();
-    errorClass = AGENT_ERROR_REPLY_CLASS;
   }
 
   const durationMs = Date.now() - startTime;

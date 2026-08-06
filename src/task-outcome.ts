@@ -31,6 +31,20 @@ export const TASK_OUTCOME_FAILURE_STATUSES: ReadonlySet<TaskOutcomeStatus> =
   new Set<TaskOutcomeStatus>(['failed', 'rejected', 'stalled']);
 
 /**
+ * The subset of failure statuses that turn the whole run red in
+ * `task_run_logs`. `rejected` is excluded: a refusal is the tick doing its job,
+ * so the run stays green and the record itself is the operator-visible signal.
+ *
+ * This is also the exact set the consecutive-failure post gate may hold back.
+ * Gating a status that never turns a run red would suppress it forever, since
+ * the gate counts red runs (sagri-tokyo/sagri-ai#659).
+ */
+// Typed `string` rather than `TaskOutcomeStatus` because the scheduler tests it
+// against statuses read back out of SQLite, where the column is untyped text.
+export const RUN_FAILING_OUTCOME_STATUSES: ReadonlySet<string> =
+  new Set<TaskOutcomeStatus>(['failed', 'stalled']);
+
+/**
  * Closed set covering the failure modes the dsm-experiment prompts classify.
  * Never free text: the class is rendered into Slack verbatim.
  */

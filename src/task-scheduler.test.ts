@@ -22,7 +22,6 @@ import {
   isErrorReply,
   isSilentResult,
   NO_TASK_OUTCOME_ERROR_CLASS,
-  shouldPostFailure,
   slackTextForError,
   startSchedulerLoop,
   TASK_OUTCOME_FAILURE_ERROR_CLASS,
@@ -462,44 +461,6 @@ describe('task scheduler', () => {
     it('never returns an empty string', () => {
       expect(classifyContainerError('').length).toBeGreaterThan(0);
     });
-  });
-});
-
-describe('shouldPostFailure', () => {
-  it('returns true on every failure when threshold is 1 (opt-out)', () => {
-    expect(shouldPostFailure([], 1)).toBe(true);
-    expect(shouldPostFailure(['success'], 1)).toBe(true);
-    expect(shouldPostFailure(['error'], 1)).toBe(true);
-  });
-
-  it('suppresses a first-ever failure with the default threshold of 2', () => {
-    expect(shouldPostFailure([], 2)).toBe(false);
-  });
-
-  it('suppresses an isolated failure after a prior success (threshold 2)', () => {
-    expect(shouldPostFailure(['success'], 2)).toBe(false);
-  });
-
-  it('posts on two consecutive failures with threshold 2', () => {
-    expect(shouldPostFailure(['error'], 2)).toBe(true);
-  });
-
-  it('still suppresses two consecutive failures with threshold 3', () => {
-    expect(shouldPostFailure(['error'], 3)).toBe(false);
-  });
-
-  it('posts on three consecutive failures with threshold 3', () => {
-    expect(shouldPostFailure(['error', 'error'], 3)).toBe(true);
-  });
-
-  it('treats a recovery in the prior history as a streak break (threshold 3, [error, success, error])', () => {
-    // Current failure + 1 leading error = 2; the success then breaks the streak.
-    expect(shouldPostFailure(['error', 'success', 'error'], 3)).toBe(false);
-  });
-
-  it('treats a recent recovery as a streak break (threshold 3, [success, error, error])', () => {
-    // Current failure + 0 leading errors (the head of prior history is success) = 1.
-    expect(shouldPostFailure(['success', 'error', 'error'], 3)).toBe(false);
   });
 });
 
@@ -972,7 +933,7 @@ describe('isErrorReply', () => {
   });
 });
 
-describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
+describe('runTask ERROR-reply handling (sagri-ai#504, #659)', () => {
   beforeEach(() => {
     _initTestDatabase();
   });
@@ -1018,10 +979,12 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
     };
   }
 
+  /** Runs the task and returns whatever it posted to chat. */
   async function runWith(
     task: ScheduledTask,
     output: ContainerOutput,
-  ): Promise<void> {
+  ): Promise<string[]> {
+    const sent: string[] = [];
     await _runTaskForTests(
       task,
       {
@@ -1034,10 +997,13 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
           notifyIdle: () => {},
         } as never,
         onProcess: () => {},
-        sendMessage: async () => {},
+        sendMessage: async (_jid: string, text: string) => {
+          sent.push(text);
+        },
       },
       fakeRunner(output),
     );
+    return sent;
   }
 
   it('logs status=error when a clean container exit carries an ERROR: reply', async () => {
@@ -1117,6 +1083,61 @@ describe('runTask ERROR-reply run status (sagri-ai#504)', () => {
       error: 'Container exited with code 1',
     });
     expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
+  });
+
+  // sagri-ai#659: the reply-post block is a separate gate site from the
+  // container-error branch. See task-scheduler.ts.
+  const ERROR_REPLY: ContainerOutput = {
+    status: 'success',
+    result: 'ERROR: Notion database query failed',
+  };
+
+  it('suppresses an isolated ERROR: reply at the default threshold', async () => {
+    const task = makeTask({ id: 'blip', failure_post_threshold: 2 });
+    expect(await runWith(task, ERROR_REPLY)).toEqual([]);
+    // Suppressed from chat, still red in the run log, which is what builds
+    // the streak the next tick counts.
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
+  });
+
+  it('posts the ERROR: reply once the threshold is met', async () => {
+    const task = makeTask({ id: 'streak', failure_post_threshold: 2 });
+    logTaskRun({
+      task_id: task.id,
+      run_at: '2026-05-15T00:00:00.000Z',
+      duration_ms: 100,
+      status: 'error',
+      result: null,
+      error: 'prior boom',
+    });
+    const sent = await runWith(task, ERROR_REPLY);
+    expect(sent).toHaveLength(1);
+    // formatErrorWrap appends a live-timestamp footer, so the reply and the
+    // footer's fixed prefix are asserted separately rather than by substring.
+    const [reply, footer] = sent[0].split('\n');
+    expect(reply).toEqual('ERROR: Notion database query failed');
+    expect(footer.startsWith('↳ run streak · ')).toBe(true);
+  });
+
+  it('does not gate a normal reply', async () => {
+    const task = makeTask({ id: 'narration', failure_post_threshold: 2 });
+    expect(
+      await runWith(task, {
+        status: 'success',
+        result: 'Dispatched 2 research tasks.',
+      }),
+    ).toEqual(['Dispatched 2 research tasks.']);
+  });
+
+  it('does not gate multi-line narration that opens with ERROR', async () => {
+    // Narration under the #465 convention, so the run stays green and the gate
+    // has no business touching it.
+    const task = makeTask({ id: 'multiline', failure_post_threshold: 2 });
+    const sent = await runWith(task, {
+      status: 'success',
+      result: 'ERROR: partial leg\nbut the Notion leg ingested 2 items',
+    });
+    expect(sent).toHaveLength(1);
   });
 });
 
@@ -1238,6 +1259,50 @@ describe('structured reply mode', () => {
     const sent: string[] = [];
     await run(task, runnerEmitting('exp-001 done'), sent);
     expect(sent).toEqual(['exp-001 done']);
+  });
+
+  it('logs status=error for a text-mode task that reported a failure outcome', async () => {
+    // The seam the whole gate rests on: the IPC drain holds a first failure
+    // back, and this run status is what advances the streak so the next tick
+    // posts it. Green here and the counter never moves, so the failure is
+    // suppressed forever (sagri-tokyo/sagri-ai#659).
+    const task = makeStructuredTask({
+      id: 'text-failure-outcome',
+      reply_mode: 'text',
+    });
+    await run(
+      task,
+      runnerEmitting('exp-001 failed', () =>
+        outcome(
+          'text-failure-outcome',
+          'exp-001',
+          'failed',
+          'upstream_query_failed',
+        ),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['error']);
+  });
+
+  it('leaves a text-mode task green when its only outcome is a rejection', async () => {
+    const task = makeStructuredTask({
+      id: 'text-rejected-outcome',
+      reply_mode: 'text',
+    });
+    await run(
+      task,
+      runnerEmitting('exp-001 rejected', () =>
+        outcome(
+          'text-rejected-outcome',
+          'exp-001',
+          'rejected',
+          'rejected_injection',
+        ),
+      ),
+      [],
+    );
+    expect(getRecentTaskRunStatuses(task.id, 5)).toEqual(['success']);
   });
 
   it('suppresses the prose reply for a text-mode task that recorded an outcome', async () => {
@@ -1420,7 +1485,7 @@ describe('deriveStructuredRunError', () => {
         { status: 'failed', error_class: 'skill_failed' },
       ]),
     ).toEqual({
-      error: 'Structured task reported failed [skill_failed]',
+      error: 'Task reported failed [skill_failed]',
       error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
     });
   });
@@ -1431,7 +1496,7 @@ describe('deriveStructuredRunError', () => {
         { status: 'stalled', error_class: 'upstream_query_failed' },
       ]),
     ).toEqual({
-      error: 'Structured task reported stalled [upstream_query_failed]',
+      error: 'Task reported stalled [upstream_query_failed]',
       error_class: TASK_OUTCOME_FAILURE_ERROR_CLASS,
     });
   });

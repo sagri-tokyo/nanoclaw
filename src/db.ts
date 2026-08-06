@@ -126,7 +126,8 @@ function createSchema(database: Database.Database): void {
       error_class TEXT,
       detail TEXT,
       group_folder TEXT NOT NULL,
-      recorded_at TEXT NOT NULL
+      recorded_at TEXT NOT NULL,
+      posted_at TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_task_outcomes_key
       ON task_outcomes(task_id, entity_id, status);
@@ -273,6 +274,31 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'text'`,
     );
+  } catch (error) {
+    if (
+      !(
+        error instanceof Error &&
+        error.message.includes('duplicate column name')
+      )
+    ) {
+      throw error;
+    }
+  }
+
+  // Add posted_at to task_outcomes (migration for existing DBs). Backfilled
+  // from recorded_at so every record written before the failure-threshold gate
+  // counts as already posted — a NULL here means "held back, still unreported",
+  // and treating the whole existing table as unreported would replay it to
+  // Slack once on upgrade. See sagri-tokyo/sagri-ai#659.
+  // One transaction, because the two halves are only safe together. A crash
+  // between them leaves the column added and every row NULL, and the catch
+  // below swallows the next boot's `duplicate column name` before the backfill
+  // is reached — so the rows would stay NULL, and read as unreported, forever.
+  try {
+    database.transaction(() => {
+      database.exec(`ALTER TABLE task_outcomes ADD COLUMN posted_at TEXT`);
+      database.exec(`UPDATE task_outcomes SET posted_at = recorded_at`);
+    })();
   } catch (error) {
     if (
       !(
@@ -852,7 +878,7 @@ function previousRunCutoff(taskId: string): string {
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
   const isNew = taskOutcomeIsNew(row.task_id, row.entity_id, row.status);
-  commitTaskOutcome(row);
+  commitTaskOutcome(row, isNew ? 'posted' : 'repeat');
   return isNew;
 }
 
@@ -869,6 +895,12 @@ export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
  * already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as a separate read
  * because the IPC drain is single-threaded — nothing else touches this key
  * between the peek and the commit.
+ *
+ * A record the caller held back (`posted_at IS NULL`) stays news no matter how
+ * many runs it has been recorded on. Dedupe keys on `recorded_at`, which is
+ * refreshed every run, so without this a failure the consecutive-failure gate
+ * suppressed on its first tick would read as an already-reported repeat on
+ * every tick after and never reach Slack at all (sagri-tokyo/sagri-ai#659).
  */
 export function taskOutcomeIsNew(
   taskId: string,
@@ -877,32 +909,61 @@ export function taskOutcomeIsNew(
 ): boolean {
   const existing = db
     .prepare(
-      `SELECT recorded_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT recorded_at, posted_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(taskId, entityId, status) as { recorded_at: string } | undefined;
+    .get(taskId, entityId, status) as
+    | { recorded_at: string; posted_at: string | null }
+    | undefined;
   if (!existing) return true;
+  if (existing.posted_at === null) return true;
   return existing.recorded_at < previousRunCutoff(taskId);
 }
+
+/**
+ * What the caller did with this record, which decides `posted_at`:
+ *
+ * - `posted` — it reached chat, so stamp the post.
+ * - `held` — it was news but a gate held it back, so clear the stamp. Clearing
+ *   rather than preserving is the whole point: a task that posted an outage
+ *   months ago is not "already reported" for the outage happening now, and
+ *   leaving the old stamp makes every outage after the first one silent.
+ * - `repeat` — a prior run already reported it, so leave the stamp alone.
+ */
+export type TaskOutcomeDisposition = 'posted' | 'held' | 'repeat';
 
 /**
  * Write half of {@link recordTaskOutcome}: upsert the row, refreshing
  * `recorded_at`/`error_class`/`detail` on a repeat so the record stays inside
  * the current run's window where the scheduler reads a structured run's status.
  */
-export function commitTaskOutcome(row: TaskOutcomeRow): void {
+export function commitTaskOutcome(
+  row: TaskOutcomeRow,
+  disposition: TaskOutcomeDisposition,
+): void {
   const existing = db
     .prepare(
-      `SELECT id FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT id, posted_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(row.task_id, row.entity_id, row.status) as { id: number } | undefined;
+    .get(row.task_id, row.entity_id, row.status) as
+    | { id: number; posted_at: string | null }
+    | undefined;
+
+  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row, so reading
+  // the stamp back off `existing` is safe there and nowhere else.
+  const postedAt = {
+    posted: row.recorded_at,
+    repeat: existing === undefined ? null : existing.posted_at,
+    held: null,
+  }[disposition];
 
   if (existing) {
     db.prepare(
-      `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ? WHERE id = ?`,
+      `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ?, posted_at = ? WHERE id = ?`,
     ).run(
       row.error_class,
       row.detail === null ? null : JSON.stringify(row.detail),
       row.recorded_at,
+      postedAt,
       existing.id,
     );
     return;
@@ -910,8 +971,8 @@ export function commitTaskOutcome(row: TaskOutcomeRow): void {
 
   db.prepare(
     `
-    INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at, posted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     row.task_id,
@@ -921,6 +982,7 @@ export function commitTaskOutcome(row: TaskOutcomeRow): void {
     row.detail === null ? null : JSON.stringify(row.detail),
     row.group_folder,
     row.recorded_at,
+    postedAt,
   );
 }
 
