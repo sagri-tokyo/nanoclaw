@@ -199,6 +199,37 @@ describe('database migrations', () => {
       // NULL means "held back, never posted", so a table of them replays to
       // Slack on upgrade. See the migration comment in db.ts.
       expect(row.posted_at).toBe('2026-07-24T01:00:00.000Z');
+
+      // A held record's NULL must survive a second boot — see the once-only
+      // rationale in the migration comment in db.ts.
+      const heldDb = new Database(dbPath);
+      heldDb
+        .prepare(
+          `INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at, posted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          'dsm-experiment-poller',
+          'exp-002',
+          'failed',
+          'skill_failed',
+          null,
+          'slack_main',
+          '2026-07-24T02:00:00.000Z',
+        );
+      heldDb.close();
+
+      vi.resetModules();
+      const secondBoot = await import('./db.js');
+      secondBoot.initDatabase();
+      secondBoot._closeDatabase();
+
+      const rebootedDb = new Database(dbPath);
+      const held = rebootedDb
+        .prepare(`SELECT posted_at FROM task_outcomes WHERE entity_id = ?`)
+        .get('exp-002') as { posted_at: string | null };
+      rebootedDb.close();
+      expect(held.posted_at).toBeNull();
     } finally {
       process.chdir(repoRoot);
     }

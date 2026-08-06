@@ -530,17 +530,12 @@ async function runTask(
           'Structured reply mode; agent reply not posted to chat',
         );
       } else if (runOutcomes.length > 0) {
-        // This text-mode tick already routed its operator lines through the
-        // `task_outcome` channel, which the host renders and posts. Posting
-        // the agent's prose too would duplicate them.
-        //
-        // A record that did NOT post also counts here, because it still
-        // refreshed its `recorded_at` into this run's window: a previous-run
-        // repeat (the operator saw that line already) and, since
-        // sagri-tokyo/sagri-ai#659, one the failure gate held back. The held
-        // case drops the prose for a tick nobody heard from, which is a delay
-        // rather than a loss — the run still logs red below, so the streak
-        // advances and the next tick posts. Tracked separately.
+        // This tick already routed its operator lines through the
+        // `task_outcome` channel, which the host renders and posts, so the
+        // prose would duplicate them. A record that did not post still counts:
+        // it refreshed `recorded_at` into this run's window either way. For the
+        // held case that drops the prose for a tick nobody heard from, which
+        // sagri-tokyo/sagri-ai#660 tracks.
         logger.debug(
           { taskId: task.id },
           'task_outcome recorded this run; not posting agent prose',

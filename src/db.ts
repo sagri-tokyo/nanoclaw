@@ -285,15 +285,16 @@ function createSchema(database: Database.Database): void {
     }
   }
 
-  // Add posted_at to task_outcomes (migration for existing DBs). Backfilled
-  // from recorded_at so every record written before the failure-threshold gate
-  // counts as already posted — a NULL here means "held back, still unreported",
-  // and treating the whole existing table as unreported would replay it to
-  // Slack once on upgrade. See sagri-tokyo/sagri-ai#659.
-  // One transaction, because the two halves are only safe together. A crash
-  // between them leaves the column added and every row NULL, and the catch
-  // below swallows the next boot's `duplicate column name` before the backfill
-  // is reached — so the rows would stay NULL, and read as unreported, forever.
+  // Add posted_at to task_outcomes (migration for existing DBs). NULL means
+  // "held back, still unreported", so pre-gate rows backfill from recorded_at:
+  // without it the whole existing table reads as unreported and replays to
+  // Slack on upgrade. See sagri-tokyo/sagri-ai#659.
+  //
+  // Unlike its siblings above, this must run exactly once, both statements
+  // atomically: a second run stamps every held record posted (silencing real
+  // alerts), a partial run leaves rows NULL and replays them. The ALTER's
+  // `duplicate column name` throw enforces once-only; `db-migration.test.ts`
+  // pins both halves.
   try {
     database.transaction(() => {
       database.exec(`ALTER TABLE task_outcomes ADD COLUMN posted_at TEXT`);
@@ -860,21 +861,14 @@ function previousRunCutoff(taskId: string): string {
 }
 
 /**
- * Record one structured task outcome. Returns true when the host should post
- * it, which is whenever the same `(task_id, entity_id, status)` was not already
- * reported on the previous run. A job that stays `submitted` across twenty
- * consecutive ticks therefore still produces exactly one Slack line, because
- * each tick's record lands one run after the last.
+ * Test-only. NOT the path the host takes, and not safe as one: it can only ever
+ * decide `posted` or `repeat`, so it stamps `posted_at` for a record nothing
+ * posted and re-arms dedupe against it — the permanent suppression
+ * sagri-tokyo/sagri-ai#659 removed. The host pairs {@link taskOutcomeIsNew}
+ * with {@link commitTaskOutcome} so the failure gate sits between the two.
+ * sagri-tokyo/sagri-ai#661 deletes this.
  *
- * The window is what keeps dedupe from becoming permanent silence: keyed on
- * existence alone, only the first outage of a task's life would ever post. A
- * repeat that follows a gap (a recovery, a re-submission, a later outage) is
- * news.
- *
- * A repeat refreshes the row rather than inserting beside it, so the table
- * grows with entities handled rather than with ticks, and the refreshed
- * `recorded_at` keeps the record inside the current run's window, which is
- * where the scheduler reads a structured run's status from.
+ * @internal
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
   const isNew = taskOutcomeIsNew(row.task_id, row.entity_id, row.status);
@@ -883,18 +877,19 @@ export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
 }
 
 /**
- * Read-only half of {@link recordTaskOutcome}: would this `(task_id,
- * entity_id, status)` be news if recorded now? True when no row exists, or a
- * row exists but was last recorded before the previous run's window — the same
- * "post only what a prior run did not already report" rule the atomic version
- * decides.
+ * Read half of the dedupe: would this `(task_id, entity_id, status)` be news if
+ * recorded now? True when no row exists, or one exists but was last recorded
+ * before the previous run's window. The window is what keeps dedupe from
+ * becoming permanent silence — keyed on existence alone, only the first outage
+ * of a task's life would ever post, and a repeat that follows a gap (a
+ * recovery, a re-submission, a later outage) is news.
  *
- * Split out so the host can decide-then-post-then-commit: the dedupe row is
- * written only after the Slack post resolves, so a post that throws leaves no
- * row and the next tick retries rather than dropping the outcome as an
- * already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as a separate read
- * because the IPC drain is single-threaded — nothing else touches this key
- * between the peek and the commit.
+ * Split from {@link commitTaskOutcome} so the host can decide-then-post-then-
+ * commit: the dedupe row is written only after the Slack post resolves, so a
+ * post that throws leaves no row and the next tick retries rather than dropping
+ * the outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as
+ * a separate read because the IPC drain is single-threaded — nothing else
+ * touches this key between the peek and the commit.
  *
  * A record the caller held back (`posted_at IS NULL`) stays news no matter how
  * many runs it has been recorded on. Dedupe keys on `recorded_at`, which is
@@ -932,9 +927,9 @@ export function taskOutcomeIsNew(
 export type TaskOutcomeDisposition = 'posted' | 'held' | 'repeat';
 
 /**
- * Write half of {@link recordTaskOutcome}: upsert the row, refreshing
+ * Write half of the dedupe: upsert the row, refreshing
  * `recorded_at`/`error_class`/`detail` on a repeat so the record stays inside
- * the current run's window where the scheduler reads a structured run's status.
+ * the current run's window where the scheduler reads the run's status.
  */
 export function commitTaskOutcome(
   row: TaskOutcomeRow,
@@ -948,11 +943,12 @@ export function commitTaskOutcome(
     | { id: number; posted_at: string | null }
     | undefined;
 
-  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row, so reading
-  // the stamp back off `existing` is safe there and nowhere else.
+  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row, so `existing`
+  // is there to read the stamp back off. If it somehow is not, NULL is the safe
+  // answer: the record reads as unreported and the next tick retries it.
   const postedAt = {
     posted: row.recorded_at,
-    repeat: existing === undefined ? null : existing.posted_at,
+    repeat: existing?.posted_at ?? null,
     held: null,
   }[disposition];
 

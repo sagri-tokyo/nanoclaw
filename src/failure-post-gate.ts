@@ -6,9 +6,27 @@
  * `failure_post_threshold` covers all three. It lives here rather than in
  * `task-scheduler.ts` so the IPC drain can apply it without importing the
  * scheduler (sagri-tokyo/sagri-ai#659).
+ *
+ * A held failure escapes on a later tick only if four things all hold, one per
+ * file: the drain commits the record anyway (`ipc.ts`), a NULL `posted_at`
+ * keeps it news (`db.ts`), that refreshed record turns the run red
+ * (`task-scheduler.ts`), and the next tick counts that red run (here). Break
+ * any one and the failure is suppressed forever, so treat all four as one
+ * mechanism.
+ *
+ * Known mismatch: the streak counts red runs for the whole task, while the
+ * records it gates are per `(task, entity, status)`. One chronically failing
+ * entity keeps every run red, so any other entity's first blip clears the
+ * threshold immediately. It errs toward posting rather than silence.
+ * sagri-tokyo/sagri-ai#663 decides whether to key the streak per entity.
  */
-import { getRecentTaskRunStatuses } from './db.js';
+import {
+  getRecentTaskRunStatuses,
+  taskOutcomeIsNew,
+  type TaskOutcomeDisposition,
+} from './db.js';
 import { logger } from './logger.js';
+import { RUN_FAILING_OUTCOME_STATUSES, TaskOutcome } from './task-outcome.js';
 import { ScheduledTask } from './types.js';
 
 /**
@@ -44,12 +62,10 @@ export function shouldPostFailure(
  * Meant for a run that is still in flight: it reads `task_run_logs`, where the
  * current run's row is not yet written, so every row it sees is prior.
  *
- * The IPC drain has no view of the scheduler, so a record it handles late
- * miscounts in one of two directions depending on which landmark it missed.
- * Late past `logTaskRun` and the current run's own red row reads as prior,
- * clearing the threshold a failure early. Late past the `getTaskOutcomesSince`
- * read that derives the run status and the run logs green instead, resetting
- * the streak. Both are bounded by one tick, and neither is worth a shared clock.
+ * A record the drain handles late miscounts by one tick in either direction
+ * depending on which landmark it missed — past `logTaskRun` the current run's
+ * own red row reads as prior, past `getTaskOutcomesSince` the run logs green
+ * and resets the streak. Neither is worth a shared clock.
  */
 export function failureClearsPostThreshold(task: ScheduledTask): boolean {
   const threshold = task.failure_post_threshold ?? 2;
@@ -68,4 +84,22 @@ export function failureClearsPostThreshold(task: ScheduledTask): boolean {
     );
   }
   return clears;
+}
+
+/**
+ * What the drain should do with one `task_outcome` record.
+ *
+ * Only `RUN_FAILING_OUTCOME_STATUSES` is gated: see its doc for why gating a
+ * status that never turns a run red would suppress it forever. A repeat never
+ * reaches the gate, which keeps `task_run_logs` out of a decision already made.
+ */
+export function decideOutcomeDisposition(
+  task: ScheduledTask,
+  outcome: TaskOutcome,
+): TaskOutcomeDisposition {
+  if (!taskOutcomeIsNew(outcome.task_id, outcome.entity_id, outcome.status)) {
+    return 'repeat';
+  }
+  if (!RUN_FAILING_OUTCOME_STATUSES.has(outcome.status)) return 'posted';
+  return failureClearsPostThreshold(task) ? 'posted' : 'held';
 }

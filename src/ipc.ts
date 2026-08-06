@@ -10,11 +10,9 @@ import {
   createTask,
   deleteTask,
   getTaskById,
-  taskOutcomeIsNew,
   updateTask,
-  type TaskOutcomeDisposition,
 } from './db.js';
-import { failureClearsPostThreshold } from './failure-post-gate.js';
+import { decideOutcomeDisposition } from './failure-post-gate.js';
 import {
   isValidGroupFolder,
   listUndrainedIpcRequests,
@@ -35,11 +33,7 @@ import {
   type Reversibility,
   type StakesHint,
 } from './org-action-gate.js';
-import {
-  parseTaskOutcome,
-  renderTaskOutcome,
-  RUN_FAILING_OUTCOME_STATUSES,
-} from './task-outcome.js';
+import { parseTaskOutcome, renderTaskOutcome } from './task-outcome.js';
 import { RegisteredGroup, SendOptions } from './types.js';
 
 export type ActionSink = (record: ActionRecord) => void;
@@ -902,28 +896,9 @@ export async function processTaskIpc(
         emitReject('ipc_task_outcome', 'TargetGroupNotRegistered');
         break;
       }
-      // An outcome line reaches Slack from here, never from the scheduler's
-      // reply path, so the per-task consecutive-failure threshold has to be
-      // applied here too or it covers only one of the two ways a poller reports
-      // failure (sagri-tokyo/sagri-ai#659).
-      //
-      // Only RUN_FAILING_OUTCOME_STATUSES is gated — see its doc in
-      // task-outcome.ts for why that set, and only that set, is what the gate
-      // can hold back.
-      //
-      // The gate reads task_run_logs, so it is called only on the branch whose
-      // answer it decides; a repeat is dropped either way.
-      const isNew = taskOutcomeIsNew(
-        outcome.task_id,
-        outcome.entity_id,
-        outcome.status,
-      );
-      const disposition: TaskOutcomeDisposition = !isNew
-        ? 'repeat'
-        : !RUN_FAILING_OUTCOME_STATUSES.has(outcome.status) ||
-            failureClearsPostThreshold(task)
-          ? 'posted'
-          : 'held';
+      // An outcome line reaches Slack from here, not from the scheduler's reply
+      // path, so the gate has to run here too — see failure-post-gate.ts.
+      const disposition = decideOutcomeDisposition(task, outcome);
       if (disposition === 'posted') {
         // Post before committing the dedupe row. If the post throws, the outer
         // watcher moves this file to ipc/errors and no row is written, so the
@@ -934,19 +909,10 @@ export async function processTaskIpc(
         await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
           target: { kind: 'topLevel' },
         });
-      } else if (disposition === 'repeat') {
-        logger.debug(
-          {
-            sourceGroup,
-            taskId: outcome.task_id,
-            entityId: outcome.entity_id,
-            status: outcome.status,
-          },
-          'task_outcome already reported on the previous run; dropping the repeat',
-        );
       } else {
-        // The gate already logged the suppression at info with the run history
-        // behind it; this adds which entity was held.
+        // Covers both non-posting dispositions. `held` is already logged at
+        // info by the gate with the run history behind it, so this adds which
+        // entity; a dropped `repeat` is only ever debug.
         logger.debug(
           {
             sourceGroup,
@@ -954,8 +920,9 @@ export async function processTaskIpc(
             entityId: outcome.entity_id,
             status: outcome.status,
             errorClass: outcome.error_class,
+            disposition,
           },
-          'task_outcome held back: consecutive-failure threshold not met',
+          'task_outcome not posted',
         );
       }
       // Reached after a post or with no post at all. The unposted cases still
