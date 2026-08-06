@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import {
   needsAgentRunnerRefresh,
-  recordAgentRunnerRefresh,
+  refreshAgentRunnerCopy,
 } from './agent-runner-refresh.js';
 
 let root: string;
@@ -19,8 +19,7 @@ function write(file: string, body: string, mtimeMs: number): void {
 }
 
 function syncFromRepo(): void {
-  fs.cpSync(source, cached, { recursive: true });
-  recordAgentRunnerRefresh(source, stamp);
+  refreshAgentRunnerCopy(source, cached, stamp);
 }
 
 beforeEach(() => {
@@ -66,6 +65,31 @@ describe('agent-runner copy staleness', () => {
     fs.rmSync(path.join(source, 'tool-allowlist.ts'));
 
     expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+  });
+
+  it('drops a file the repo deleted instead of leaving it cached', () => {
+    syncFromRepo();
+    fs.rmSync(path.join(source, 'tool-allowlist.ts'));
+
+    syncFromRepo();
+
+    expect(fs.existsSync(path.join(cached, 'tool-allowlist.ts'))).toBe(false);
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
+  });
+
+  it('drops the old name after the repo renames a file', () => {
+    syncFromRepo();
+    fs.renameSync(
+      path.join(source, 'index.ts'),
+      path.join(source, 'entrypoint.ts'),
+    );
+
+    syncFromRepo();
+
+    expect(fs.readdirSync(cached).sort()).toEqual([
+      'entrypoint.ts',
+      'tool-allowlist.ts',
+    ]);
   });
 
   it('re-copies when the stamp is unreadable rather than skipping', () => {

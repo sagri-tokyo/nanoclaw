@@ -49,7 +49,7 @@ import { getForwardedEnv } from './env-forward.js';
 import { litellmEnabled, mintVirtualKey } from './litellm-gateway.js';
 import {
   needsAgentRunnerRefresh,
-  recordAgentRunnerRefresh,
+  refreshAgentRunnerCopy,
 } from './agent-runner-refresh.js';
 import { setRunRequesters } from './run-requesters.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -521,8 +521,11 @@ function buildContainerPlan(
     fs.existsSync(agentRunnerSrc) &&
     needsAgentRunnerRefresh(agentRunnerSrc, agentRunnerStamp)
   ) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-    recordAgentRunnerRefresh(agentRunnerSrc, agentRunnerStamp);
+    refreshAgentRunnerCopy(
+      agentRunnerSrc,
+      groupAgentRunnerDir,
+      agentRunnerStamp,
+    );
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

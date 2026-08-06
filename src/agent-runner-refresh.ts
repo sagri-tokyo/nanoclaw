@@ -51,10 +51,23 @@ export function needsAgentRunnerRefresh(
   return fs.readFileSync(stampFile, 'utf-8') !== fingerprint;
 }
 
-export function recordAgentRunnerRefresh(
+/**
+ * Replace a group's cached copy with the repo source and stamp it.
+ *
+ * The cached tree is removed first because `fs.cpSync` overlays rather than
+ * synchronizes: without the removal a file deleted or renamed in the repo would
+ * survive in the copy, and the stamp written afterwards would then mark that
+ * divergence current forever. Removing it also means a group customization of a
+ * file the repo no longer ships does not outlive the repo, which is the point
+ * of the host owning this directory.
+ */
+export function refreshAgentRunnerCopy(
   sourceDir: string,
+  cachedDir: string,
   stampFile: string,
 ): void {
+  fs.rmSync(cachedDir, { recursive: true, force: true });
+  fs.cpSync(sourceDir, cachedDir, { recursive: true });
   fs.mkdirSync(path.dirname(stampFile), { recursive: true });
   fs.writeFileSync(stampFile, agentRunnerFingerprint(sourceDir));
 }
