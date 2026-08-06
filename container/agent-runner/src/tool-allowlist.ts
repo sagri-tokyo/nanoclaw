@@ -1,15 +1,36 @@
 /**
- * Per-capability-profile tool allowlist (sagri-ai#649, closing the #312 TODO).
+ * Per-capability-profile tool allowlist (sagri-ai#649, closing the sagri-ai#312
+ * TODO).
  *
  * `operator` is the interactive assistant profile: it holds no org-write token,
  * so every write already has to route through the host-executed `org_action`
  * gate, and the human driving it needs the full research and subagent surface.
  *
- * `trusted-writer` runs only the four registered ScheduledTask prompts
- * (notion-poller, dsm-experiment-poller, dsm-experiment-submitter, raw-ingest)
- * and is the profile that has the Notion and GitHub tokens mounted, so it gets
- * the subset those four prompts actually use: no WebFetch, no subagent teams,
- * none of the scheduler administration tools.
+ * `trusted-writer` is the profile the Notion and GitHub tokens are mounted for.
+ * It backs the registered ScheduledTask prompts: notion-poller,
+ * dsm-experiment-poller and dsm-experiment-submitter today, raw-ingest once its
+ * infra flag lands. It drops the reach those prompts never use: WebFetch and
+ * WebSearch, subagent teams, NotebookEdit, and the scheduler administration
+ * tools. `research-assistant` is why WebSearch goes too: it gathers evidence
+ * with curl through the reader RPC, so a search tool would be an unlaundered
+ * read straight into the token-holding container.
+ *
+ * A granted-but-unused tool would mean this list was never really reviewed, so
+ * each one that stays has a reason:
+ *   Bash                    every prompt runs shell blocks
+ *   Read Write Edit         raw-ingest writes and re-reads its dumps
+ *   Glob Grep               local workspace search
+ *   Skill                   org-actions, notion-writer, dsm-experiment
+ *   TodoWrite ToolSearch    agent-internal bookkeeping, no external reach
+ *   send_message            operator progress outside the structured reply
+ *   fetch_untrusted_list    the laundered enumeration path, used by all four
+ *   fetch_untrusted         the laundered per-item read, used by raw-ingest
+ *   org_action              notion-poller's write-back contract
+ *   report_outcome          host-enforced. A tick that reports nothing is
+ *                           logged failed (`src/task-scheduler.ts`), so a
+ *                           scheduled task cannot run without it
+ * The file tools grant nothing `Bash` does not already reach, and `Bash` has to
+ * stay, so they are here for ergonomics rather than capability.
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -64,7 +85,6 @@ export const toolAllowlistByProfile = {
     'Edit',
     'Glob',
     'Grep',
-    'WebSearch',
     'TodoWrite',
     'ToolSearch',
     'Skill',

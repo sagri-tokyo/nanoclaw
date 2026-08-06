@@ -19,6 +19,18 @@ function registeredMcpTools(): string[] {
   );
 }
 
+function hostProfiles(): string[] {
+  const source = fs.readFileSync(
+    path.join(here, '..', '..', '..', 'src', 'types.ts'),
+    'utf-8',
+  );
+  const union = source.match(/export type CapabilityProfile =([^;]+);/);
+  if (!union) {
+    throw new Error('no CapabilityProfile union found in src/types.ts');
+  }
+  return [...union[1].matchAll(/'([a-z-]+)'/g)].map((match) => match[1]);
+}
+
 describe('capability profiles resolve to separate tool lists', () => {
   it('gives trusted-writer a strict subset of the operator surface', () => {
     const operator = allowedToolsFor('operator');
@@ -35,6 +47,7 @@ describe('capability profiles resolve to separate tool lists', () => {
     );
 
     expect(denied).toEqual([
+      'WebSearch',
       'WebFetch',
       'Task',
       'TaskOutput',
@@ -71,8 +84,14 @@ describe('the checked-in manifest matches the runtime surface', () => {
 
   it('is the only place index.ts gets its allowedTools from', () => {
     const source = fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
-    expect(source).toContain('allowedTools: allowedToolsFor(');
+    expect(source).toContain(
+      'allowedTools: allowedToolsFor(containerInput.capabilityProfile)',
+    );
     expect(source).not.toMatch(/allowedTools: \[/);
+  });
+
+  it('grants the same profiles the host will send', () => {
+    expect(Object.keys(readManifest()).sort()).toEqual(hostProfiles().sort());
   });
 
   it('names every MCP tool the server registers, and no others', () => {

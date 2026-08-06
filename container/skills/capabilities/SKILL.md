@@ -84,11 +84,8 @@ Present the report as a clean, readable message. Example:
 • /capabilities — This report
 (list all found skills)
 
-*Tools:*
-• Core: Bash, Read, Write, Edit, Glob, Grep
-• Web: WebSearch, WebFetch
-• Orchestration: Task, TeamCreate, SendMessage
-• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
+*Tools:* (capability profile: operator or trusted-writer)
+• (list the tools this profile has, from /app/tool-allowlist.json)
 
 *Container Tools:*
 • agent-browser: ✓
