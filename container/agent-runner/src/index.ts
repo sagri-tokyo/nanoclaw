@@ -26,7 +26,7 @@ import {
 import { fileURLToPath } from 'url';
 import { RetryBudget, readMax529Retries } from './retry-budget.js';
 import {
-  allowedToolsFor,
+  grantedToolsFor,
   deniedToolsFor,
   type CapabilityProfile,
 } from './tool-allowlist.js';
@@ -500,12 +500,18 @@ async function runQuery(
             append: globalClaudeMd,
           }
         : undefined,
-      allowedTools: allowedToolsFor(containerInput.capabilityProfile),
+      tools: grantedToolsFor(containerInput.capabilityProfile),
       disallowedTools: deniedToolsFor(containerInput.capabilityProfile),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
+      // `settingSources` has to stay for CLAUDE.md and skills, but it also
+      // discovers MCP servers from project/user `.mcp.json`, and `tools` does
+      // not gate `mcp__` names. Without this, a planted `.mcp.json` puts an
+      // unreviewed tool in front of a token-bearing profile. Only the servers
+      // passed below survive.
+      strictMcpConfig: true,
       mcpServers: {
         nanoclaw: {
           command: 'node',

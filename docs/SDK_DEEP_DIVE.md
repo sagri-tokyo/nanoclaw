@@ -67,12 +67,12 @@ Full `Options` type from the official docs:
 | `additionalDirectories` | `string[]` | `[]` | Additional directories Claude can access |
 | `agents` | `Record<string, AgentDefinition>` | `undefined` | Programmatically define subagents (not agent teams — no orchestration) |
 | `allowDangerouslySkipPermissions` | `boolean` | `false` | Required when using `permissionMode: 'bypassPermissions'` |
-| `allowedTools` | `string[]` | All tools | List of allowed tool names |
+| `allowedTools` | `string[]` | `[]` | Tool names auto-approved without a prompt. Grants nothing and restricts nothing — under `permissionMode: 'bypassPermissions'` it is a no-op. Use `tools` to restrict |
 | `betas` | `SdkBeta[]` | `[]` | Beta features (e.g., `['context-1m-2025-08-07']` for 1M context) |
 | `canUseTool` | `CanUseTool` | `undefined` | Custom permission function for tool usage |
 | `continue` | `boolean` | `false` | Continue the most recent conversation |
 | `cwd` | `string` | `process.cwd()` | Current working directory |
-| `disallowedTools` | `string[]` | `[]` | List of disallowed tool names |
+| `disallowedTools` | `string[]` | `[]` | Tool names removed from the model's context. The only option that gates `mcp__` tools |
 | `enableFileCheckpointing` | `boolean` | `false` | Enable file change tracking for rewinding |
 | `env` | `Dict<string>` | `process.env` | Environment variables |
 | `executable` | `'bun' \| 'deno' \| 'node'` | Auto-detected | JavaScript runtime |
@@ -94,8 +94,9 @@ Full `Options` type from the official docs:
 | `sandbox` | `SandboxSettings` | `undefined` | Sandbox behavior configuration |
 | `settingSources` | `SettingSource[]` | `[]` (none) | Which filesystem settings to load. Must include `'project'` to load CLAUDE.md |
 | `stderr` | `(data: string) => void` | `undefined` | Callback for stderr output |
+| `strictMcpConfig` | `boolean` | `false` | Use only the servers passed in `mcpServers`, ignoring any `.mcp.json` that `settingSources` would discover. The typings describe it as config validation; the flag it emits (`--strict-mcp-config`) is documented as "Only use MCP servers from --mcp-config, ignoring all other MCP configurations" |
 | `systemPrompt` | `string \| { type: 'preset'; preset: 'claude_code'; append?: string }` | `undefined` | System prompt. Use preset to get Claude Code's prompt, with optional `append` |
-| `tools` | `string[] \| { type: 'preset'; preset: 'claude_code' }` | `undefined` | Tool configuration |
+| `tools` | `string[] \| { type: 'preset'; preset: 'claude_code' }` | preset | Base set of built-in tools, and the only option that restricts them. Every built-in it omits is disabled; an unknown name is ignored. Does not gate `mcp__` tools — use `disallowedTools` for those |
 
 ### PermissionMode
 

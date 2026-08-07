@@ -35,18 +35,27 @@
  * granted for the structured-mode tasks this profile is meant to carry, not
  * because anything uses it yet.
  *
- * How this is enforced matters, because the obvious reading is wrong. The SDK's
- * `allowedTools` only auto-approves without prompting, and the runner already
- * sets `permissionMode: 'bypassPermissions'`, so a name's absence from it
- * removes nothing. `deniedToolsFor` feeds `disallowedTools`, which the SDK does
- * remove from the model's context, and that is the option doing the work.
+ * How this is enforced: built-ins go through `tools`, the SDK's positive base
+ * set. MCP tools go through `disallowedTools`, the only option that gates
+ * `mcp__` names, so `deniedToolsFor` still has to reach it even though `tools`
+ * already disables the same built-ins by omission. Full option semantics:
+ * `docs/SDK_DEEP_DIVE.md`.
  *
- * `allowedTools` stays as the written record of intent. It is not the granted
- * set: the denial is a complement of these two lists, so a built-in on neither
- * one is denied to nobody, and a tool a future SDK adds is granted by default.
- * The SDK's positive `tools` base set would fail closed instead. Switching to it
- * needs a container run to pin down which built-ins the runner needs (`tools`
- * disables every name it omits), which nothing in this repo can exercise.
+ * Denial only covers `mcp__` names this file knows about, which is why the
+ * runner also sets `strictMcpConfig`. `settingSources` stays on for CLAUDE.md
+ * and skills, and it would otherwise discover an MCP server from a `.mcp.json`
+ * in the group folder the agent can write to, putting a tool neither list names
+ * in front of the token-bearing profile.
+ *
+ * Omission closes the built-in set the SDK enumerates, which narrows
+ * `operator` as well as `trusted-writer`: the plan-mode, worktree, cron,
+ * remote-trigger and `AskUserQuestion` built-ins are off for both. That is
+ * deliberate. Every container runs headless under `bypassPermissions` with no
+ * human at a terminal to answer a question or approve a plan, and nanoclaw
+ * schedules through its own MCP tools rather than the SDK's cron.
+ * `tool-allowlist.test.ts` pins the list against a captured SDK surface, so a
+ * version that adds a built-in fails CI until someone decides which profile
+ * should hold it (sagri-ai#668).
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -77,9 +86,6 @@ export const toolAllowlistByProfile = {
     'Task',
     'TaskOutput',
     'TaskStop',
-    'TeamCreate',
-    'TeamDelete',
-    'SendMessage',
     'TodoWrite',
     'ToolSearch',
     'Skill',
@@ -128,7 +134,7 @@ export type CapabilityProfile = keyof typeof toolAllowlistByProfile;
  * resolves through the prototype and would throw a TypeError instead of naming
  * the input.
  */
-export function allowedToolsFor(profile: string | undefined): string[] {
+export function grantedToolsFor(profile: string | undefined): string[] {
   const resolved = profile ?? 'operator';
   if (!Object.hasOwn(toolAllowlistByProfile, resolved)) {
     throw new Error(`unknown capability profile: ${resolved}`);
@@ -140,10 +146,15 @@ export function allowedToolsFor(profile: string | undefined): string[] {
  * The tools this profile does not get, as `disallowedTools` wants them.
  *
  * Taken against `operator` because that is the widest profile, so the result is
- * what this profile gives up relative to the full surface. `operator` itself
- * denies nothing.
+ * what this profile gives up relative to the full surface. `operator` returns an
+ * empty list here, which is not the same as denying nothing: `tools` still holds
+ * it to the built-ins it names.
+ *
+ * The built-in names here are already redundant with `tools`, which disables
+ * them by omission; they stay for symmetry with the `mcp__` names, which are
+ * not.
  */
 export function deniedToolsFor(profile: string | undefined): string[] {
-  const granted = new Set(allowedToolsFor(profile));
+  const granted = new Set(grantedToolsFor(profile));
   return toolAllowlistByProfile.operator.filter((tool) => !granted.has(tool));
 }

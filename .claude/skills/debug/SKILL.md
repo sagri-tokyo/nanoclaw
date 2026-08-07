@@ -216,10 +216,11 @@ query({
   prompt: input.prompt,
   options: {
     cwd: '/workspace/group',
-    allowedTools: ['Bash', 'Read', 'Write', ...],
+    tools: ['Bash', 'Read', 'Write', ...],
+    disallowedTools: [...],  // gates mcp__ tools; `tools` does not
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,  // Required with bypassPermissions
-    settingSources: ['project'],
+    settingSources: ['project', 'user'],
     mcpServers: { ... }
   }
 })
