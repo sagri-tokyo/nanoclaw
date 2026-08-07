@@ -66,8 +66,14 @@ export function refreshAgentRunnerCopy(
   cachedDir: string,
   stampFile: string,
 ): void {
+  // Fingerprint before copying, never after. A deploy that lands mid-copy would
+  // otherwise be certified by a stamp for a revision this copy never contained,
+  // and the next start would skip the refresh and keep the looser policy. Taken
+  // first, the stamp describes at most what was copied, so a source that moved
+  // under us no longer matches and the next start copies again.
+  const fingerprint = agentRunnerFingerprint(sourceDir);
   fs.rmSync(cachedDir, { recursive: true, force: true });
   fs.cpSync(sourceDir, cachedDir, { recursive: true });
   fs.mkdirSync(path.dirname(stampFile), { recursive: true });
-  fs.writeFileSync(stampFile, agentRunnerFingerprint(sourceDir));
+  fs.writeFileSync(stampFile, fingerprint);
 }

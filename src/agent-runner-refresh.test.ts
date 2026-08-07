@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -90,6 +90,31 @@ describe('agent-runner copy staleness', () => {
       'entrypoint.ts',
       'tool-allowlist.ts',
     ]);
+  });
+
+  it('does not certify a revision that landed mid-copy', () => {
+    syncFromRepo();
+
+    const realCopy = fs.cpSync;
+    const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
+      ...args: Parameters<typeof fs.cpSync>
+    ) => {
+      const result = realCopy(...args);
+      // a deploy rewrites the allowlist while the copy is in flight
+      write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
+      return result;
+    }) as typeof fs.cpSync);
+
+    try {
+      refreshAgentRunnerCopy(source, cached, stamp);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(
+      fs.readFileSync(path.join(cached, 'tool-allowlist.ts'), 'utf-8'),
+    ).toBe('old');
+    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
   });
 
   it('re-copies when the stamp is unreadable rather than skipping', () => {
