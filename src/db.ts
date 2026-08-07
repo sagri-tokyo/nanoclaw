@@ -80,6 +80,10 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
+      -- Mirror of the in-memory session map. Nothing resumes from it and boot
+      -- clears every row (deleteAllSessions, sagri-ai#629). Do not drop it:
+      -- scripts/cleanup-sessions.sh reads it so the retention pruner spares
+      -- the artifacts of sessions live in the current process.
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
@@ -122,7 +126,8 @@ function createSchema(database: Database.Database): void {
       error_class TEXT,
       detail TEXT,
       group_folder TEXT NOT NULL,
-      recorded_at TEXT NOT NULL
+      recorded_at TEXT NOT NULL,
+      posted_at TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_task_outcomes_key
       ON task_outcomes(task_id, entity_id, status);
@@ -269,6 +274,32 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN reply_mode TEXT NOT NULL DEFAULT 'text'`,
     );
+  } catch (error) {
+    if (
+      !(
+        error instanceof Error &&
+        error.message.includes('duplicate column name')
+      )
+    ) {
+      throw error;
+    }
+  }
+
+  // Add posted_at to task_outcomes (migration for existing DBs). NULL means
+  // "held back, still unreported", so pre-gate rows backfill from recorded_at:
+  // without it the whole existing table reads as unreported and replays to
+  // Slack on upgrade. See sagri-tokyo/sagri-ai#659.
+  //
+  // Unlike its siblings above, this must run exactly once, both statements
+  // atomically: a second run stamps every held record posted (silencing real
+  // alerts), a partial run leaves rows NULL and replays them. The ALTER's
+  // `duplicate column name` throw enforces once-only; `db-migration.test.ts`
+  // pins both halves.
+  try {
+    database.transaction(() => {
+      database.exec(`ALTER TABLE task_outcomes ADD COLUMN posted_at TEXT`);
+      database.exec(`UPDATE task_outcomes SET posted_at = recorded_at`);
+    })();
   } catch (error) {
     if (
       !(
@@ -830,41 +861,41 @@ function previousRunCutoff(taskId: string): string {
 }
 
 /**
- * Record one structured task outcome. Returns true when the host should post
- * it, which is whenever the same `(task_id, entity_id, status)` was not already
- * reported on the previous run. A job that stays `submitted` across twenty
- * consecutive ticks therefore still produces exactly one Slack line, because
- * each tick's record lands one run after the last.
+ * Test-only. NOT the path the host takes, and not safe as one: it can only ever
+ * decide `posted` or `repeat`, so it stamps `posted_at` for a record nothing
+ * posted and re-arms dedupe against it — the permanent suppression
+ * sagri-tokyo/sagri-ai#659 removed. The host pairs {@link taskOutcomeIsNew}
+ * with {@link commitTaskOutcome} so the failure gate sits between the two.
+ * sagri-tokyo/sagri-ai#661 deletes this.
  *
- * The window is what keeps dedupe from becoming permanent silence: keyed on
- * existence alone, only the first outage of a task's life would ever post. A
- * repeat that follows a gap (a recovery, a re-submission, a later outage) is
- * news.
- *
- * A repeat refreshes the row rather than inserting beside it, so the table
- * grows with entities handled rather than with ticks, and the refreshed
- * `recorded_at` keeps the record inside the current run's window, which is
- * where the scheduler reads a structured run's status from.
+ * @internal
  */
 export function recordTaskOutcome(row: TaskOutcomeRow): boolean {
   const isNew = taskOutcomeIsNew(row.task_id, row.entity_id, row.status);
-  commitTaskOutcome(row);
+  commitTaskOutcome(row, isNew ? 'posted' : 'repeat');
   return isNew;
 }
 
 /**
- * Read-only half of {@link recordTaskOutcome}: would this `(task_id,
- * entity_id, status)` be news if recorded now? True when no row exists, or a
- * row exists but was last recorded before the previous run's window — the same
- * "post only what a prior run did not already report" rule the atomic version
- * decides.
+ * Read half of the dedupe: would this `(task_id, entity_id, status)` be news if
+ * recorded now? True when no row exists, or one exists but was last recorded
+ * before the previous run's window. The window is what keeps dedupe from
+ * becoming permanent silence — keyed on existence alone, only the first outage
+ * of a task's life would ever post, and a repeat that follows a gap (a
+ * recovery, a re-submission, a later outage) is news.
  *
- * Split out so the host can decide-then-post-then-commit: the dedupe row is
- * written only after the Slack post resolves, so a post that throws leaves no
- * row and the next tick retries rather than dropping the outcome as an
- * already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as a separate read
- * because the IPC drain is single-threaded — nothing else touches this key
- * between the peek and the commit.
+ * Split from {@link commitTaskOutcome} so the host can decide-then-post-then-
+ * commit: the dedupe row is written only after the Slack post resolves, so a
+ * post that throws leaves no row and the next tick retries rather than dropping
+ * the outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105). Safe as
+ * a separate read because the IPC drain is single-threaded — nothing else
+ * touches this key between the peek and the commit.
+ *
+ * A record the caller held back (`posted_at IS NULL`) stays news no matter how
+ * many runs it has been recorded on. Dedupe keys on `recorded_at`, which is
+ * refreshed every run, so without this a failure the consecutive-failure gate
+ * suppressed on its first tick would read as an already-reported repeat on
+ * every tick after and never reach Slack at all (sagri-tokyo/sagri-ai#659).
  */
 export function taskOutcomeIsNew(
   taskId: string,
@@ -873,32 +904,73 @@ export function taskOutcomeIsNew(
 ): boolean {
   const existing = db
     .prepare(
-      `SELECT recorded_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT recorded_at, posted_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(taskId, entityId, status) as { recorded_at: string } | undefined;
+    .get(taskId, entityId, status) as
+    | { recorded_at: string; posted_at: string | null }
+    | undefined;
   if (!existing) return true;
+  if (existing.posted_at === null) return true;
   return existing.recorded_at < previousRunCutoff(taskId);
 }
 
 /**
- * Write half of {@link recordTaskOutcome}: upsert the row, refreshing
- * `recorded_at`/`error_class`/`detail` on a repeat so the record stays inside
- * the current run's window where the scheduler reads a structured run's status.
+ * What the caller did with this record, which decides `posted_at`:
+ *
+ * - `posted` — it reached chat, so stamp the post.
+ * - `held` — it was news but a gate held it back, so clear the stamp. Clearing
+ *   rather than preserving is the whole point: a task that posted an outage
+ *   months ago is not "already reported" for the outage happening now, and
+ *   leaving the old stamp makes every outage after the first one silent.
+ * - `repeat` — a prior run already reported it, so leave the stamp alone.
  */
-export function commitTaskOutcome(row: TaskOutcomeRow): void {
+export type TaskOutcomeDisposition = 'posted' | 'held' | 'repeat';
+
+/**
+ * Write half of the dedupe: upsert the row, refreshing
+ * `recorded_at`/`error_class`/`detail` on a repeat so the record stays inside
+ * the current run's window where the scheduler reads the run's status.
+ */
+export function commitTaskOutcome(
+  row: TaskOutcomeRow,
+  disposition: TaskOutcomeDisposition,
+): void {
   const existing = db
     .prepare(
-      `SELECT id FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
+      `SELECT id, posted_at FROM task_outcomes WHERE task_id = ? AND entity_id = ? AND status = ?`,
     )
-    .get(row.task_id, row.entity_id, row.status) as { id: number } | undefined;
+    .get(row.task_id, row.entity_id, row.status) as
+    | { id: number; posted_at: string | null }
+    | undefined;
+
+  // `repeat` only comes from a `taskOutcomeIsNew` that saw a row with a stamp,
+  // and the repeat branch runs peek and commit synchronously, so no in-repo
+  // path clears the row in between. This guards out-of-band deletion and a
+  // corrupt DB. Throwing is expensive: it skips the commit and the audit
+  // record, and the drain quarantines the request into ipc/errors, which is
+  // excluded from every later scan, so only the container re-emitting recovers
+  // it. Still better than inventing a stamp, which marks the record reported
+  // and silences it for good.
+  if (disposition === 'repeat' && existing === undefined) {
+    throw new Error(
+      `commitTaskOutcome: repeat disposition for ${row.task_id}/${row.entity_id}/${row.status} but the row is gone`,
+    );
+  }
+
+  const postedAt = {
+    posted: row.recorded_at,
+    repeat: existing?.posted_at ?? null,
+    held: null,
+  }[disposition];
 
   if (existing) {
     db.prepare(
-      `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ? WHERE id = ?`,
+      `UPDATE task_outcomes SET error_class = ?, detail = ?, recorded_at = ?, posted_at = ? WHERE id = ?`,
     ).run(
       row.error_class,
       row.detail === null ? null : JSON.stringify(row.detail),
       row.recorded_at,
+      postedAt,
       existing.id,
     );
     return;
@@ -906,8 +978,8 @@ export function commitTaskOutcome(row: TaskOutcomeRow): void {
 
   db.prepare(
     `
-    INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at, posted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     row.task_id,
@@ -917,6 +989,7 @@ export function commitTaskOutcome(row: TaskOutcomeRow): void {
     row.detail === null ? null : JSON.stringify(row.detail),
     row.group_folder,
     row.recorded_at,
+    postedAt,
   );
 }
 
@@ -956,7 +1029,8 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+/** @internal - tests only. Wiring this into loadState re-introduces sagri-ai#629. */
+export function _getSession(groupFolder: string): string | undefined {
   const row = db
     .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
     .get(groupFolder) as { session_id: string } | undefined;

@@ -54,15 +54,37 @@ remove() {
 
 # --- Collect active session IDs from the database ---
 
+# Errors go to stderr: on failure src/session-cleanup.ts logs the execFile error
+# alone, and only stderr rides along in its message.
 if [ ! -f "$STORE_DB" ]; then
-  log "ERROR: database not found at $STORE_DB"
+  log "ERROR: database not found at $STORE_DB" >&2
   exit 1
 fi
 
-ACTIVE_IDS=$(sqlite3 "$STORE_DB" "SELECT session_id FROM sessions;" 2>/dev/null || true)
+# Unknown liveness is not "nothing is live": a failed query or a missing sqlite3
+# must abort, not prune. .timeout rides out the write lock the service holds.
+if ! ACTIVE_IDS=$(sqlite3 -cmd '.timeout 5000' "$STORE_DB" \
+  "SELECT session_id FROM sessions;"); then
+  log "ERROR: cannot read live sessions from $STORE_DB, pruning nothing" >&2
+  exit 1
+fi
 
 is_active() {
-  echo "$ACTIVE_IDS" | grep -qF "$1"
+  echo "$ACTIVE_IDS" | grep -qxF "$1"
+}
+
+# Artifacts name their session in a field of the filename: todos lead with it
+# ("<id>-agent-<id>.json"), telemetry carries it dot-delimited
+# ("1p_failed_events.<id>.<id>.json"). Anchor on those field boundaries: a
+# substring test spares "not-<id>-agent-x.json", which no live session owns.
+names_active_session() {
+  local name="$1" aid
+  for aid in $ACTIVE_IDS; do
+    case "$name" in
+      "$aid" | "$aid"[-.]* | *."$aid".*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # --- Prune session JSONLs and tool-results dirs ---
@@ -109,12 +131,7 @@ for group_dir in "$SESSIONS_DIR"/*/; do
   [ -d "$todos_dir" ] || continue
   while IFS= read -r -d '' f; do
     fname=$(basename "$f" .json)
-    # Todo filenames are like {session_id}-agent-{session_id}.json
-    for aid in $ACTIVE_IDS; do
-      if [[ "$fname" == *"$aid"* ]]; then
-        continue 2
-      fi
-    done
+    names_active_session "$fname" && continue
     remove "$f"
   done < <(find "$todos_dir" -type f -mtime +3 -print0 2>/dev/null)
 done
@@ -126,11 +143,7 @@ for group_dir in "$SESSIONS_DIR"/*/; do
   [ -d "$telem_dir" ] || continue
   while IFS= read -r -d '' f; do
     fname=$(basename "$f")
-    for aid in $ACTIVE_IDS; do
-      if [[ "$fname" == *"$aid"* ]]; then
-        continue 2
-      fi
-    done
+    names_active_session "$fname" && continue
     remove "$f"
   done < <(find "$telem_dir" -type f -mtime +7 -print0 2>/dev/null)
 done

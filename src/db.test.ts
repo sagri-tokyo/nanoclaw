@@ -16,12 +16,13 @@ import {
   logTaskRun,
   setRegisteredGroup,
   setSession,
-  getSession,
+  _getSession,
   deleteAllSessions,
   storeChatMetadata,
   storeMessage,
   updateTask,
   recordTaskOutcome,
+  commitTaskOutcome,
   getTaskOutcomesSince,
 } from './db.js';
 import { formatMessages } from './router.js';
@@ -1163,16 +1164,27 @@ describe('task outcome dedupe store', () => {
     deleteTask('dsm-experiment-submitter');
     expect(recordTaskOutcome(outcome())).toBe(true);
   });
+
+  it('refuses to commit a repeat whose row is gone', () => {
+    // A `repeat` says a prior run reported this record, so the stamp has to be
+    // read off the existing row. With no row there is no stamp, and inventing
+    // one would mark the record reported and silence it for good.
+    expect(() => commitTaskOutcome(outcome(), 'repeat')).toThrow(
+      /repeat disposition .* but the row is gone/,
+    );
+  });
 });
 
 describe('deleteAllSessions (sagri-ai#629)', () => {
   it('forgets every group, so a restart resumes nothing it cannot attribute', () => {
     setSession('dev', 'session-abc');
     setSession('ops', 'session-xyz');
+    expect(_getSession('dev')).toBe('session-abc');
+    expect(_getSession('ops')).toBe('session-xyz');
 
     deleteAllSessions();
 
-    expect(getSession('dev')).toBeUndefined();
-    expect(getSession('ops')).toBeUndefined();
+    expect(_getSession('dev')).toBeUndefined();
+    expect(_getSession('ops')).toBeUndefined();
   });
 });

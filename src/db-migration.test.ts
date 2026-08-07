@@ -145,6 +145,96 @@ describe('database migrations', () => {
     }
   });
 
+  it('backfills task_outcomes.posted_at from recorded_at so upgrade replays nothing', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nanoclaw-db-posted-test-'),
+    );
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Legacy schema: task_outcomes WITHOUT posted_at.
+      legacyDb.exec(`
+        CREATE TABLE task_outcomes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error_class TEXT,
+          detail TEXT,
+          group_folder TEXT NOT NULL,
+          recorded_at TEXT NOT NULL
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'dsm-experiment-poller',
+          'exp-001',
+          'submitted',
+          null,
+          null,
+          'slack_main',
+          '2026-07-24T01:00:00.000Z',
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+      _closeDatabase();
+
+      const migratedDb = new Database(dbPath);
+      const row = migratedDb
+        .prepare(`SELECT posted_at FROM task_outcomes WHERE entity_id = ?`)
+        .get('exp-001') as { posted_at: string | null };
+      migratedDb.close();
+      // NULL means "held back, never posted", so a table of them replays to
+      // Slack on upgrade. See the migration comment in db.ts.
+      expect(row.posted_at).toBe('2026-07-24T01:00:00.000Z');
+
+      // A held record's NULL must survive a second boot — see the once-only
+      // rationale in the migration comment in db.ts.
+      const heldDb = new Database(dbPath);
+      heldDb
+        .prepare(
+          `INSERT INTO task_outcomes (task_id, entity_id, status, error_class, detail, group_folder, recorded_at, posted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          'dsm-experiment-poller',
+          'exp-002',
+          'failed',
+          'skill_failed',
+          null,
+          'slack_main',
+          '2026-07-24T02:00:00.000Z',
+        );
+      heldDb.close();
+
+      vi.resetModules();
+      const secondBoot = await import('./db.js');
+      secondBoot.initDatabase();
+      secondBoot._closeDatabase();
+
+      const rebootedDb = new Database(dbPath);
+      const held = rebootedDb
+        .prepare(`SELECT posted_at FROM task_outcomes WHERE entity_id = ?`)
+        .get('exp-002') as { posted_at: string | null };
+      rebootedDb.close();
+      expect(held.posted_at).toBeNull();
+    } finally {
+      process.chdir(repoRoot);
+    }
+  });
+
   it("adds capability_profile defaulting to 'operator' on existing scheduled_tasks rows", async () => {
     const repoRoot = process.cwd();
     const tempDir = fs.mkdtempSync(
