@@ -139,13 +139,10 @@ export function refreshAgentRunnerCopy(
       // makes the staged tree itself a mix of two revisions, and promoting that
       // atomically still runs the container on a new entrypoint with the old
       // allowlist. So re-read the source and only promote if it held still.
-      //
-      // Comparing the two ends does not prove the middle. A source that went
-      // to another revision and came back to these exact bytes mid-copy would
-      // pass, having staged the one in between. Closing that needs the deploy
-      // to publish a version this could pin, which is infra's side, not this
-      // file's. Nobody reaches it without write access to the source, and
-      // anyone holding that can publish a permissive policy outright instead.
+      // Comparing the two ends does not prove the middle: a source that left and
+      // returned to these exact bytes mid-copy would pass undetected. Closing that
+      // needs a pinnable deploy version (infra's side); reaching it needs source
+      // write access, which is enough to ship a permissive policy directly anyway.
       if (agentRunnerFingerprint(sourceDir) !== before) {
         continue;
       }
