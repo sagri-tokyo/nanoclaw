@@ -10,9 +10,9 @@ import {
   createTask,
   deleteTask,
   getTaskById,
-  taskOutcomeIsNew,
   updateTask,
 } from './db.js';
+import { decideOutcomeDisposition } from './failure-post-gate.js';
 import {
   isValidGroupFolder,
   listUndrainedIpcRequests,
@@ -896,41 +896,45 @@ export async function processTaskIpc(
         emitReject('ipc_task_outcome', 'TargetGroupNotRegistered');
         break;
       }
-      const isNew = taskOutcomeIsNew(
-        outcome.task_id,
-        outcome.entity_id,
-        outcome.status,
-      );
-      if (isNew) {
+      // An outcome line reaches Slack from here, not from the scheduler's reply
+      // path, so the gate has to run here too — see failure-post-gate.ts.
+      const disposition = decideOutcomeDisposition(task, outcome);
+      if (disposition === 'posted') {
         // Post before committing the dedupe row. If the post throws, the outer
         // watcher moves this file to ipc/errors and no row is written, so the
-        // next tick re-derives isNew and retries rather than dropping the
-        // outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105).
+        // next tick re-derives the disposition and retries rather than dropping
+        // the outcome as an already-reported repeat (sagri-tokyo/nanoclaw#105).
         // Cron output replies to no message, so it must not staple onto
         // whichever human last spoke in the channel (sagri-ai#371).
         await deps.sendMessage(chatJid, renderTaskOutcome(outcome), {
           target: { kind: 'topLevel' },
         });
       } else {
+        // Both non-posting dispositions. `held` already has its operator-facing
+        // info line from the gate, entity included, so this stays at debug.
         logger.debug(
           {
             sourceGroup,
             taskId: outcome.task_id,
             entityId: outcome.entity_id,
             status: outcome.status,
+            errorClass: outcome.error_class,
+            disposition,
           },
-          'task_outcome already posted for this status on the previous run; dropping the repeat',
+          'task_outcome not posted',
         );
       }
-      // Reached only after a successful post (isNew) or with no post at all
-      // (repeat). The repeat still commits to refresh recorded_at into the
-      // current run's window, which is where the scheduler reads a structured
-      // run's status from.
-      commitTaskOutcome({
-        ...outcome,
-        group_folder: sourceGroup,
-        recorded_at: new Date().toISOString(),
-      });
+      // Reached after a post or with no post at all. The unposted cases still
+      // commit to refresh recorded_at into the current run's window, which is
+      // where the scheduler reads the run's status from.
+      commitTaskOutcome(
+        {
+          ...outcome,
+          group_folder: sourceGroup,
+          recorded_at: new Date().toISOString(),
+        },
+        disposition,
+      );
       emitIpcAction(sink, {
         level: 'info',
         session_id: outcome.task_id,
