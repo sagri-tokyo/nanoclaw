@@ -41,6 +41,12 @@
  * already disables the same built-ins by omission. Full option semantics:
  * `docs/SDK_DEEP_DIVE.md`.
  *
+ * Denial only covers `mcp__` names this file knows about, which is why the
+ * runner also sets `strictMcpConfig`. `settingSources` stays on for CLAUDE.md
+ * and skills, and it would otherwise discover an MCP server from a `.mcp.json`
+ * in the group folder the agent can write to, putting a tool neither list names
+ * in front of the token-bearing profile.
+ *
  * Omission closes the built-in set the SDK enumerates, which narrows
  * `operator` as well as `trusted-writer`: the plan-mode, worktree, cron,
  * remote-trigger and `AskUserQuestion` built-ins are off for both. That is

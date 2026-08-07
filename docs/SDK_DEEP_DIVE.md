@@ -94,6 +94,7 @@ Full `Options` type from the official docs:
 | `sandbox` | `SandboxSettings` | `undefined` | Sandbox behavior configuration |
 | `settingSources` | `SettingSource[]` | `[]` (none) | Which filesystem settings to load. Must include `'project'` to load CLAUDE.md |
 | `stderr` | `(data: string) => void` | `undefined` | Callback for stderr output |
+| `strictMcpConfig` | `boolean` | `false` | Use only the servers passed in `mcpServers`, ignoring any `.mcp.json` that `settingSources` would discover. The typings describe it as config validation; the flag it emits (`--strict-mcp-config`) is documented as "Only use MCP servers from --mcp-config, ignoring all other MCP configurations" |
 | `systemPrompt` | `string \| { type: 'preset'; preset: 'claude_code'; append?: string }` | `undefined` | System prompt. Use preset to get Claude Code's prompt, with optional `append` |
 | `tools` | `string[] \| { type: 'preset'; preset: 'claude_code' }` | preset | Base set of built-in tools, and the only option that restricts them. Every built-in it omits is disabled; an unknown name is ignored. Does not gate `mcp__` tools — use `disallowedTools` for those |
 

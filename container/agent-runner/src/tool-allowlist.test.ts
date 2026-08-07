@@ -117,6 +117,13 @@ describe('the checked-in manifest matches the runtime surface', () => {
     );
   });
 
+  it('ignores MCP servers discovered from project and user settings', () => {
+    // The denial list only names servers we know about, so a `.mcp.json`
+    // planted in the group folder would otherwise reach a token-bearing
+    // profile through `settingSources`.
+    expect(readRunnerSource()).toContain('strictMcpConfig: true');
+  });
+
   it('grants the same profiles the host will send', () => {
     expect(Object.keys(readManifest()).sort()).toEqual(hostProfiles().sort());
   });
