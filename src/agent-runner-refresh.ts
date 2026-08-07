@@ -58,10 +58,12 @@ export function agentRunnerFingerprint(sourceDir: string): string {
  * every group's container. Statting the paths the source names is bounded by
  * the source instead, which the host owns.
  *
- * Presence only. A file still at its path whose contents were rewritten reads
- * as fine here, and that is deliberate: customizing this tree is the feature
- * the read-write mount exists for. What forces a refresh is a source-side
- * change, or a path the copy no longer has.
+ * Presence only. A file still at its path reads as fine here whether its
+ * contents were rewritten or it was swapped for a symlink onto something else,
+ * and that is deliberate: customizing this tree is the feature the read-write
+ * mount exists for. What forces a refresh is a source-side change, or a path
+ * the copy no longer resolves. A symlink loop or a dangling one resolves to
+ * nothing, so those refresh rather than throwing.
  */
 export function needsAgentRunnerRefresh(
   sourceDir: string,

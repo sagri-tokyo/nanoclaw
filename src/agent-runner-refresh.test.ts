@@ -237,6 +237,18 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
+  it('refreshes when a cached path resolves to nothing', () => {
+    syncFromRepo();
+    fs.rmSync(path.join(cached, 'tool-allowlist.ts'));
+    fs.symlinkSync(
+      path.join(cached, 'gone.ts'),
+      path.join(cached, 'tool-allowlist.ts'),
+    );
+
+    // Dangling, so it resolves to nothing and refreshes rather than throwing.
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
   it('does not refresh when a cached file was edited in place', () => {
     syncFromRepo();
     fs.writeFileSync(path.join(cached, 'tool-allowlist.ts'), 'agent edited me');
