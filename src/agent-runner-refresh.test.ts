@@ -226,6 +226,26 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
+  it('is unbothered by a symlink cycle planted in the copy', () => {
+    syncFromRepo();
+    fs.symlinkSync('.', path.join(cached, 'loop'));
+
+    // Covers the answer, not the cost. Both the old listing of the copy and
+    // the current per-path stat return false here, so no assertion separates
+    // them; what keeps the listing out is the code and the comment on
+    // needsAgentRunnerRefresh, since readdirSync would follow this cycle.
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
+  });
+
+  it('does not refresh when a cached file was edited in place', () => {
+    syncFromRepo();
+    fs.writeFileSync(path.join(cached, 'tool-allowlist.ts'), 'agent edited me');
+
+    // Accepted: the read-write mount exists so groups can customize this tree.
+    // Pinned so a later tightening does not break that by accident.
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
+  });
+
   it('refreshes when the copy is missing a single source file', () => {
     syncFromRepo();
     fs.rmSync(path.join(cached, 'tool-allowlist.ts'));

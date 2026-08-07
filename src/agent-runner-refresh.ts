@@ -51,10 +51,17 @@ export function agentRunnerFingerprint(sourceDir: string): string {
  * cannot unlink the mount root, so the usual shape is a directory that still
  * exists and is empty, which is why bare existence is not enough to test.
  *
- * Comparing paths only, never contents or mtimes. A copy that differs forces a
- * refresh, so this direction cannot be used to pin an old policy, only to ask
- * for the current one back. Contents would also refuse to settle, since the
- * copy does not carry the source's mtimes.
+ * Asked one source path at a time, never by listing the copy. Listing it would
+ * hand the container an availability lever over the host: the directory is
+ * theirs to write, `readdirSync` follows symlinks, and one `ln -s . loop`
+ * expands into a tree deep enough to stall the single host process that spawns
+ * every group's container. Statting the paths the source names is bounded by
+ * the source instead, which the host owns.
+ *
+ * Presence only. A file still at its path whose contents were rewritten reads
+ * as fine here, and that is deliberate: customizing this tree is the feature
+ * the read-write mount exists for. What forces a refresh is a source-side
+ * change, or a path the copy no longer has.
  */
 export function needsAgentRunnerRefresh(
   sourceDir: string,
@@ -68,8 +75,9 @@ export function needsAgentRunnerRefresh(
   if (fs.readFileSync(stampFile, 'utf-8') !== fingerprint) {
     return true;
   }
-  const cachedEntries = new Set(relativeEntries(cachedDir));
-  return relativeEntries(sourceDir).some((entry) => !cachedEntries.has(entry));
+  return relativeEntries(sourceDir).some(
+    (entry) => !fs.existsSync(path.join(cachedDir, entry)),
+  );
 }
 
 /**
