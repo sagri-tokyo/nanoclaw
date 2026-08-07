@@ -55,8 +55,10 @@ export function agentRunnerFingerprint(sourceDir: string): string {
  * hand the container an availability lever over the host: the directory is
  * theirs to write, `readdirSync` follows symlinks, and one `ln -s . loop`
  * expands into a tree deep enough to stall the single host process that spawns
- * every group's container. Statting the paths the source names is bounded by
- * the source instead, which the host owns.
+ * every group's container. Statting the paths the source names caps how many
+ * calls a container can provoke at the source's own file count, which the host
+ * owns. It does not make any one call instant: a link onto a slow mount still
+ * costs whatever that mount costs, as it did before this was a list.
  *
  * Presence only. A file still at its path reads as fine here whether its
  * contents were rewritten or it was swapped for a symlink onto something else,

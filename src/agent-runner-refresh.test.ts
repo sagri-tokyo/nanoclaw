@@ -226,15 +226,24 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
-  it('is unbothered by a symlink cycle planted in the copy', () => {
+  it('never lists the copy, so a symlink cycle in it costs nothing', () => {
     syncFromRepo();
     fs.symlinkSync('.', path.join(cached, 'loop'));
 
-    // Covers the answer, not the cost. Both the old listing of the copy and
-    // the current per-path stat return false here, so no assertion separates
-    // them; what keeps the listing out is the code and the comment on
-    // needsAgentRunnerRefresh, since readdirSync would follow this cycle.
-    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
+    const spy = vi.spyOn(fs, 'readdirSync');
+    let listed: string[];
+    try {
+      expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
+      // Read before restoring: mockRestore drops the recorded calls.
+      listed = spy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The returned value alone does not separate this from listing the copy,
+    // since every source path is still present under the loop. Listing is what
+    // readdirSync would follow, so assert on that directly.
+    expect(listed).not.toContain(cached);
   });
 
   it('refreshes when a cached path resolves to nothing', () => {
