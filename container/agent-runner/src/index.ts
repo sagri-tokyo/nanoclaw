@@ -500,7 +500,7 @@ async function runQuery(
             append: globalClaudeMd,
           }
         : undefined,
-      allowedTools: allowedToolsFor(containerInput.capabilityProfile),
+      tools: allowedToolsFor(containerInput.capabilityProfile),
       disallowedTools: deniedToolsFor(containerInput.capabilityProfile),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',

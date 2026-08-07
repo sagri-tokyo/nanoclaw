@@ -124,8 +124,8 @@ change into `container/agent-runner/tool-allowlist.json`:
 'mcp__parallel-task__*',
 ```
 `index.ts` no longer carries a tool list of its own, and
-`tool-allowlist.test.ts` fails CI if an inline `allowedTools` array reappears
-there or if the two allowlist files disagree.
+`tool-allowlist.test.ts` fails CI if an inline `tools` array reappears there or
+if the two allowlist files disagree.
 
 ### 5. Add Usage Instructions to CLAUDE.md
 

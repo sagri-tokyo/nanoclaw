@@ -35,18 +35,25 @@
  * granted for the structured-mode tasks this profile is meant to carry, not
  * because anything uses it yet.
  *
- * How this is enforced matters, because the obvious reading is wrong. The SDK's
- * `allowedTools` only auto-approves without prompting, and the runner already
- * sets `permissionMode: 'bypassPermissions'`, so a name's absence from it
- * removes nothing. `deniedToolsFor` feeds `disallowedTools`, which the SDK does
- * remove from the model's context, and that is the option doing the work.
+ * How this is enforced matters, because the obvious reading is wrong, and the
+ * two options below each cover half the surface.
  *
- * `allowedTools` stays as the written record of intent. It is not the granted
- * set: the denial is a complement of these two lists, so a built-in on neither
- * one is denied to nobody, and a tool a future SDK adds is granted by default.
- * The SDK's positive `tools` base set would fail closed instead. Switching to it
- * needs a container run to pin down which built-ins the runner needs (`tools`
- * disables every name it omits), which nothing in this repo can exercise.
+ * Built-ins go through `tools`, the SDK's positive base set: every built-in it
+ * omits is disabled, so a name nobody listed is off rather than on. The SDK's
+ * `allowedTools` is not that option — it only auto-approves without prompting,
+ * and the runner already sets `permissionMode: 'bypassPermissions'`, so a name's
+ * absence from it removed nothing. A first pass computed `disallowedTools` as
+ * the complement of these two lists instead, which left every built-in on
+ * neither one available to both profiles: `AskUserQuestion`, `CronCreate`,
+ * `CronDelete`, `CronList`, `EnterPlanMode`, `ExitPlanMode`, `EnterWorktree`,
+ * `ExitWorktree` and `RemoteTrigger` under SDK 0.2.92 (sagri-ai#668). A name the
+ * installed SDK does not have is ignored rather than an error, so listing one is
+ * safe and the grant is the intersection.
+ *
+ * MCP tools go through `disallowedTools`, because `tools` does not gate them: an
+ * `mcp__` name in `tools` is accepted and every other MCP tool stays available
+ * anyway. So `deniedToolsFor` has to keep reaching `disallowedTools`; dropping it
+ * as redundant would hand `trusted-writer` the whole scheduler surface back.
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -142,6 +149,10 @@ export function allowedToolsFor(profile: string | undefined): string[] {
  * Taken against `operator` because that is the widest profile, so the result is
  * what this profile gives up relative to the full surface. `operator` itself
  * denies nothing.
+ *
+ * The built-in names here are already redundant with `tools`, which disables
+ * them by omission. They stay because the `mcp__` names are not: `tools` does
+ * not gate MCP tools, so this list is the only thing denying them.
  */
 export function deniedToolsFor(profile: string | undefined): string[] {
   const granted = new Set(allowedToolsFor(profile));
