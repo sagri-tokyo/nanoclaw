@@ -8,9 +8,10 @@
  * forwards to the credential proxy with a fixed sentinel, which swaps in the
  * real OAuth token (see credential-proxy.ts).
  *
- * This module owns the host side: detecting whether the gateway is enabled and
- * minting one short-lived virtual key per task against the gateway's
- * /key/generate admin endpoint, authenticated with the master key.
+ * This module owns the host side: detecting whether the gateway is enabled,
+ * ensuring the channel's user row exists, and minting one short-lived virtual
+ * key per task against the gateway's /key/generate admin endpoint,
+ * authenticated with the master key.
  */
 import { randomBytes } from 'crypto';
 import { request as httpRequest } from 'http';
@@ -40,43 +41,39 @@ interface MintVirtualKeyRequest {
   channel: string;
 }
 
+interface GatewayResponse {
+  status: number;
+  body: string;
+}
+
 /**
- * Mint a per-task virtual key with a budget cap and attribution metadata.
- *
- * Fails closed: throws if the master key is absent, if the gateway returns a
- * non-200 status, or if the response carries no string `key`. There is no
- * fallback — a spawn that cannot obtain a budgeted key must not proceed on the
- * direct proxy path, because that would silently bypass budget enforcement.
- *
- * Neither the master key nor the minted key value is logged.
+ * Strip token-shaped substrings from a gateway error body before it goes into
+ * a thrown Error, mirroring redactToken in github-app-auth.ts. LiteLLM's admin
+ * endpoints are not expected to echo the master key or a minted key into an
+ * error response, but the error path is exactly where an unexpected echo
+ * would surface, so this is a floor rather than something load-bearing today.
  */
-export async function mintVirtualKey(
-  mintRequest: MintVirtualKeyRequest,
-): Promise<string> {
-  const masterKey = readMasterKey();
-  if (masterKey === undefined) {
-    throw new Error(
-      'LITELLM_MASTER_KEY is absent; cannot mint a LiteLLM virtual key',
-    );
-  }
+function redactKeyShapes(body: string): string {
+  // Negative lookbehind for a preceding letter: without it, "sk-" matches
+  // mid-word inside ordinary text this module itself emits, e.g. the
+  // key_alias values below (`task-${taskId}-...`) contain "sk-" at their
+  // third character and would otherwise be mangled.
+  return body.replace(/(?<![A-Za-z])sk-[A-Za-z0-9_-]+/g, '[REDACTED]');
+}
 
-  const payload = JSON.stringify({
-    // taskId is the container name, whose Date.now() suffix can collide for two
-    // containers in the same group spawned within the same millisecond (see
-    // createCredDir in container-runner.ts). The random suffix guarantees a
-    // unique key_alias regardless, so LiteLLM never rejects a duplicate alias.
-    key_alias: `task-${mintRequest.taskId}-${randomBytes(6).toString('hex')}`,
-    max_budget: LITELLM_PER_TASK_BUDGET_USD,
-    duration: '24h',
-    metadata: { task_id: mintRequest.taskId, channel: mintRequest.channel },
-  });
-
-  return new Promise<string>((resolve, reject) => {
+/** POST a JSON body to a gateway admin endpoint, authenticated as the master key. */
+function postToGateway(
+  path: string,
+  masterKey: string,
+  payload: string,
+  taskId: string,
+): Promise<GatewayResponse> {
+  return new Promise<GatewayResponse>((resolve, reject) => {
     const request = httpRequest(
       {
         hostname: '127.0.0.1',
         port: LITELLM_GATEWAY_PORT,
-        path: '/key/generate',
+        path,
         method: 'POST',
         headers: {
           authorization: `Bearer ${masterKey}`,
@@ -92,49 +89,15 @@ export async function mintVirtualKey(
           // exception that would take down the host process; reject instead.
           reject(
             new Error(
-              `LiteLLM /key/generate response stream failed for task ${mintRequest.taskId}: ${error.message}`,
+              `LiteLLM ${path} response stream failed for task ${taskId}: ${error.message}`,
             ),
           );
         });
         response.on('end', () => {
-          const status = response.statusCode ?? 0;
-          if (status !== 200) {
-            reject(
-              new Error(
-                `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}`,
-              ),
-            );
-            return;
-          }
-          const body = Buffer.concat(chunks).toString();
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(body);
-          } catch {
-            // Reject rather than throw: this runs in an http 'end' callback,
-            // outside the Promise executor, so a raw throw would surface as an
-            // uncaught exception and could take down the host process instead
-            // of failing just this spawn.
-            reject(
-              new Error(
-                `LiteLLM /key/generate returned an unparseable response for task ${mintRequest.taskId}`,
-              ),
-            );
-            return;
-          }
-          const key =
-            typeof parsed === 'object' && parsed !== null && 'key' in parsed
-              ? (parsed as { key: unknown }).key
-              : undefined;
-          if (typeof key !== 'string' || key.length === 0) {
-            reject(
-              new Error(
-                `LiteLLM /key/generate response carried no string "key" for task ${mintRequest.taskId}`,
-              ),
-            );
-            return;
-          }
-          resolve(key);
+          resolve({
+            status: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString(),
+          });
         });
       },
     );
@@ -142,7 +105,7 @@ export async function mintVirtualKey(
     request.on('error', (error) => {
       reject(
         new Error(
-          `LiteLLM /key/generate request failed for task ${mintRequest.taskId}: ${error.message}`,
+          `LiteLLM ${path} request failed for task ${taskId}: ${error.message}`,
         ),
       );
     });
@@ -150,4 +113,127 @@ export async function mintVirtualKey(
     request.write(payload);
     request.end();
   });
+}
+
+/**
+ * Create the LiteLLM user row the minted key will accrue spend against.
+ *
+ * /key/generate does not create it — it calls generate_key_helper_fn with
+ * table_name="key", which skips the user-create branch. Without this row the
+ * per-user daily cap has nothing to enforce against; the `user_id` set on the
+ * key below is what fixes the empty `user` on each spend log (sagri-ai#652).
+ *
+ * `max_budget` and `budget_duration` are deliberately omitted: LiteLLM fills
+ * them from litellm_settings.max_internal_user_budget and
+ * internal_user_budget_duration for an `internal_user` row, so the cap stays
+ * config-owned rather than duplicated in the host. `auto_create_key: false`
+ * keeps this to a user row; the task's key is minted separately below.
+ */
+async function ensureGatewayUser(
+  userId: string,
+  masterKey: string,
+  taskId: string,
+): Promise<void> {
+  const payload = JSON.stringify({
+    user_id: userId,
+    user_role: 'internal_user',
+    auto_create_key: false,
+  });
+  const { status, body } = await postToGateway(
+    '/user/new',
+    masterKey,
+    payload,
+    taskId,
+  );
+  // 409 is LiteLLM's duplicate-user_id conflict, which is the steady state
+  // after this channel's first task, and the success path, not an error.
+  // Also accept the same conflict surfaced as a 400 carrying the duplicate
+  // message, in case a future LiteLLM version reports it that way instead
+  // of a clean 409; scoped to 400 so an unrelated failure on another status
+  // can't be swallowed by a coincidental body match.
+  if (
+    status === 200 ||
+    status === 409 ||
+    (status === 400 && body.includes('already exists'))
+  ) {
+    return;
+  }
+  throw new Error(
+    `LiteLLM /user/new returned HTTP ${status} when creating gateway user ${userId} for task ${taskId}: ${redactKeyShapes(body)}`,
+  );
+}
+
+/**
+ * Mint a per-task virtual key with a budget cap and attribution metadata.
+ *
+ * Fails closed: throws if the master key is absent, if the user row cannot be
+ * created, if the gateway returns a non-200 status, or if the response carries
+ * no string `key`. There is no fallback — a spawn that cannot obtain a budgeted
+ * key must not proceed on the direct proxy path, because that would silently
+ * bypass budget enforcement.
+ *
+ * Neither the master key nor the minted key value is logged.
+ */
+export async function mintVirtualKey(
+  mintRequest: MintVirtualKeyRequest,
+): Promise<string> {
+  const masterKey = readMasterKey();
+  if (masterKey === undefined) {
+    throw new Error(
+      'LITELLM_MASTER_KEY is absent; cannot mint a LiteLLM virtual key',
+    );
+  }
+
+  // The channel is the unit of spend attribution (sagri-ai#652): it is the only
+  // identity present on every spawn — a ScheduledTask has no human trigger, so
+  // `triggeringUserId` would leave the pollers, the bulk of the spend, back on
+  // an empty user — and a channel is what a daily cap should throttle.
+  const userId = mintRequest.channel;
+  // No race between concurrent tasks in the same channel: GroupQueue
+  // serializes spawns per channel, so two /user/new calls for the same
+  // userId never overlap.
+  await ensureGatewayUser(userId, masterKey, mintRequest.taskId);
+
+  const payload = JSON.stringify({
+    // taskId is the container name, whose Date.now() suffix can collide for two
+    // containers in the same group spawned within the same millisecond (see
+    // createCredDir in container-runner.ts). The random suffix guarantees a
+    // unique key_alias regardless, so LiteLLM never rejects a duplicate alias.
+    key_alias: `task-${mintRequest.taskId}-${randomBytes(6).toString('hex')}`,
+    max_budget: LITELLM_PER_TASK_BUDGET_USD,
+    duration: '24h',
+    user_id: userId,
+    metadata: { task_id: mintRequest.taskId, channel: mintRequest.channel },
+  });
+
+  const { status, body } = await postToGateway(
+    '/key/generate',
+    masterKey,
+    payload,
+    mintRequest.taskId,
+  );
+  if (status !== 200) {
+    throw new Error(
+      `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}: ${redactKeyShapes(body)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch (error) {
+    throw new Error(
+      `LiteLLM /key/generate returned an unparseable response for task ${mintRequest.taskId}`,
+      { cause: error },
+    );
+  }
+  const key =
+    typeof parsed === 'object' && parsed !== null && 'key' in parsed
+      ? (parsed as { key: unknown }).key
+      : undefined;
+  if (typeof key !== 'string' || key.length === 0) {
+    throw new Error(
+      `LiteLLM /key/generate response carried no string "key" for task ${mintRequest.taskId}`,
+    );
+  }
+  return key;
 }
