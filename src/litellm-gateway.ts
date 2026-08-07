@@ -54,7 +54,11 @@ interface GatewayResponse {
  * would surface, so this is a floor rather than something load-bearing today.
  */
 function redactKeyShapes(body: string): string {
-  return body.replace(/sk-[A-Za-z0-9_-]+/g, '[REDACTED]');
+  // Negative lookbehind for a preceding letter: without it, "sk-" matches
+  // mid-word inside ordinary text this module itself emits, e.g. the
+  // key_alias values below (`task-${taskId}-...`) contain "sk-" at their
+  // third character and would otherwise be mangled.
+  return body.replace(/(?<![A-Za-z])sk-[A-Za-z0-9_-]+/g, '[REDACTED]');
 }
 
 /** POST a JSON body to a gateway admin endpoint, authenticated as the master key. */

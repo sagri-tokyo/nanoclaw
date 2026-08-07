@@ -283,6 +283,27 @@ describe('mintVirtualKey', () => {
     ).rejects.not.toThrow(/sk-leaked-abc123/);
   });
 
+  it('does not mangle an ordinary word that merely contains "sk-" mid-word', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'duplicate key_alias task-nanoclaw-test-group-abc123',
+        }),
+      );
+    };
+
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
+    ).rejects.toThrow(/task-nanoclaw-test-group-abc123/);
+  });
+
   it('throws when LITELLM_MASTER_KEY is absent', async () => {
     await expect(
       mintVirtualKey({ taskId: 'task-1', channel: 'chan' }),
