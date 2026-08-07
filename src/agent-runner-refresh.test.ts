@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
+  agentRunnerFingerprint,
   needsAgentRunnerRefresh,
   refreshAgentRunnerCopy,
 } from './agent-runner-refresh.js';
@@ -60,6 +61,29 @@ describe('agent-runner copy staleness', () => {
     write(path.join(source, 'tool-allowlist.ts'), 'new', 1_000_000);
 
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('tells one file apart from two whose contents span the delimiters', () => {
+    // Streaming raw bytes, `a` holding this would produce the same digest as
+    // `a` holding "x" beside `b` holding "z".
+    write(path.join(source, 'a'), 'x\nb\0z', 1_000_000);
+    const oneFile = agentRunnerFingerprint(source);
+
+    fs.rmSync(path.join(source, 'a'));
+    write(path.join(source, 'a'), 'x', 1_000_000);
+    write(path.join(source, 'b'), 'z', 1_000_000);
+
+    expect(agentRunnerFingerprint(source)).not.toBe(oneFile);
+  });
+
+  it('tells a directory apart from a file whose contents are dir', () => {
+    fs.mkdirSync(path.join(source, 'thing'));
+    const asDirectory = agentRunnerFingerprint(source);
+
+    fs.rmSync(path.join(source, 'thing'), { recursive: true });
+    write(path.join(source, 'thing'), 'dir', 1_000_000);
+
+    expect(agentRunnerFingerprint(source)).not.toBe(asDirectory);
   });
 
   it('refreshes when the change is confined to a subdirectory', () => {

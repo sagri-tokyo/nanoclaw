@@ -34,8 +34,17 @@ export function agentRunnerFingerprint(sourceDir: string): string {
   const digest = createHash('sha256');
   for (const entry of relativeEntries(sourceDir)) {
     const full = path.join(sourceDir, entry);
+    // Each file contributes a fixed-width hash of its own, never its raw
+    // bytes. Streamed raw, contents of one entry could carry the delimiters
+    // that separate the next, so one file holding `x\nb\0z` would hash the
+    // same as the two files `a` and `b` holding `x` and `z`. Fixed width also
+    // keeps a file whose contents are `dir` from reading as a directory.
     digest.update(`${entry}\0`);
-    digest.update(fs.statSync(full).isFile() ? fs.readFileSync(full) : 'dir');
+    digest.update(
+      fs.statSync(full).isFile()
+        ? createHash('sha256').update(fs.readFileSync(full)).digest('hex')
+        : 'dir',
+    );
     digest.update('\n');
   }
   return digest.digest('hex');
