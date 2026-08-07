@@ -161,8 +161,7 @@ describe('mintVirtualKey', () => {
     const received = requests[0];
     expect(received.method).toBe('POST');
     expect(received.headers['authorization']).toBe('Bearer sk-master-abc');
-    // max_budget and budget_duration are omitted on purpose so the row inherits
-    // the gateway config's per-user daily cap.
+    // budget fields intentionally absent — see ensureGatewayUser's doc comment.
     expect(JSON.parse(received.body)).toEqual({
       user_id: 'test-group',
       user_role: 'internal_user',
@@ -197,7 +196,32 @@ describe('mintVirtualKey', () => {
     expect(requests.map((r) => r.url)).toEqual(['/user/new', '/key/generate']);
   });
 
-  it('throws without minting when /user/new fails for any other reason', async () => {
+  it('mints the key anyway when the duplicate-user conflict surfaces as a non-409 status with the message in the body', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: { message: 'User with id test-group already exists' },
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ key: 'sk-virtual-task-key' }));
+    };
+
+    const key = await mintVirtualKey({
+      taskId: 'task-1',
+      channel: 'test-group',
+    });
+
+    expect(key).toBe('sk-virtual-task-key');
+    expect(requests.map((r) => r.url)).toEqual(['/user/new', '/key/generate']);
+  });
+
+  it('throws without minting when /user/new fails for any other reason, with the response body in the error', async () => {
     setMasterKey('sk-master-abc');
     respond = (res, url) => {
       if (url === '/user/new') {
@@ -211,7 +235,7 @@ describe('mintVirtualKey', () => {
 
     await expect(
       mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
-    ).rejects.toThrow(/\/user\/new returned HTTP 500/);
+    ).rejects.toThrow(/\/user\/new returned HTTP 500.*boom/);
     expect(requests.map((r) => r.url)).toEqual(['/user/new']);
   });
 

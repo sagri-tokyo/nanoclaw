@@ -8,9 +8,10 @@
  * forwards to the credential proxy with a fixed sentinel, which swaps in the
  * real OAuth token (see credential-proxy.ts).
  *
- * This module owns the host side: detecting whether the gateway is enabled and
- * minting one short-lived virtual key per task against the gateway's
- * /key/generate admin endpoint, authenticated with the master key.
+ * This module owns the host side: detecting whether the gateway is enabled,
+ * ensuring the channel's user row exists, and minting one short-lived virtual
+ * key per task against the gateway's /key/generate admin endpoint,
+ * authenticated with the master key.
  */
 import { randomBytes } from 'crypto';
 import { request as httpRequest } from 'http';
@@ -103,9 +104,9 @@ function postToGateway(
  * Create the LiteLLM user row the minted key will accrue spend against.
  *
  * /key/generate does not create it — it calls generate_key_helper_fn with
- * table_name="key", which skips the user-create branch — so without this call
- * the per-user daily cap has no row to enforce against and every spend log
- * carries an empty `user` (sagri-ai#652).
+ * table_name="key", which skips the user-create branch. Without this row the
+ * per-user daily cap has nothing to enforce against; the `user_id` set on the
+ * key below is what fixes the empty `user` on each spend log (sagri-ai#652).
  *
  * `max_budget` and `budget_duration` are deliberately omitted: LiteLLM fills
  * them from litellm_settings.max_internal_user_budget and
@@ -123,19 +124,22 @@ async function ensureGatewayUser(
     user_role: 'internal_user',
     auto_create_key: false,
   });
-  const { status } = await postToGateway(
+  const { status, body } = await postToGateway(
     '/user/new',
     masterKey,
     payload,
     taskId,
   );
   // 409 is LiteLLM's duplicate-user_id conflict, which is the steady state
-  // after this channel's first task. It is the success path, not an error.
-  if (status === 200 || status === 409) {
+  // after this channel's first task, and the success path, not an error.
+  // Also accept the same conflict surfaced as a 400 with the duplicate
+  // message in the body, in case a future LiteLLM version reports it that
+  // way instead of a clean 409.
+  if (status === 200 || status === 409 || body.includes('already exists')) {
     return;
   }
   throw new Error(
-    `LiteLLM /user/new returned HTTP ${status} when creating gateway user ${userId} for task ${taskId}`,
+    `LiteLLM /user/new returned HTTP ${status} when creating gateway user ${userId} for task ${taskId}: ${body}`,
   );
 }
 
@@ -165,6 +169,9 @@ export async function mintVirtualKey(
   // `triggeringUserId` would leave the pollers, the bulk of the spend, back on
   // an empty user — and a channel is what a daily cap should throttle.
   const userId = mintRequest.channel;
+  // No race between concurrent tasks in the same channel: GroupQueue
+  // serializes spawns per channel, so two /user/new calls for the same
+  // userId never overlap.
   await ensureGatewayUser(userId, masterKey, mintRequest.taskId);
 
   const payload = JSON.stringify({
@@ -187,7 +194,7 @@ export async function mintVirtualKey(
   );
   if (status !== 200) {
     throw new Error(
-      `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}`,
+      `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}: ${body}`,
     );
   }
   let parsed: unknown;
