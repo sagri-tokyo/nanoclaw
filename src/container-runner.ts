@@ -519,7 +519,11 @@ function buildContainerPlan(
   );
   if (
     fs.existsSync(agentRunnerSrc) &&
-    needsAgentRunnerRefresh(agentRunnerSrc, agentRunnerStamp)
+    needsAgentRunnerRefresh(
+      agentRunnerSrc,
+      groupAgentRunnerDir,
+      agentRunnerStamp,
+    )
   ) {
     refreshAgentRunnerCopy(
       agentRunnerSrc,

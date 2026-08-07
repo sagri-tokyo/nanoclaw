@@ -38,33 +38,33 @@ afterEach(() => {
 
 describe('agent-runner copy staleness', () => {
   it('refreshes a group that has never been stamped', () => {
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('leaves an up-to-date copy alone', () => {
     syncFromRepo();
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
   it('refreshes when only the allowlist changed and index.ts did not', () => {
     syncFromRepo();
     write(path.join(source, 'tool-allowlist.ts'), 'tightened', 2_000_000);
 
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('refreshes when the change is confined to a subdirectory', () => {
     syncFromRepo();
     write(path.join(source, 'tools', 'nested.ts'), 'new', 2_000_000);
 
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('refreshes when a source file is deleted', () => {
     syncFromRepo();
     fs.rmSync(path.join(source, 'tool-allowlist.ts'));
 
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('drops a file the repo deleted instead of leaving it cached', () => {
@@ -74,7 +74,7 @@ describe('agent-runner copy staleness', () => {
     syncFromRepo();
 
     expect(fs.existsSync(path.join(cached, 'tool-allowlist.ts'))).toBe(false);
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(false);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
   it('drops the old name after the repo renames a file', () => {
@@ -116,19 +116,57 @@ describe('agent-runner copy staleness', () => {
     expect(
       fs.readFileSync(path.join(cached, 'tool-allowlist.ts'), 'utf-8'),
     ).toBe('old');
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('retries after a part-written copy rather than inheriting a stamp', () => {
+    syncFromRepo();
+    write(path.join(source, 'tool-allowlist.ts'), 'tightened', 2_000_000);
+
+    const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
+      _from: string,
+      to: string,
+    ) => {
+      // Half a copy: the directory lands, the contents never do. The
+      // directory surviving is what makes this different from a copy that
+      // fails outright, since an absent one is already caught.
+      fs.mkdirSync(to, { recursive: true });
+      throw new Error('ENOSPC: no space left on device');
+    }) as unknown as typeof fs.cpSync);
+    try {
+      expect(() => refreshAgentRunnerCopy(source, cached, stamp)).toThrow(
+        /ENOSPC/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The source goes back to exactly what the old stamp described, so only a
+    // cleared stamp keeps this from reading as current over an empty copy.
+    write(path.join(source, 'tool-allowlist.ts'), 'old', 1_000_000);
+
+    expect(fs.existsSync(cached)).toBe(true);
+    expect(fs.readdirSync(cached)).toEqual([]);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('refreshes when the copy is gone but the stamp still matches', () => {
+    syncFromRepo();
+    fs.rmSync(cached, { recursive: true, force: true });
+
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('re-copies when the stamp is unreadable rather than skipping', () => {
     syncFromRepo();
     fs.writeFileSync(stamp, '');
 
-    expect(needsAgentRunnerRefresh(source, stamp)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
   it('names the missing directory rather than failing deep in fs', () => {
     expect(() =>
-      needsAgentRunnerRefresh(path.join(root, 'absent'), stamp),
+      needsAgentRunnerRefresh(path.join(root, 'absent'), cached, stamp),
     ).toThrow(/agent-runner source missing/);
   });
 });

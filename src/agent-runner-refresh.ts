@@ -39,13 +39,20 @@ export function agentRunnerFingerprint(sourceDir: string): string {
  *
  * Whole-tree compare, not `index.ts` alone: the tool allowlist lives in
  * `tool-allowlist.ts`, so a profile-only change has to invalidate the copy too.
+ *
+ * A missing copy refreshes whatever the stamp says. The stamp describes the
+ * source, so on its own it cannot tell that the copy it certified is gone, and
+ * the container can delete it: `/app/src` is mounted read-write. Without this
+ * the group would mount an empty directory on every later start and stay that
+ * way, because the stamp would keep matching.
  */
 export function needsAgentRunnerRefresh(
   sourceDir: string,
+  cachedDir: string,
   stampFile: string,
 ): boolean {
   const fingerprint = agentRunnerFingerprint(sourceDir);
-  if (!fs.existsSync(stampFile)) {
+  if (!fs.existsSync(cachedDir) || !fs.existsSync(stampFile)) {
     return true;
   }
   return fs.readFileSync(stampFile, 'utf-8') !== fingerprint;
@@ -76,6 +83,12 @@ export function refreshAgentRunnerCopy(
   // atomic, so a deploy landing mid-copy can still leave this run's tree
   // mixing two revisions. The next refresh repairs it; this one does not.
   const fingerprint = agentRunnerFingerprint(sourceDir);
+  // Drop the stamp before touching the copy, so it only ever exists over a copy
+  // that finished. Anything interrupting the two calls below, a throw or the
+  // process dying, leaves no stamp, and the next start refreshes rather than
+  // inheriting a current marker over a directory that was emptied and never
+  // refilled.
+  fs.rmSync(stampFile, { force: true });
   fs.rmSync(cachedDir, { recursive: true, force: true });
   fs.cpSync(sourceDir, cachedDir, { recursive: true });
   fs.mkdirSync(path.dirname(stampFile), { recursive: true });
