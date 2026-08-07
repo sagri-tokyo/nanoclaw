@@ -75,12 +75,13 @@ export function needsAgentRunnerRefresh(
 /**
  * Replace a group's cached copy with the repo source and stamp it.
  *
- * The cached tree is removed first because `fs.cpSync` overlays rather than
- * synchronizes: without the removal a file deleted or renamed in the repo would
- * survive in the copy, and the stamp written afterwards would then mark that
- * divergence current forever. Removing it also means a group customization of a
- * file the repo no longer ships does not outlive the repo, which is the point
- * of the host owning this directory.
+ * Staged and renamed into place rather than written over the live copy. That
+ * also settles what `fs.cpSync` would otherwise get wrong on its own, since it
+ * overlays rather than synchronizes: a file the repo deleted or renamed would
+ * survive in an overlaid copy, and the stamp written afterwards would mark that
+ * divergence current forever. A group customization of a file the repo no
+ * longer ships does not outlive the repo either, which is the point of the host
+ * owning this directory.
  */
 export function refreshAgentRunnerCopy(
   sourceDir: string,
@@ -103,9 +104,11 @@ export function refreshAgentRunnerCopy(
   // during the copy makes the staged tree itself a mix of two revisions, and
   // promoting that atomically still runs the container on a new entrypoint
   // with the old allowlist. So re-read the source and only promote if it held
-  // still. If it moved, leave the previous copy alone and write no stamp: this
-  // start runs the older revision, which is at least internally consistent,
-  // and the next start refreshes.
+  // still. If it moved, drop the staged tree and write no stamp. A group that
+  // already had a copy keeps it, whole rather than mixed. A group being set up
+  // for the first time has none, so its container fails to build against an
+  // empty /app/src instead of starting on a half-known policy. Both retry on
+  // the next start.
   if (agentRunnerFingerprint(sourceDir) !== before) {
     fs.rmSync(staging, { recursive: true, force: true });
     return;

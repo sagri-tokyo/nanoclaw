@@ -92,6 +92,31 @@ describe('agent-runner copy staleness', () => {
     ]);
   });
 
+  it('gives a first-time group nothing when the source moves mid-copy', () => {
+    const realCopy = fs.cpSync;
+    const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
+      ...args: Parameters<typeof fs.cpSync>
+    ) => {
+      const result = realCopy(...args);
+      write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
+      return result;
+    }) as typeof fs.cpSync);
+
+    try {
+      refreshAgentRunnerCopy(source, cached, stamp);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // No previous revision to fall back to, so this group gets nothing rather
+    // than a half-known policy. Its container fails to build against an empty
+    // /app/src, and the next start retries.
+    expect(fs.existsSync(cached)).toBe(false);
+    expect(fs.existsSync(`${cached}.staging`)).toBe(false);
+    expect(fs.existsSync(stamp)).toBe(false);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
   it('leaves the old copy whole when the source moves during the copy', () => {
     syncFromRepo();
 
