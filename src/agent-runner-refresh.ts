@@ -99,9 +99,8 @@ export function refreshAgentRunnerCopy(
   fs.rmSync(staging, { recursive: true, force: true });
   fs.cpSync(sourceDir, staging, { recursive: true });
 
-  // Copy into a sibling and promote by rename, so no start ever mounts a
-  // half-written tree. Rename alone would not be enough: a deploy landing
-  // during the copy makes the staged tree itself a mix of two revisions, and
+  // Renaming alone would not be enough: a deploy landing during the copy
+  // makes the staged tree itself a mix of two revisions, and
   // promoting that atomically still runs the container on a new entrypoint
   // with the old allowlist. So re-read the source and only promote if it held
   // still. If it moved, drop the staged tree and write no stamp. A group that

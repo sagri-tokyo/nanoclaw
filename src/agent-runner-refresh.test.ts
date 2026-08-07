@@ -53,6 +53,15 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
+  it('refreshes on an edit that keeps the byte length', () => {
+    syncFromRepo();
+    // Same size, so only the mtime in the digest can catch this. Every other
+    // content test also changes length, which would let size carry them alone.
+    write(path.join(source, 'tool-allowlist.ts'), 'new', 2_000_000);
+
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
   it('refreshes when the change is confined to a subdirectory', () => {
     syncFromRepo();
     write(path.join(source, 'tools', 'nested.ts'), 'new', 2_000_000);
