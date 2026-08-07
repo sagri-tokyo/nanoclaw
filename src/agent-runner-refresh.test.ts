@@ -53,11 +53,11 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
-  it('refreshes on an edit that keeps the byte length', () => {
+  it('refreshes on an edit that keeps the byte length and the mtime', () => {
     syncFromRepo();
-    // Same size, so only the mtime in the digest can catch this. Every other
-    // content test also changes length, which would let size carry them alone.
-    write(path.join(source, 'tool-allowlist.ts'), 'new', 2_000_000);
+    // Same length and same mtime, which is what a deploy copying with
+    // timestamps preserved produces. Only hashing the contents catches it.
+    write(path.join(source, 'tool-allowlist.ts'), 'new', 1_000_000);
 
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
@@ -108,11 +108,11 @@ describe('agent-runner copy staleness', () => {
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      // A fresh mtime every attempt, so the source never settles.
+      // Fresh contents every attempt, so the source never settles.
       copies += 1;
       write(
         path.join(source, 'tool-allowlist.ts'),
-        'tightened',
+        `tightened ${copies}`,
         5_000_000 + copies * 1_000,
       );
       return result;
@@ -144,12 +144,12 @@ describe('agent-runner copy staleness', () => {
     ) => {
       const result = realCopy(...args);
       // Stands in for deploys landing while the copy runs. In-process, so each
-      // fires once the real cpSync returns, with a fresh mtime every time so
+      // fires once the real cpSync returns, with fresh contents every time so
       // the source never settles and the attempts run out.
       copies += 1;
       write(
         path.join(source, 'tool-allowlist.ts'),
-        'tightened',
+        `tightened ${copies}`,
         5_000_000 + copies * 1_000,
       );
       return result;

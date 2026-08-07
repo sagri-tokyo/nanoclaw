@@ -14,9 +14,15 @@ function relativeEntries(dir: string): string[] {
 }
 
 /**
- * Digest of the repo's agent-runner source tree: every entry's path, size and
- * mtime. A digest rather than a newest-mtime, so a deletion and a revert to an
- * older file both register.
+ * Digest of the repo's agent-runner source tree: every entry's path, and for
+ * files their contents.
+ *
+ * Contents rather than size and mtime, because this decides whether a security
+ * policy is current. A deploy that rewrites `tool-allowlist.ts` to the same
+ * byte length and restores its mtime, which anything copying with timestamps
+ * preserved will do, compares equal on metadata while holding a different
+ * allowlist. Reading the files costs nothing worth saving here: the tree is a
+ * dozen files.
  *
  * Recurses, because a change confined to a subdirectory has to invalidate the
  * copy too.
@@ -25,12 +31,12 @@ export function agentRunnerFingerprint(sourceDir: string): string {
   if (!fs.existsSync(sourceDir)) {
     throw new Error(`agent-runner source missing: ${sourceDir}`);
   }
-  const entries = relativeEntries(sourceDir);
   const digest = createHash('sha256');
-  for (const entry of entries) {
-    const stat = fs.statSync(path.join(sourceDir, entry));
-    digest.update(`${entry}\0${stat.isFile() ? stat.size : 'dir'}\0`);
-    digest.update(`${stat.mtimeMs}\n`);
+  for (const entry of relativeEntries(sourceDir)) {
+    const full = path.join(sourceDir, entry);
+    digest.update(`${entry}\0`);
+    digest.update(fs.statSync(full).isFile() ? fs.readFileSync(full) : 'dir');
+    digest.update('\n');
   }
   return digest.digest('hex');
 }
@@ -111,32 +117,39 @@ export function refreshAgentRunnerCopy(
   // marker over a copy that was never completed.
   fs.rmSync(stampFile, { force: true });
 
-  for (let attempt = 0; attempt < COPY_ATTEMPTS; attempt++) {
-    const before = agentRunnerFingerprint(sourceDir);
-    fs.rmSync(staging, { recursive: true, force: true });
-    fs.cpSync(sourceDir, staging, { recursive: true });
+  try {
+    // Attempts run back to back, no delay. A deploy slower than three copies of
+    // a dozen files falls through to the queue's own backoff rather than being
+    // waited out here.
+    for (let attempt = 0; attempt < COPY_ATTEMPTS; attempt++) {
+      const before = agentRunnerFingerprint(sourceDir);
+      fs.rmSync(staging, { recursive: true, force: true });
+      fs.cpSync(sourceDir, staging, { recursive: true });
 
-    // Renaming alone would not be enough: a deploy landing during the copy
-    // makes the staged tree itself a mix of two revisions, and promoting that
-    // atomically still runs the container on a new entrypoint with the old
-    // allowlist. So re-read the source and only promote if it held still.
-    if (agentRunnerFingerprint(sourceDir) !== before) {
-      continue;
+      // Renaming alone would not be enough: a deploy landing during the copy
+      // makes the staged tree itself a mix of two revisions, and promoting that
+      // atomically still runs the container on a new entrypoint with the old
+      // allowlist. So re-read the source and only promote if it held still.
+      if (agentRunnerFingerprint(sourceDir) !== before) {
+        continue;
+      }
+
+      fs.rmSync(cachedDir, { recursive: true, force: true });
+      fs.renameSync(staging, cachedDir);
+      fs.mkdirSync(path.dirname(stampFile), { recursive: true });
+      fs.writeFileSync(stampFile, before);
+      return;
     }
 
-    fs.rmSync(cachedDir, { recursive: true, force: true });
-    fs.renameSync(staging, cachedDir);
-    fs.mkdirSync(path.dirname(stampFile), { recursive: true });
-    fs.writeFileSync(stampFile, before);
-    return;
+    // Out of attempts. Throwing fails this spawn, which is the point: the copy
+    // still on disk is a revision we have now watched the source move away
+    // from, so mounting it would start the container on a policy known to be
+    // superseded. No stamp was written, so the next start copies again.
+    throw new Error(
+      `agent-runner source kept changing during copy: ${sourceDir}`,
+    );
+  } finally {
+    // Every exit clears staging, including a copy that threw part way.
+    fs.rmSync(staging, { recursive: true, force: true });
   }
-
-  // Out of attempts. Throwing fails this spawn, which is the point: the copy
-  // still on disk is a revision we have now watched the source move away from,
-  // so mounting it would start the container on a policy known to be
-  // superseded. No stamp was written, so the next start copies again.
-  fs.rmSync(staging, { recursive: true, force: true });
-  throw new Error(
-    `agent-runner source kept changing during copy: ${sourceDir}`,
-  );
 }
