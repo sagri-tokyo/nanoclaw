@@ -101,43 +101,89 @@ describe('agent-runner copy staleness', () => {
     ]);
   });
 
-  it('gives a first-time group nothing when the source moves mid-copy', () => {
+  it('gives a first-time group nothing when the source keeps moving', () => {
     const realCopy = fs.cpSync;
+    let copies = 0;
     const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
+      // A fresh mtime every attempt, so the source never settles.
+      copies += 1;
+      write(
+        path.join(source, 'tool-allowlist.ts'),
+        'tightened',
+        5_000_000 + copies * 1_000,
+      );
       return result;
     }) as typeof fs.cpSync);
 
     try {
-      refreshAgentRunnerCopy(source, cached, stamp);
+      expect(() => refreshAgentRunnerCopy(source, cached, stamp)).toThrow(
+        /kept changing during copy/,
+      );
     } finally {
       spy.mockRestore();
     }
 
-    // No previous revision to fall back to, so this group gets nothing rather
-    // than a half-known policy. Its container fails to build against an empty
-    // /app/src, and the next start retries.
+    // No previous revision and nothing promoted, so this group gets nothing.
+    // The throw fails the spawn; the next start copies again.
     expect(fs.existsSync(cached)).toBe(false);
     expect(fs.existsSync(`${cached}.staging`)).toBe(false);
     expect(fs.existsSync(stamp)).toBe(false);
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
-  it('leaves the old copy whole when the source moves during the copy', () => {
+  it('refuses to promote while the source keeps moving', () => {
     syncFromRepo();
 
     const realCopy = fs.cpSync;
+    let copies = 0;
     const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      // Stands in for a deploy landing while the copy runs. In-process, so it
-      // fires once the real cpSync returns, which is the same observable state
-      // the staged tree would be in had the source moved partway.
-      write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
+      // Stands in for deploys landing while the copy runs. In-process, so each
+      // fires once the real cpSync returns, with a fresh mtime every time so
+      // the source never settles and the attempts run out.
+      copies += 1;
+      write(
+        path.join(source, 'tool-allowlist.ts'),
+        'tightened',
+        5_000_000 + copies * 1_000,
+      );
+      return result;
+    }) as typeof fs.cpSync);
+
+    try {
+      expect(() => refreshAgentRunnerCopy(source, cached, stamp)).toThrow(
+        /kept changing during copy/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Nothing was promoted and no staging tree is left behind. The old copy is
+    // still on disk, but the throw stops this spawn from mounting it: we have
+    // now watched the source move away from that revision, so launching on it
+    // would run a policy we know is superseded.
+    expect(fs.existsSync(`${cached}.staging`)).toBe(false);
+    expect(fs.existsSync(stamp)).toBe(false);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('promotes once the source stops moving', () => {
+    syncFromRepo();
+    const realCopy = fs.cpSync;
+    let copies = 0;
+    const spy = vi.spyOn(fs, 'cpSync').mockImplementation(((
+      ...args: Parameters<typeof fs.cpSync>
+    ) => {
+      const result = realCopy(...args);
+      // Moves during the first copy only, so the retry finds it settled.
+      if (++copies === 1) {
+        write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
+      }
       return result;
     }) as typeof fs.cpSync);
 
@@ -147,18 +193,11 @@ describe('agent-runner copy staleness', () => {
       spy.mockRestore();
     }
 
-    // Not promoted: the copy this start mounts is the previous revision whole,
-    // never a mix of the two, and no staging directory is left behind.
-    expect(fs.readdirSync(cached).sort()).toEqual([
-      'index.ts',
-      'tool-allowlist.ts',
-    ]);
+    expect(copies).toBe(2);
     expect(
       fs.readFileSync(path.join(cached, 'tool-allowlist.ts'), 'utf-8'),
-    ).toBe('old');
-    expect(fs.existsSync(`${cached}.staging`)).toBe(false);
-    expect(fs.existsSync(stamp)).toBe(false);
-    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+    ).toBe('tightened');
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
   it('retries after a part-written copy rather than inheriting a stamp', () => {
