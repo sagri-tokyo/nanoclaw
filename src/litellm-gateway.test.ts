@@ -83,13 +83,17 @@ describe('mintVirtualKey', () => {
     headers: http.IncomingHttpHeaders;
     body: string;
   }>;
-  let respond: (res: http.ServerResponse) => void;
+  let respond: (res: http.ServerResponse, url: string | undefined) => void;
 
   beforeEach(async () => {
     requests = [];
-    respond = (res) => {
+    respond = (res, url) => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ key: 'sk-virtual-task-key' }));
+      res.end(
+        url === '/user/new'
+          ? JSON.stringify({ user_id: 'test-group' })
+          : JSON.stringify({ key: 'sk-virtual-task-key' }),
+      );
     };
     gateway = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -101,7 +105,7 @@ describe('mintVirtualKey', () => {
           headers: { ...req.headers },
           body: Buffer.concat(chunks).toString(),
         });
-        respond(res);
+        respond(res, req.url);
       });
     });
     await new Promise<void>((resolve) =>
@@ -125,8 +129,8 @@ describe('mintVirtualKey', () => {
     });
 
     expect(key).toBe('sk-virtual-task-key');
-    expect(requests).toHaveLength(1);
-    const received = requests[0];
+    expect(requests).toHaveLength(2);
+    const received = requests[1];
     expect(received.method).toBe('POST');
     expect(received.url).toBe('/key/generate');
     expect(received.headers['authorization']).toBe('Bearer sk-master-abc');
@@ -138,10 +142,77 @@ describe('mintVirtualKey', () => {
     );
     expect(body.max_budget).toBe(2.5);
     expect(body.duration).toBe('24h');
+    expect(body.user_id).toBe('test-group');
     expect(body.metadata).toEqual({
       task_id: 'nanoclaw-test-group-1700000000000',
       channel: 'test-group',
     });
+  });
+
+  it('creates the channel user row before minting, without a budget of its own', async () => {
+    setMasterKey('sk-master-abc');
+
+    await mintVirtualKey({
+      taskId: 'nanoclaw-test-group-1700000000000',
+      channel: 'test-group',
+    });
+
+    expect(requests.map((r) => r.url)).toEqual(['/user/new', '/key/generate']);
+    const received = requests[0];
+    expect(received.method).toBe('POST');
+    expect(received.headers['authorization']).toBe('Bearer sk-master-abc');
+    // max_budget and budget_duration are omitted on purpose so the row inherits
+    // the gateway config's per-user daily cap.
+    expect(JSON.parse(received.body)).toEqual({
+      user_id: 'test-group',
+      user_role: 'internal_user',
+      auto_create_key: false,
+    });
+  });
+
+  it('mints the key anyway when the user row already exists', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: { error: 'User with id test-group already exists' },
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ key: 'sk-virtual-task-key' }));
+    };
+
+    const key = await mintVirtualKey({
+      taskId: 'task-1',
+      channel: 'test-group',
+    });
+
+    expect(key).toBe('sk-virtual-task-key');
+    expect(requests.map((r) => r.url)).toEqual(['/user/new', '/key/generate']);
+  });
+
+  it('throws without minting when /user/new fails for any other reason', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'boom' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ key: 'sk-virtual-task-key' }));
+    };
+
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
+    ).rejects.toThrow(/\/user\/new returned HTTP 500/);
+    expect(requests.map((r) => r.url)).toEqual(['/user/new']);
   });
 
   it('throws when LITELLM_MASTER_KEY is absent', async () => {
@@ -153,7 +224,12 @@ describe('mintVirtualKey', () => {
 
   it('throws when the gateway returns a non-200 status', async () => {
     setMasterKey('sk-master-abc');
-    respond = (res) => {
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
       res.writeHead(403, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'forbidden' }));
     };
@@ -165,9 +241,9 @@ describe('mintVirtualKey', () => {
 
   it('throws when the response has no string key field', async () => {
     setMasterKey('sk-master-abc');
-    respond = (res) => {
+    respond = (res, url) => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ not_a_key: true }));
+      res.end(JSON.stringify(url === '/user/new' ? {} : { not_a_key: true }));
     };
 
     await expect(
@@ -177,7 +253,12 @@ describe('mintVirtualKey', () => {
 
   it('rejects rather than crashing when the response stream fails mid-transfer', async () => {
     setMasterKey('sk-master-abc');
-    respond = (res) => {
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"key":');
       // Abruptly destroy the socket mid-body. Without an 'error' listener on
