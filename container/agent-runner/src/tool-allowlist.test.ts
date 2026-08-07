@@ -10,6 +10,10 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+function readRunnerSource(): string {
+  return fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
+}
+
 function readManifest(): Record<string, string[]> {
   return JSON.parse(
     fs.readFileSync(path.join(here, '..', 'tool-allowlist.json'), 'utf-8'),
@@ -88,63 +92,21 @@ describe('the checked-in manifest matches the runtime surface', () => {
   });
 
   it('is the only place index.ts gets its base tool set from', () => {
-    const source = fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
+    const source = readRunnerSource();
     expect(source).toContain(
       'tools: allowedToolsFor(containerInput.capabilityProfile)',
     );
-    expect(source).not.toMatch(/tools: \[/);
+    expect(source).not.toMatch(/(?<!dis|\ballowed)Tools: \[/);
   });
 
-  // `allowedTools` only auto-approves, and the runner runs under
-  // `bypassPermissions`, so feeding the grant to it restricts nothing
-  // (sagri-ai#668). Fails if the positive base set is swapped back for it.
   it('does not route the grant through the option that only auto-approves', () => {
-    const source = fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
-    expect(source).not.toMatch(/\ballowedTools:/);
+    expect(readRunnerSource()).not.toMatch(/\ballowedTools:/);
   });
 
   it('hands the denied set to the option that gates MCP tools', () => {
-    const source = fs.readFileSync(path.join(here, 'index.ts'), 'utf-8');
-    expect(source).toContain(
+    expect(readRunnerSource()).toContain(
       'disallowedTools: deniedToolsFor(containerInput.capabilityProfile)',
     );
-  });
-});
-
-// Measured against SDK 0.2.92 (Claude Code 2.1.92) from a real `query()`
-// session's `system/init` message, with `tools` unset. Every one of these was
-// available to both profiles under the complement-of-two-lists denial, because
-// no profile names them (sagri-ai#668). Under the positive `tools` base set they
-// are off by omission, and this list is the pin: adding one to a profile turns
-// it back on, which is a decision that should be argued for, not typed.
-const BUILT_INS_NO_PROFILE_GRANTS = [
-  'AskUserQuestion',
-  'CronCreate',
-  'CronDelete',
-  'CronList',
-  'EnterPlanMode',
-  'EnterWorktree',
-  'ExitPlanMode',
-  'ExitWorktree',
-  'RemoteTrigger',
-];
-
-describe('built-ins outside the manifest reach no profile', () => {
-  it.each(Object.keys(toolAllowlistByProfile))(
-    'grants %s none of them',
-    (profile) => {
-      const granted = allowedToolsFor(profile);
-      expect(
-        BUILT_INS_NO_PROFILE_GRANTS.filter((tool) => granted.includes(tool)),
-      ).toEqual([]);
-    },
-  );
-
-  it('leaves them off the denied list too, which is why `tools` has to carry the grant', () => {
-    const denied = deniedToolsFor('trusted-writer');
-    expect(
-      BUILT_INS_NO_PROFILE_GRANTS.filter((tool) => denied.includes(tool)),
-    ).toEqual([]);
   });
 
   it('grants the same profiles the host will send', () => {
@@ -158,5 +120,88 @@ describe('built-ins outside the manifest reach no profile', () => {
         .filter((tool) => tool.startsWith('mcp__nanoclaw__')),
     );
     expect([...manifested].sort()).toEqual(registeredMcpTools().sort());
+  });
+});
+
+/**
+ * The built-ins SDK 0.2.92 (Claude Code 2.1.92) reports in a session's
+ * `system/init` message with `tools` unset. Captured from a live `query()` run
+ * because the SDK ships no enumeration to import (sagri-ai#668).
+ *
+ * Re-capture this on an SDK bump. The two tests below derive from it in both
+ * directions, so a stale copy makes them assert against a surface that no longer
+ * exists rather than failing honestly.
+ */
+const SDK_BUILT_INS = [
+  'AskUserQuestion',
+  'Bash',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'Edit',
+  'EnterPlanMode',
+  'EnterWorktree',
+  'ExitPlanMode',
+  'ExitWorktree',
+  'Glob',
+  'Grep',
+  'NotebookEdit',
+  'Read',
+  'RemoteTrigger',
+  'Skill',
+  'Task',
+  'TaskOutput',
+  'TaskStop',
+  'TodoWrite',
+  'ToolSearch',
+  'WebFetch',
+  'WebSearch',
+  'Write',
+];
+
+/**
+ * Named by a profile but absent from the surface above: the agent-team tools,
+ * which 0.2.92 does not expose. `tools` ignores a name it does not know, so
+ * these grant nothing today and stay as the record of what `operator` intends.
+ */
+const GRANTED_BUT_ABSENT_IN_SDK = ['SendMessage', 'TeamCreate', 'TeamDelete'];
+
+const builtInsGranted = (profile: string) =>
+  allowedToolsFor(profile).filter((tool) => !tool.startsWith('mcp__'));
+
+describe('the built-in grant is closed in both directions', () => {
+  // `tools` silently drops a name the SDK does not have, so a typo or an
+  // upstream rename disables a tool with no error anywhere. Before the grant
+  // moved off `allowedTools` that was harmless, because nothing read it.
+  it.each(Object.keys(toolAllowlistByProfile))(
+    'grants %s no built-in that does not exist',
+    (profile) => {
+      const unknown = builtInsGranted(profile).filter(
+        (tool) =>
+          !SDK_BUILT_INS.includes(tool) &&
+          !GRANTED_BUT_ABSENT_IN_SDK.includes(tool),
+      );
+      expect(unknown).toEqual([]);
+    },
+  );
+
+  // The nine the complement denial left reaching both profiles. They are off by
+  // omission now, and pinning the derived list means an SDK that adds a tenth
+  // fails here until someone decides which profile should hold it.
+  it('leaves every unenumerated built-in outside the widest profile', () => {
+    const operatorBuiltIns = builtInsGranted('operator');
+    expect(
+      SDK_BUILT_INS.filter((tool) => !operatorBuiltIns.includes(tool)),
+    ).toEqual([
+      'AskUserQuestion',
+      'CronCreate',
+      'CronDelete',
+      'CronList',
+      'EnterPlanMode',
+      'EnterWorktree',
+      'ExitPlanMode',
+      'ExitWorktree',
+      'RemoteTrigger',
+    ]);
   });
 });

@@ -36,24 +36,26 @@
  * because anything uses it yet.
  *
  * How this is enforced matters, because the obvious reading is wrong, and the
- * two options below each cover half the surface.
+ * two options each cover half the surface.
  *
- * Built-ins go through `tools`, the SDK's positive base set: every built-in it
- * omits is disabled, so a name nobody listed is off rather than on. The SDK's
- * `allowedTools` is not that option — it only auto-approves without prompting,
- * and the runner already sets `permissionMode: 'bypassPermissions'`, so a name's
- * absence from it removed nothing. A first pass computed `disallowedTools` as
- * the complement of these two lists instead, which left every built-in on
- * neither one available to both profiles: `AskUserQuestion`, `CronCreate`,
- * `CronDelete`, `CronList`, `EnterPlanMode`, `ExitPlanMode`, `EnterWorktree`,
- * `ExitWorktree` and `RemoteTrigger` under SDK 0.2.92 (sagri-ai#668). A name the
- * installed SDK does not have is ignored rather than an error, so listing one is
- * safe and the grant is the intersection.
+ * Built-ins go through `tools`, the SDK's positive base set, which disables
+ * every built-in it omits. The SDK's `allowedTools` is not that option: it only
+ * auto-approves without prompting, and the runner sets `permissionMode:
+ * 'bypassPermissions'`, so a name's absence from it removes nothing.
  *
- * MCP tools go through `disallowedTools`, because `tools` does not gate them: an
+ * MCP tools go through `disallowedTools`, because `tools` does not gate them. An
  * `mcp__` name in `tools` is accepted and every other MCP tool stays available
- * anyway. So `deniedToolsFor` has to keep reaching `disallowedTools`; dropping it
- * as redundant would hand `trusted-writer` the whole scheduler surface back.
+ * anyway, so `deniedToolsFor` has to keep reaching `disallowedTools`; dropping
+ * it as redundant would hand `trusted-writer` the scheduler surface back.
+ *
+ * Omission is therefore the whole grant, which narrows `operator` as well as
+ * `trusted-writer`: the plan-mode, worktree, cron, remote-trigger and
+ * `AskUserQuestion` built-ins are off for both. That is deliberate. Every
+ * container runs headless under `bypassPermissions` with no human at a terminal
+ * to answer a question or approve a plan, and nanoclaw schedules through its own
+ * MCP tools rather than the SDK's cron. `tool-allowlist.test.ts` pins the list
+ * against a captured SDK surface, so a version that adds a built-in fails CI
+ * until someone decides which profile should hold it (sagri-ai#668).
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -147,8 +149,9 @@ export function allowedToolsFor(profile: string | undefined): string[] {
  * The tools this profile does not get, as `disallowedTools` wants them.
  *
  * Taken against `operator` because that is the widest profile, so the result is
- * what this profile gives up relative to the full surface. `operator` itself
- * denies nothing.
+ * what this profile gives up relative to the full surface. `operator` returns an
+ * empty list here, which is not the same as denying nothing: `tools` still holds
+ * it to the built-ins it names.
  *
  * The built-in names here are already redundant with `tools`, which disables
  * them by omission. They stay because the `mcp__` names are not: `tools` does
