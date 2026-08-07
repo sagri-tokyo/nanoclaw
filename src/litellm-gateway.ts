@@ -46,6 +46,17 @@ interface GatewayResponse {
   body: string;
 }
 
+/**
+ * Strip token-shaped substrings from a gateway error body before it goes into
+ * a thrown Error, mirroring redactToken in github-app-auth.ts. LiteLLM's admin
+ * endpoints are not expected to echo the master key or a minted key into an
+ * error response, but the error path is exactly where an unexpected echo
+ * would surface, so this is a floor rather than something load-bearing today.
+ */
+function redactKeyShapes(body: string): string {
+  return body.replace(/sk-[A-Za-z0-9_-]+/g, '[REDACTED]');
+}
+
 /** POST a JSON body to a gateway admin endpoint, authenticated as the master key. */
 function postToGateway(
   path: string,
@@ -132,14 +143,19 @@ async function ensureGatewayUser(
   );
   // 409 is LiteLLM's duplicate-user_id conflict, which is the steady state
   // after this channel's first task, and the success path, not an error.
-  // Also accept the same conflict surfaced as a 400 with the duplicate
-  // message in the body, in case a future LiteLLM version reports it that
-  // way instead of a clean 409.
-  if (status === 200 || status === 409 || body.includes('already exists')) {
+  // Also accept the same conflict surfaced as a 400 carrying the duplicate
+  // message, in case a future LiteLLM version reports it that way instead
+  // of a clean 409; scoped to 400 so an unrelated failure on another status
+  // can't be swallowed by a coincidental body match.
+  if (
+    status === 200 ||
+    status === 409 ||
+    (status === 400 && body.includes('already exists'))
+  ) {
     return;
   }
   throw new Error(
-    `LiteLLM /user/new returned HTTP ${status} when creating gateway user ${userId} for task ${taskId}: ${body}`,
+    `LiteLLM /user/new returned HTTP ${status} when creating gateway user ${userId} for task ${taskId}: ${redactKeyShapes(body)}`,
   );
 }
 
@@ -194,7 +210,7 @@ export async function mintVirtualKey(
   );
   if (status !== 200) {
     throw new Error(
-      `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}: ${body}`,
+      `LiteLLM /key/generate returned HTTP ${status} when minting a virtual key for task ${mintRequest.taskId}: ${redactKeyShapes(body)}`,
     );
   }
   let parsed: unknown;

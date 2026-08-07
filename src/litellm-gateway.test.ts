@@ -239,6 +239,50 @@ describe('mintVirtualKey', () => {
     expect(requests.map((r) => r.url)).toEqual(['/user/new']);
   });
 
+  it('does not swallow an "already exists" body on a status other than 400 or 409', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: 'unrelated failure mentioning already exists in passing',
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ key: 'sk-virtual-task-key' }));
+    };
+
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
+    ).rejects.toThrow(/\/user\/new returned HTTP 500/);
+    expect(requests.map((r) => r.url)).toEqual(['/user/new']);
+  });
+
+  it('redacts a key-shaped substring from a gateway error body', async () => {
+    setMasterKey('sk-master-abc');
+    respond = (res, url) => {
+      if (url === '/user/new') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({ error: 'rejected key sk-leaked-abc123 on replay' }),
+      );
+    };
+
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
+    ).rejects.toThrow(/\[REDACTED\]/);
+    await expect(
+      mintVirtualKey({ taskId: 'task-1', channel: 'test-group' }),
+    ).rejects.not.toThrow(/sk-leaked-abc123/);
+  });
+
   it('throws when LITELLM_MASTER_KEY is absent', async () => {
     await expect(
       mintVirtualKey({ taskId: 'task-1', channel: 'chan' }),
