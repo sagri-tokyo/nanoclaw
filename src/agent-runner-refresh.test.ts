@@ -92,7 +92,7 @@ describe('agent-runner copy staleness', () => {
     ]);
   });
 
-  it('does not certify a revision that landed mid-copy', () => {
+  it('does not certify a revision that landed after the copy', () => {
     syncFromRepo();
 
     const realCopy = fs.cpSync;
@@ -100,9 +100,9 @@ describe('agent-runner copy staleness', () => {
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      // cpSync is synchronous, so a deploy cannot interleave inside it. This
-      // lands in the next-widest gap, after the copy and before the stamp,
-      // which is the ordering under test.
+      // This write is in-process, so it cannot fire until the real cpSync
+      // returns. It reproduces the gap between the copy and the stamp, not a
+      // genuine mid-copy one, which only a separate process could cause.
       write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
       return result;
     }) as typeof fs.cpSync);
