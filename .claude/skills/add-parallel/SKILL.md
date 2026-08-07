@@ -116,17 +116,16 @@ if (parallelApiKey) {
 }
 ```
 
-Also update the `allowedTools` array to include Parallel MCP tools (around line 242-248):
+Also grant the Parallel MCP tools to each capability profile that should reach
+them, in `container/agent-runner/src/tool-allowlist.ts`, and mirror the same
+change into `container/agent-runner/tool-allowlist.json`:
 ```typescript
-allowedTools: [
-  'Bash',
-  'Read', 'Write', 'Edit', 'Glob', 'Grep',
-  'WebSearch', 'WebFetch',
-  'mcp__nanoclaw__*',
-  'mcp__parallel-search__*',
-  'mcp__parallel-task__*'
-],
+'mcp__parallel-search__*',
+'mcp__parallel-task__*',
 ```
+`index.ts` no longer carries a tool list of its own, and
+`tool-allowlist.test.ts` fails CI if an inline `allowedTools` array reappears
+there or if the two allowlist files disagree.
 
 ### 5. Add Usage Instructions to CLAUDE.md
 

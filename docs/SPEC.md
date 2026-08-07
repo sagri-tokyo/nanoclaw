@@ -59,12 +59,12 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 │  │    • data/sessions/{group}/.claude/ → /home/node/.claude/      │    │
 │  │    • Additional dirs → /workspace/extra/*                      │    │
 │  │                                                                │    │
-│  │  Tools (all groups):                                           │    │
+│  │  Tools (operator profile; trusted-writer is a subset):         │    │
 │  │    • Bash (safe - sandboxed in container!)                     │    │
 │  │    • Read, Write, Edit, Glob, Grep (file operations)           │    │
 │  │    • WebSearch, WebFetch (internet access)                     │    │
 │  │    • agent-browser (browser automation)                        │    │
-│  │    • mcp__nanoclaw__* (scheduler tools via IPC)                │    │
+│  │    • mcp__nanoclaw__* enumerated per profile, no wildcard      │    │
 │  │                                                                │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 │                                                                       │

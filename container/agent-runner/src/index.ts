@@ -25,6 +25,11 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { RetryBudget, readMax529Retries } from './retry-budget.js';
+import {
+  allowedToolsFor,
+  deniedToolsFor,
+  type CapabilityProfile,
+} from './tool-allowlist.js';
 import { HTTP_STATUS_529_ERROR_CLASS } from './message-loop.js';
 
 interface ContainerInput {
@@ -44,13 +49,15 @@ interface ContainerInput {
   // stdin-serialized ContainerInput. The load-bearing enforcement is host-side:
   // an `operator` container is never handed the Notion/GitHub write tokens, so
   // the notion-writer skill and any Bash `gh`/curl write are inert and the only
-  // working write path is the host-executed `org_action` gate.
-  // TODO(sagri-ai#312): drop the notion-writer skill and tighten allowedTools
-  // for the operator profile as defense-in-depth. Skipped here because the
-  // image bakes one shared skills dir and the org-actions skill needs Bash plus
-  // the mcp__nanoclaw__* tools, so per-profile skill filtering is not cheap in
-  // the current image layout. Token removal already makes notion-writer inert.
-  capabilityProfile?: 'operator' | 'trusted-writer';
+  // working write path is the host-executed `org_action` gate. The profile also
+  // selects the tool allowlist (`tool-allowlist.ts`, sagri-ai#649): the
+  // token-holding `trusted-writer` profile gets the strict subset.
+  //
+  // Still shared per profile: the baked skills dir. The org-actions skill needs
+  // Bash and the nanoclaw MCP tools, so per-profile skill filtering is not cheap
+  // in the current image layout, and removing the write tokens already makes
+  // notion-writer inert for `operator`.
+  capabilityProfile?: CapabilityProfile;
 }
 
 type ContainerOutput =
@@ -493,27 +500,8 @@ async function runQuery(
             append: globalClaudeMd,
           }
         : undefined,
-      allowedTools: [
-        'Bash',
-        'Read',
-        'Write',
-        'Edit',
-        'Glob',
-        'Grep',
-        'WebSearch',
-        'WebFetch',
-        'Task',
-        'TaskOutput',
-        'TaskStop',
-        'TeamCreate',
-        'TeamDelete',
-        'SendMessage',
-        'TodoWrite',
-        'ToolSearch',
-        'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*',
-      ],
+      allowedTools: allowedToolsFor(containerInput.capabilityProfile),
+      disallowedTools: deniedToolsFor(containerInput.capabilityProfile),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
