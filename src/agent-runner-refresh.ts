@@ -2,6 +2,14 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+/** Sorted relative paths under `dir`, recursive, files and directories alike. */
+function relativeEntries(dir: string): string[] {
+  return fs
+    .readdirSync(dir, { recursive: true })
+    .map((entry) => String(entry))
+    .sort();
+}
+
 /**
  * Digest of the repo's agent-runner source tree: every entry's path, size and
  * mtime. A digest rather than a newest-mtime, so a deletion and a revert to an
@@ -10,13 +18,6 @@ import path from 'path';
  * Recurses, because a change confined to a subdirectory has to invalidate the
  * copy too.
  */
-function relativeEntries(dir: string): string[] {
-  return fs
-    .readdirSync(dir, { recursive: true })
-    .map((entry) => String(entry))
-    .sort();
-}
-
 export function agentRunnerFingerprint(sourceDir: string): string {
   if (!fs.existsSync(sourceDir)) {
     throw new Error(`agent-runner source missing: ${sourceDir}`);
@@ -67,8 +68,8 @@ export function needsAgentRunnerRefresh(
   if (fs.readFileSync(stampFile, 'utf-8') !== fingerprint) {
     return true;
   }
-  const missing = new Set(relativeEntries(cachedDir));
-  return relativeEntries(sourceDir).some((entry) => !missing.has(entry));
+  const cachedEntries = new Set(relativeEntries(cachedDir));
+  return relativeEntries(sourceDir).some((entry) => !cachedEntries.has(entry));
 }
 
 /**
@@ -86,24 +87,32 @@ export function refreshAgentRunnerCopy(
   cachedDir: string,
   stampFile: string,
 ): void {
-  // Fingerprint before copying, never after. Stamping afterwards certifies a
-  // revision this copy may never have contained, and the next start would then
-  // skip the refresh and keep the looser policy. Taken first, the stamp
-  // describes at most what was copied, so a source that moved under us fails
-  // the next comparison and gets copied again.
-  //
-  // That closes the certification half only. The remove and copy pair is not
-  // atomic, so a deploy landing mid-copy can still leave this run's tree
-  // mixing two revisions. The next refresh repairs it; this one does not.
-  const fingerprint = agentRunnerFingerprint(sourceDir);
-  // Drop the stamp before touching the copy, so it only ever exists over a copy
-  // that finished. Anything interrupting the two calls below, a throw or the
-  // process dying, leaves no stamp, and the next start refreshes rather than
-  // inheriting a current marker over a directory that was emptied and never
-  // refilled.
+  const before = agentRunnerFingerprint(sourceDir);
+  const staging = `${cachedDir}.staging`;
+
+  // Drop the stamp first, so it only ever exists over a copy that finished.
+  // Anything interrupting the work below, a throw or the process dying, leaves
+  // no stamp and the next start refreshes instead of inheriting a current
+  // marker over a copy that was never completed.
   fs.rmSync(stampFile, { force: true });
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.cpSync(sourceDir, staging, { recursive: true });
+
+  // Copy into a sibling and promote by rename, so no start ever mounts a
+  // half-written tree. Rename alone would not be enough: a deploy landing
+  // during the copy makes the staged tree itself a mix of two revisions, and
+  // promoting that atomically still runs the container on a new entrypoint
+  // with the old allowlist. So re-read the source and only promote if it held
+  // still. If it moved, leave the previous copy alone and write no stamp: this
+  // start runs the older revision, which is at least internally consistent,
+  // and the next start refreshes.
+  if (agentRunnerFingerprint(sourceDir) !== before) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    return;
+  }
+
   fs.rmSync(cachedDir, { recursive: true, force: true });
-  fs.cpSync(sourceDir, cachedDir, { recursive: true });
+  fs.renameSync(staging, cachedDir);
   fs.mkdirSync(path.dirname(stampFile), { recursive: true });
-  fs.writeFileSync(stampFile, fingerprint);
+  fs.writeFileSync(stampFile, before);
 }

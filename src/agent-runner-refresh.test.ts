@@ -92,7 +92,7 @@ describe('agent-runner copy staleness', () => {
     ]);
   });
 
-  it('does not certify a revision that landed after the copy', () => {
+  it('leaves the old copy whole when the source moves during the copy', () => {
     syncFromRepo();
 
     const realCopy = fs.cpSync;
@@ -100,9 +100,9 @@ describe('agent-runner copy staleness', () => {
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      // This write is in-process, so it cannot fire until the real cpSync
-      // returns. It reproduces the gap between the copy and the stamp, not a
-      // genuine mid-copy one, which only a separate process could cause.
+      // Stands in for a deploy landing while the copy runs. In-process, so it
+      // fires once the real cpSync returns, which is the same observable state
+      // the staged tree would be in had the source moved partway.
       write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
       return result;
     }) as typeof fs.cpSync);
@@ -113,9 +113,17 @@ describe('agent-runner copy staleness', () => {
       spy.mockRestore();
     }
 
+    // Not promoted: the copy this start mounts is the previous revision whole,
+    // never a mix of the two, and no staging directory is left behind.
+    expect(fs.readdirSync(cached).sort()).toEqual([
+      'index.ts',
+      'tool-allowlist.ts',
+    ]);
     expect(
       fs.readFileSync(path.join(cached, 'tool-allowlist.ts'), 'utf-8'),
     ).toBe('old');
+    expect(fs.existsSync(`${cached}.staging`)).toBe(false);
+    expect(fs.existsSync(stamp)).toBe(false);
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
@@ -142,11 +150,16 @@ describe('agent-runner copy staleness', () => {
     }
 
     // The source goes back to exactly what the old stamp described, so only a
-    // cleared stamp keeps this from reading as current over an empty copy.
+    // cleared stamp keeps this from reading as current.
     write(path.join(source, 'tool-allowlist.ts'), 'old', 1_000_000);
 
-    expect(fs.existsSync(cached)).toBe(true);
-    expect(fs.readdirSync(cached)).toEqual([]);
+    // The failure happened in staging, so the mounted copy is still the whole
+    // previous revision rather than a gutted one.
+    expect(fs.readdirSync(cached).sort()).toEqual([
+      'index.ts',
+      'tool-allowlist.ts',
+    ]);
+    expect(fs.existsSync(stamp)).toBe(false);
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
@@ -168,6 +181,15 @@ describe('agent-runner copy staleness', () => {
 
     expect(fs.existsSync(cached)).toBe(true);
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('leaves a copy alone that has extra files the source lacks', () => {
+    syncFromRepo();
+    write(path.join(cached, 'scratch.ts'), 'agent wrote this', 9_000_000);
+
+    // The check is one-directional on purpose: source not in cache. Making it
+    // symmetric would wipe a group's own additions on every start.
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(false);
   });
 
   it('refreshes when the copy is missing a single source file', () => {
