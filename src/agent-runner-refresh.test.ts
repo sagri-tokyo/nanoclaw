@@ -157,6 +157,26 @@ describe('agent-runner copy staleness', () => {
     expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
   });
 
+  it('refreshes when the copy is emptied but the directory survives', () => {
+    syncFromRepo();
+    // What a container can actually do to its own mount: unlink the contents,
+    // not the mount root. The directory is still there and still matches the
+    // stamp, so existence alone would read this as current.
+    for (const entry of fs.readdirSync(cached)) {
+      fs.rmSync(path.join(cached, entry), { recursive: true, force: true });
+    }
+
+    expect(fs.existsSync(cached)).toBe(true);
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
+  it('refreshes when the copy is missing a single source file', () => {
+    syncFromRepo();
+    fs.rmSync(path.join(cached, 'tool-allowlist.ts'));
+
+    expect(needsAgentRunnerRefresh(source, cached, stamp)).toBe(true);
+  });
+
   it('re-copies when the stamp is unreadable rather than skipping', () => {
     syncFromRepo();
     fs.writeFileSync(stamp, '');

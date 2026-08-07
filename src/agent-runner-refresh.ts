@@ -10,14 +10,18 @@ import path from 'path';
  * Recurses, because a change confined to a subdirectory has to invalidate the
  * copy too.
  */
+function relativeEntries(dir: string): string[] {
+  return fs
+    .readdirSync(dir, { recursive: true })
+    .map((entry) => String(entry))
+    .sort();
+}
+
 export function agentRunnerFingerprint(sourceDir: string): string {
   if (!fs.existsSync(sourceDir)) {
     throw new Error(`agent-runner source missing: ${sourceDir}`);
   }
-  const entries = fs
-    .readdirSync(sourceDir, { recursive: true })
-    .map((entry) => String(entry))
-    .sort();
+  const entries = relativeEntries(sourceDir);
   const digest = createHash('sha256');
   for (const entry of entries) {
     const stat = fs.statSync(path.join(sourceDir, entry));
@@ -40,11 +44,16 @@ export function agentRunnerFingerprint(sourceDir: string): string {
  * Whole-tree compare, not `index.ts` alone: the tool allowlist lives in
  * `tool-allowlist.ts`, so a profile-only change has to invalidate the copy too.
  *
- * A missing copy refreshes whatever the stamp says. The stamp describes the
- * source, so on its own it cannot tell that the copy it certified is gone, and
- * the container can delete it: `/app/src` is mounted read-write. Without this
- * the group would mount an empty directory on every later start and stay that
- * way, because the stamp would keep matching.
+ * A copy missing any file the source has refreshes whatever the stamp says. The
+ * stamp describes the source, so on its own it cannot tell the copy was
+ * gutted, and the container can gut it: `/app/src` is mounted read-write. It
+ * cannot unlink the mount root, so the usual shape is a directory that still
+ * exists and is empty, which is why bare existence is not enough to test.
+ *
+ * Comparing paths only, never contents or mtimes. A copy that differs forces a
+ * refresh, so this direction cannot be used to pin an old policy, only to ask
+ * for the current one back. Contents would also refuse to settle, since the
+ * copy does not carry the source's mtimes.
  */
 export function needsAgentRunnerRefresh(
   sourceDir: string,
@@ -55,7 +64,11 @@ export function needsAgentRunnerRefresh(
   if (!fs.existsSync(cachedDir) || !fs.existsSync(stampFile)) {
     return true;
   }
-  return fs.readFileSync(stampFile, 'utf-8') !== fingerprint;
+  if (fs.readFileSync(stampFile, 'utf-8') !== fingerprint) {
+    return true;
+  }
+  const missing = new Set(relativeEntries(cachedDir));
+  return relativeEntries(sourceDir).some((entry) => !missing.has(entry));
 }
 
 /**
