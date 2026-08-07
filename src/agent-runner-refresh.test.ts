@@ -100,7 +100,9 @@ describe('agent-runner copy staleness', () => {
       ...args: Parameters<typeof fs.cpSync>
     ) => {
       const result = realCopy(...args);
-      // a deploy rewrites the allowlist while the copy is in flight
+      // cpSync is synchronous, so a deploy cannot interleave inside it. This
+      // lands in the next-widest gap, after the copy and before the stamp,
+      // which is the ordering under test.
       write(path.join(source, 'tool-allowlist.ts'), 'tightened', 5_000_000);
       return result;
     }) as typeof fs.cpSync);
