@@ -96,7 +96,9 @@ describe('the checked-in manifest matches the runtime surface', () => {
     expect(source).toContain(
       'tools: allowedToolsFor(containerInput.capabilityProfile)',
     );
-    expect(source).not.toMatch(/(?<!dis|\ballowed)Tools: \[/);
+    // Lowercase `t` is load-bearing: `disallowedTools: [` and `allowedTools: [`
+    // both carry a capital T, so this targets an inlined base set and nothing else.
+    expect(source).not.toMatch(/tools: \[/);
   });
 
   it('does not route the grant through the option that only auto-approves', () => {
@@ -191,7 +193,7 @@ describe('the built-in grant is closed in both directions', () => {
   it('leaves every unenumerated built-in outside the widest profile', () => {
     const operatorBuiltIns = builtInsGranted('operator');
     expect(
-      SDK_BUILT_INS.filter((tool) => !operatorBuiltIns.includes(tool)),
+      SDK_BUILT_INS.filter((tool) => !operatorBuiltIns.includes(tool)).sort(),
     ).toEqual([
       'AskUserQuestion',
       'CronCreate',
