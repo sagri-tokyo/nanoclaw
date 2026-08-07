@@ -35,27 +35,21 @@
  * granted for the structured-mode tasks this profile is meant to carry, not
  * because anything uses it yet.
  *
- * How this is enforced matters, because the obvious reading is wrong, and the
- * two options each cover half the surface.
+ * How this is enforced: built-ins go through `tools`, the SDK's positive base
+ * set. MCP tools go through `disallowedTools`, the only option that gates
+ * `mcp__` names, so `deniedToolsFor` still has to reach it even though `tools`
+ * already disables the same built-ins by omission. Full option semantics:
+ * `docs/SDK_DEEP_DIVE.md`.
  *
- * Built-ins go through `tools`, the SDK's positive base set, which disables
- * every built-in it omits. The SDK's `allowedTools` is not that option: it only
- * auto-approves without prompting, and the runner sets `permissionMode:
- * 'bypassPermissions'`, so a name's absence from it removes nothing.
- *
- * MCP tools go through `disallowedTools`, because `tools` does not gate them. An
- * `mcp__` name in `tools` is accepted and every other MCP tool stays available
- * anyway, so `deniedToolsFor` has to keep reaching `disallowedTools`; dropping
- * it as redundant would hand `trusted-writer` the scheduler surface back.
- *
- * Omission is therefore the whole grant, which narrows `operator` as well as
- * `trusted-writer`: the plan-mode, worktree, cron, remote-trigger and
- * `AskUserQuestion` built-ins are off for both. That is deliberate. Every
- * container runs headless under `bypassPermissions` with no human at a terminal
- * to answer a question or approve a plan, and nanoclaw schedules through its own
- * MCP tools rather than the SDK's cron. `tool-allowlist.test.ts` pins the list
- * against a captured SDK surface, so a version that adds a built-in fails CI
- * until someone decides which profile should hold it (sagri-ai#668).
+ * Omission closes the built-in set the SDK enumerates, which narrows
+ * `operator` as well as `trusted-writer`: the plan-mode, worktree, cron,
+ * remote-trigger and `AskUserQuestion` built-ins are off for both. That is
+ * deliberate. Every container runs headless under `bypassPermissions` with no
+ * human at a terminal to answer a question or approve a plan, and nanoclaw
+ * schedules through its own MCP tools rather than the SDK's cron.
+ * `tool-allowlist.test.ts` pins the list against a captured SDK surface, so a
+ * version that adds a built-in fails CI until someone decides which profile
+ * should hold it (sagri-ai#668).
  *
  * What that subset is and is not worth: it narrows what an injected prompt
  * reaches for, and it is not a containment boundary. Both profiles keep `Bash`,
@@ -86,9 +80,6 @@ export const toolAllowlistByProfile = {
     'Task',
     'TaskOutput',
     'TaskStop',
-    'TeamCreate',
-    'TeamDelete',
-    'SendMessage',
     'TodoWrite',
     'ToolSearch',
     'Skill',
@@ -137,7 +128,7 @@ export type CapabilityProfile = keyof typeof toolAllowlistByProfile;
  * resolves through the prototype and would throw a TypeError instead of naming
  * the input.
  */
-export function allowedToolsFor(profile: string | undefined): string[] {
+export function grantedToolsFor(profile: string | undefined): string[] {
   const resolved = profile ?? 'operator';
   if (!Object.hasOwn(toolAllowlistByProfile, resolved)) {
     throw new Error(`unknown capability profile: ${resolved}`);
@@ -154,10 +145,10 @@ export function allowedToolsFor(profile: string | undefined): string[] {
  * it to the built-ins it names.
  *
  * The built-in names here are already redundant with `tools`, which disables
- * them by omission. They stay because the `mcp__` names are not: `tools` does
- * not gate MCP tools, so this list is the only thing denying them.
+ * them by omission; they stay for symmetry with the `mcp__` names, which are
+ * not.
  */
 export function deniedToolsFor(profile: string | undefined): string[] {
-  const granted = new Set(allowedToolsFor(profile));
+  const granted = new Set(grantedToolsFor(profile));
   return toolAllowlistByProfile.operator.filter((tool) => !granted.has(tool));
 }

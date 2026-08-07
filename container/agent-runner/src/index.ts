@@ -26,7 +26,7 @@ import {
 import { fileURLToPath } from 'url';
 import { RetryBudget, readMax529Retries } from './retry-budget.js';
 import {
-  allowedToolsFor,
+  grantedToolsFor,
   deniedToolsFor,
   type CapabilityProfile,
 } from './tool-allowlist.js';
@@ -500,7 +500,7 @@ async function runQuery(
             append: globalClaudeMd,
           }
         : undefined,
-      tools: allowedToolsFor(containerInput.capabilityProfile),
+      tools: grantedToolsFor(containerInput.capabilityProfile),
       disallowedTools: deniedToolsFor(containerInput.capabilityProfile),
       env: sdkEnv,
       permissionMode: 'bypassPermissions',

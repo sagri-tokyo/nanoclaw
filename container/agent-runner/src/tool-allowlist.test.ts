@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  allowedToolsFor,
+  grantedToolsFor,
   deniedToolsFor,
   toolAllowlistByProfile,
 } from './tool-allowlist.js';
@@ -27,6 +27,14 @@ function registeredMcpTools(): string[] {
   );
 }
 
+function installedSdkVersion(): string {
+  const lockfile = JSON.parse(
+    fs.readFileSync(path.join(here, '..', 'package-lock.json'), 'utf-8'),
+  );
+  return lockfile.packages['node_modules/@anthropic-ai/claude-agent-sdk']
+    .version;
+}
+
 function hostProfiles(): string[] {
   const source = fs.readFileSync(
     path.join(here, '..', '..', '..', 'src', 'types.ts'),
@@ -41,8 +49,8 @@ function hostProfiles(): string[] {
 
 describe('capability profiles resolve to separate tool lists', () => {
   it('gives trusted-writer a strict subset of the operator surface', () => {
-    const operator = allowedToolsFor('operator');
-    const trustedWriter = allowedToolsFor('trusted-writer');
+    const operator = grantedToolsFor('operator');
+    const trustedWriter = grantedToolsFor('trusted-writer');
 
     expect(operator).toEqual(expect.arrayContaining(trustedWriter));
     expect(trustedWriter.length).toBeLessThan(operator.length);
@@ -52,7 +60,7 @@ describe('capability profiles resolve to separate tool lists', () => {
     expect(deniedToolsFor('operator')).toEqual([]);
   });
 
-  it('denies the token-holding profile the scheduler and team surface', () => {
+  it('denies the token-holding profile the scheduler surface', () => {
     const denied = deniedToolsFor('trusted-writer');
 
     expect(denied).toEqual([
@@ -61,9 +69,6 @@ describe('capability profiles resolve to separate tool lists', () => {
       'Task',
       'TaskOutput',
       'TaskStop',
-      'TeamCreate',
-      'TeamDelete',
-      'SendMessage',
       'NotebookEdit',
       'mcp__nanoclaw__schedule_task',
       'mcp__nanoclaw__list_tasks',
@@ -76,11 +81,11 @@ describe('capability profiles resolve to separate tool lists', () => {
   });
 
   it('resolves an absent profile to operator, matching the host mount plan', () => {
-    expect(allowedToolsFor(undefined)).toEqual(allowedToolsFor('operator'));
+    expect(grantedToolsFor(undefined)).toEqual(grantedToolsFor('operator'));
   });
 
   it('throws on a profile it does not know', () => {
-    expect(() => allowedToolsFor('root')).toThrow(
+    expect(() => grantedToolsFor('root')).toThrow(
       /unknown capability profile: root/,
     );
   });
@@ -94,15 +99,16 @@ describe('the checked-in manifest matches the runtime surface', () => {
   it('is the only place index.ts gets its base tool set from', () => {
     const source = readRunnerSource();
     expect(source).toContain(
-      'tools: allowedToolsFor(containerInput.capabilityProfile)',
+      'tools: grantedToolsFor(containerInput.capabilityProfile)',
     );
     // Lowercase `t` is load-bearing: `disallowedTools: [` and `allowedTools: [`
-    // both carry a capital T, so this targets an inlined base set and nothing else.
-    expect(source).not.toMatch(/tools: \[/);
-  });
-
-  it('does not route the grant through the option that only auto-approves', () => {
-    expect(readRunnerSource()).not.toMatch(/\ballowedTools:/);
+    // both carry a capital T, so this targets an inlined base set and nothing
+    // else. Anchored to line start so a subagent's `agents` option, which
+    // legitimately nests `tools: [...]`, cannot trip it.
+    expect(source).not.toMatch(/^\s*tools: \[/m);
+    // Same source read: the grant must not route through `allowedTools`,
+    // which only auto-approves and restricts nothing under bypassPermissions.
+    expect(source).not.toMatch(/\ballowedTools:/);
   });
 
   it('hands the denied set to the option that gates MCP tools', () => {
@@ -134,6 +140,8 @@ describe('the checked-in manifest matches the runtime surface', () => {
  * directions, so a stale copy makes them assert against a surface that no longer
  * exists rather than failing honestly.
  */
+const CAPTURED_SDK_VERSION = '0.2.92';
+
 const SDK_BUILT_INS = [
   'AskUserQuestion',
   'Bash',
@@ -161,17 +169,17 @@ const SDK_BUILT_INS = [
   'Write',
 ];
 
-/**
- * Named by a profile but absent from the surface above: the agent-team tools,
- * which 0.2.92 does not expose. `tools` ignores a name it does not know, so
- * these grant nothing today and stay as the record of what `operator` intends.
- */
-const GRANTED_BUT_ABSENT_IN_SDK = ['SendMessage', 'TeamCreate', 'TeamDelete'];
-
 const builtInsGranted = (profile: string) =>
-  allowedToolsFor(profile).filter((tool) => !tool.startsWith('mcp__'));
+  grantedToolsFor(profile).filter((tool) => !tool.startsWith('mcp__'));
 
 describe('the built-in grant is closed in both directions', () => {
+  // The dep range is `^0.2.92`, so any 0.2.x installs silently. Without this,
+  // the two tests below would keep passing against a surface that has moved
+  // out from under SDK_BUILT_INS.
+  it('installs the SDK version SDK_BUILT_INS was captured from', () => {
+    expect(installedSdkVersion()).toBe(CAPTURED_SDK_VERSION);
+  });
+
   // `tools` silently drops a name the SDK does not have, so a typo or an
   // upstream rename disables a tool with no error anywhere. Before the grant
   // moved off `allowedTools` that was harmless, because nothing read it.
@@ -179,9 +187,7 @@ describe('the built-in grant is closed in both directions', () => {
     'grants %s no built-in that does not exist',
     (profile) => {
       const unknown = builtInsGranted(profile).filter(
-        (tool) =>
-          !SDK_BUILT_INS.includes(tool) &&
-          !GRANTED_BUT_ABSENT_IN_SDK.includes(tool),
+        (tool) => !SDK_BUILT_INS.includes(tool),
       );
       expect(unknown).toEqual([]);
     },
