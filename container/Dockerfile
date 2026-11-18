@@ -45,8 +45,15 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_V
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser and claude-code globally, pinned to exact versions so a
+# poisoned new release of either (or of a dependency they pull) does not land in
+# the next rebuild unreviewed (sagri-ai#713). Bump deliberately, and only to
+# releases at least two weeks old. claude-code tracks the `stable` dist-tag.
+ARG AGENT_BROWSER_VERSION=0.41.2
+ARG CLAUDE_CODE_VERSION=2.1.311
+RUN npm install -g \
+    "agent-browser@${AGENT_BROWSER_VERSION}" \
+    "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # Create app directory
 WORKDIR /app
@@ -54,8 +61,9 @@ WORKDIR /app
 # Copy package files first for better caching
 COPY agent-runner/package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install exactly what the committed lockfile resolves (fails if it drifts
+# from package.json) instead of re-resolving ranges at build time.
+RUN npm ci
 
 # Copy source code
 COPY agent-runner/ ./

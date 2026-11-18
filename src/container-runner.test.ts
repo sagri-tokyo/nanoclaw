@@ -26,6 +26,8 @@ let mockNotionApiKey: string | undefined = undefined;
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+  CONTAINER_MEMORY_LIMIT: '2g',
+  CONTAINER_PIDS_LIMIT: '2048',
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   LITELLM_GATEWAY_PORT: 4000,
@@ -173,6 +175,7 @@ vi.mock('child_process', async () => {
 });
 
 import {
+  hardeningArgs,
   runContainerAgent,
   ContainerOutput,
   ContainerInput,
@@ -1670,5 +1673,82 @@ describe('container-runner requester attribution wiring (sagri-ai#296)', () => {
     expect(getRunRequesters(testGroup.folder, 'carol-req.json')).toStrictEqual([
       'U_CAROL',
     ]);
+  });
+});
+
+describe('hardeningArgs (sagri-ai#713)', () => {
+  it('always emits cap-drop and no-new-privileges', () => {
+    const args = hardeningArgs('', '');
+    expect(args).toStrictEqual([
+      '--cap-drop=ALL',
+      '--security-opt',
+      'no-new-privileges',
+    ]);
+  });
+
+  it('emits the pids and memory limits when set', () => {
+    expect(hardeningArgs('2g', '2048')).toStrictEqual([
+      '--cap-drop=ALL',
+      '--security-opt',
+      'no-new-privileges',
+      '--pids-limit',
+      '2048',
+      '--memory',
+      '2g',
+    ]);
+  });
+
+  // cgroups v2 rejects `--pids-limit 0` with EINVAL, killing the spawn.
+  it('omits the pids limit for 0, negatives, blank and garbage', () => {
+    for (const v of ['0', '0.5', '-1', '', '   ', 'lots']) {
+      expect(hardeningArgs('2g', v)).not.toContain('--pids-limit');
+    }
+  });
+
+  it('floors fractional pids values', () => {
+    const args = hardeningArgs('', '2048.7');
+    expect(args[args.indexOf('--pids-limit') + 1]).toBe('2048');
+  });
+
+  it('omits the memory limit when blank', () => {
+    expect(hardeningArgs('  ', '2048')).not.toContain('--memory');
+  });
+});
+
+describe('container-runner hardening flags on spawn (sagri-ai#713)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes the hardening flags as docker run options before the image', async () => {
+    const argsPromise = new Promise<string[]>((resolve) => {
+      (spawn as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_bin: string, args: string[]) => {
+          resolve(args);
+          return fakeProc;
+        },
+      );
+    });
+    const containerPromise = runContainerAgent(testGroup, testInput, () => {});
+    const args = await argsPromise;
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await containerPromise;
+
+    const imageIdx = args.indexOf('nanoclaw-agent:latest');
+    expect(imageIdx).toBeGreaterThan(0);
+    for (const flag of ['--cap-drop=ALL', '--pids-limit', '--memory']) {
+      const idx = args.indexOf(flag);
+      expect(idx).toBeGreaterThan(0);
+      expect(idx).toBeLessThan(imageIdx);
+    }
+    expect(args[args.indexOf('--security-opt') + 1]).toBe('no-new-privileges');
+    expect(args[args.indexOf('--pids-limit') + 1]).toBe('2048');
+    expect(args[args.indexOf('--memory') + 1]).toBe('2g');
   });
 });
