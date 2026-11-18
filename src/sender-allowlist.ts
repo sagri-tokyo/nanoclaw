@@ -152,12 +152,19 @@ export function shouldDropMessage(
  * governs; `getMessagesSince` already excludes bot rows from new batches).
  */
 export function filterPromptMessages<
-  T extends { sender: string; is_from_me?: boolean; is_bot_message?: boolean },
+  T extends {
+    sender: string;
+    is_from_me?: boolean | number;
+    is_bot_message?: boolean | number;
+  },
 >(chatJid: string, msgs: T[], cfg: SenderAllowlistConfig): T[] {
+  // Truthy, not `=== true`: rows read back from SQLite carry the flags as 0/1
+  // (storeMessage writes `? 1 : 0` and the reads don't convert), so a strict
+  // boolean check would drop the bot's own stored messages.
   return msgs.filter(
     (m) =>
-      m.is_from_me === true ||
-      m.is_bot_message === true ||
+      Boolean(m.is_from_me) ||
+      Boolean(m.is_bot_message) ||
       isSenderAllowed(chatJid, m.sender, cfg),
   );
 }

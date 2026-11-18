@@ -4,6 +4,12 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  _initTestDatabase,
+  getMessagesSince,
+  storeChatMetadata,
+  storeMessage,
+} from './db.js';
+import {
   filterPromptMessages,
   isSenderAllowed,
   isTriggerAllowed,
@@ -286,5 +292,49 @@ describe('filterPromptMessages (sagri-ai#709)', () => {
       '3',
       '4',
     ]);
+  });
+});
+
+describe('filterPromptMessages — SQLite round-trip (0/1 flags)', () => {
+  it('keeps a stored self-message from a non-allowlisted sender id', () => {
+    _initTestDatabase();
+    storeChatMetadata('slack:C1', '2024-01-01T00:00:00.000Z');
+    const base = {
+      chat_jid: 'slack:C1',
+      sender_name: 'n',
+      content: 'hi',
+    };
+    storeMessage({
+      ...base,
+      id: 'self',
+      sender: 'U_SELF',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+    });
+    storeMessage({
+      ...base,
+      id: 'allowed',
+      sender: 'alice',
+      timestamp: '2024-01-01T00:00:02.000Z',
+    });
+    storeMessage({
+      ...base,
+      id: 'denied',
+      sender: 'mallory',
+      timestamp: '2024-01-01T00:00:03.000Z',
+    });
+
+    const rows = getMessagesSince('slack:C1', '', 'NoSuchBotPrefix', 10);
+    // The DB hands the flag back as a number, not a boolean.
+    expect(rows.find((m) => m.id === 'self')?.is_from_me).toBe(1);
+
+    const cfg: SenderAllowlistConfig = {
+      default: { allow: ['alice'], mode: 'trigger' },
+      chats: {},
+      logDenied: true,
+    };
+    expect(
+      filterPromptMessages('slack:C1', rows, cfg).map((m) => m.id),
+    ).toEqual(['self', 'allowed']);
   });
 });
