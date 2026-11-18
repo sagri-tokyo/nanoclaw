@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  filterPromptMessages,
   isSenderAllowed,
   isTriggerAllowed,
   loadSenderAllowlist,
@@ -32,11 +33,41 @@ afterEach(() => {
 });
 
 describe('loadSenderAllowlist', () => {
-  it('returns allow-all defaults when file is missing', () => {
+  // Fail-closed (sagri-ai#709): every unusable-config path denies all senders
+  // and drops their messages.
+  function expectDenyAll(cfg: SenderAllowlistConfig): void {
+    expect(cfg.default).toEqual({ allow: [], mode: 'drop' });
+    expect(cfg.chats).toEqual({});
+    expect(isSenderAllowed('any-chat', 'anyone', cfg)).toBe(false);
+    expect(shouldDropMessage('any-chat', cfg)).toBe(true);
+  }
+
+  it('denies all (drop) when file is missing', () => {
     const cfg = loadSenderAllowlist(cfgPath());
-    expect(cfg.default.allow).toBe('*');
-    expect(cfg.default.mode).toBe('trigger');
+    expectDenyAll(cfg);
     expect(cfg.logDenied).toBe(true);
+  });
+
+  it('denies all when the path is unreadable (a directory)', () => {
+    const p = cfgPath('dir');
+    fs.mkdirSync(p);
+    expectDenyAll(loadSenderAllowlist(p));
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', [{ allow: '*', mode: 'trigger' }]],
+    ['a string', '*'],
+    ['an empty object', {}],
+  ])('denies all when the top level is %s', (_label, value) => {
+    expectDenyAll(loadSenderAllowlist(writeConfig(value)));
+  });
+
+  it('a deny-all result is a fresh object each call (no shared mutable default)', () => {
+    const a = loadSenderAllowlist(cfgPath());
+    (a.default.allow as string[]).push('mallory');
+    const b = loadSenderAllowlist(cfgPath());
+    expect(b.default.allow).toEqual([]);
   });
 
   it('loads allow=* config', () => {
@@ -79,17 +110,20 @@ describe('loadSenderAllowlist', () => {
     expect(cfg.chats['group-a'].mode).toBe('drop');
   });
 
-  it('returns allow-all on invalid JSON', () => {
+  it('denies all on invalid JSON', () => {
     const p = cfgPath();
     fs.writeFileSync(p, '{ not valid json }}}');
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expectDenyAll(loadSenderAllowlist(p));
   });
 
-  it('returns allow-all on invalid schema', () => {
+  it('denies all on invalid schema', () => {
     const p = writeConfig({ default: { oops: true } });
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expectDenyAll(loadSenderAllowlist(p));
+  });
+
+  it('denies all on an invalid mode', () => {
+    const p = writeConfig({ default: { allow: '*', mode: 'open' }, chats: {} });
+    expectDenyAll(loadSenderAllowlist(p));
   });
 
   it('rejects non-string allow array items', () => {
@@ -97,11 +131,10 @@ describe('loadSenderAllowlist', () => {
       default: { allow: [123, null, true], mode: 'trigger' },
       chats: {},
     });
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*'); // falls back to default
+    expectDenyAll(loadSenderAllowlist(p));
   });
 
-  it('skips invalid per-chat entries', () => {
+  it('denies a chat whose per-chat entry is invalid instead of using the default', () => {
     const p = writeConfig({
       default: { allow: '*', mode: 'trigger' },
       chats: {
@@ -111,7 +144,9 @@ describe('loadSenderAllowlist', () => {
     });
     const cfg = loadSenderAllowlist(p);
     expect(cfg.chats['good']).toBeDefined();
-    expect(cfg.chats['bad']).toBeUndefined();
+    expect(cfg.chats['bad']).toEqual({ allow: [], mode: 'drop' });
+    expect(isSenderAllowed('bad', 'anyone', cfg)).toBe(false);
+    expect(isSenderAllowed('other', 'anyone', cfg)).toBe(true);
   });
 });
 
@@ -212,5 +247,44 @@ describe('isTriggerAllowed', () => {
     };
     isTriggerAllowed('g1', 'eve', cfg);
     // Logger.debug is called — we just verify no crash; logger is a real pino instance
+  });
+});
+
+describe('filterPromptMessages (sagri-ai#709)', () => {
+  const cfg: SenderAllowlistConfig = {
+    default: { allow: ['alice'], mode: 'trigger' },
+    chats: {},
+    logDenied: true,
+  };
+  const msgs = [
+    { id: '1', sender: 'alice' },
+    { id: '2', sender: 'mallory' },
+    { id: '3', sender: 'bot', is_from_me: true },
+    { id: '4', sender: 'B_OTHER', is_bot_message: true },
+    { id: '5', sender: 'eve', is_from_me: false, is_bot_message: false },
+  ];
+
+  it('drops non-allowlisted human senders, keeps allowed and bot rows', () => {
+    expect(filterPromptMessages('g', msgs, cfg).map((m) => m.id)).toEqual([
+      '1',
+      '3',
+      '4',
+    ]);
+  });
+
+  it('is a no-op under allow=*', () => {
+    const open: SenderAllowlistConfig = {
+      ...cfg,
+      default: { allow: '*', mode: 'trigger' },
+    };
+    expect(filterPromptMessages('g', msgs, open)).toHaveLength(msgs.length);
+  });
+
+  it('keeps no human messages under the fail-closed config', () => {
+    const denied = loadSenderAllowlist(path.join(tmpDir, 'missing.json'));
+    expect(filterPromptMessages('g', msgs, denied).map((m) => m.id)).toEqual([
+      '3',
+      '4',
+    ]);
   });
 });

@@ -70,7 +70,11 @@ import {
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
-import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
+import {
+  filterPromptMessages,
+  isTriggerAllowed,
+  loadSenderAllowlist,
+} from './sender-allowlist.js';
 import { loadApproverAllowlist } from './approver-allowlist.js';
 import { parseApprovalIntent } from './approval-trigger.js';
 import { executeOrgAction, resolveNotionTarget } from './org-action-clients.js';
@@ -523,7 +527,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         targetThreadId,
         SLACK_THREAD_CONTEXT_LIMIT,
       );
-      threadMessages = t.length > 0 ? t : null;
+      // Drop non-allowlisted senders before the judge or the prompt sees the
+      // thread (sagri-ai#709).
+      const allowed = filterPromptMessages(chatJid, t, loadSenderAllowlist());
+      threadMessages = allowed.length > 0 ? allowed : null;
     } catch (err) {
       logger.warn({ chatJid, targetThreadId, err }, 'Thread fetch failed');
       threadMessages = null;
@@ -549,10 +556,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Build the prompt: full laundered thread when available (original question
   // + the bot's own prior replies), else the missed-message batch. Append any
   // laundered file attachments (opt-in; no-op when the flag is off).
-  const promptMessages =
+  // Only allowlisted senders' messages reach the prompt (sagri-ai#709): stored
+  // non-trigger messages from anyone else must not ride along as context.
+  const promptMessages = filterPromptMessages(
+    chatJid,
     threadMessages && threadMessages.length > 0
       ? mergeThreadContext(threadMessages, missedMessages)
-      : missedMessages;
+      : missedMessages,
+    loadSenderAllowlist(),
+  );
+  if (promptMessages.length === 0) {
+    // Nothing from an allowed sender (e.g. a requiresTrigger:false group where
+    // only non-allowlisted senders spoke). Consume the batch without a run.
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    return true;
+  }
   const basePrompt = await formatMessagesViaReader(promptMessages, TIMEZONE);
   const prompt = await buildPromptWithOptionalFiles(
     promptMessages,
@@ -902,8 +922,14 @@ async function startMessageLoop(): Promise<void> {
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          const batch = allPending.length > 0 ? allPending : groupMessages;
+          // Same allowlist filter as processGroupMessages (sagri-ai#709).
+          const messagesToSend = filterPromptMessages(
+            chatJid,
+            batch,
+            loadSenderAllowlist(),
+          );
+          if (messagesToSend.length === 0) continue;
           const formatted = await formatMessagesViaReader(
             messagesToSend,
             TIMEZONE,
@@ -922,8 +948,7 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+            lastAgentTimestamp[chatJid] = batch[batch.length - 1].timestamp;
             saveState();
             // Ack the piped human message too, so it's cleared with the rest at
             // run end. Skip a trailing bot echo (same filter as the run-start
