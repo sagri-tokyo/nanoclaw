@@ -989,6 +989,45 @@ describe('container-runner memory-gate hardening', () => {
     expect(mdIdx).toBeGreaterThan(parentIdx);
   });
 
+  it('never mounts the host store/ dir into the main container (sagri-ai#708)', async () => {
+    const args = await captureArgs(true);
+    const mountArgs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-v') mountArgs.push(args[i + 1]);
+    }
+    expect(
+      mountArgs.some((m) => /(^|\/)store(:|\/)/.test(m.split(':')[0])),
+    ).toBe(false);
+  });
+
+  it('shadows /workspace/project/store with an empty read-only dir for main (sagri-ai#708)', async () => {
+    const args = await captureArgs(true);
+    const mount = findMountFor(args, '/workspace/project/store');
+    expect(mount).not.toBeNull();
+    expect(
+      mount!.startsWith('/tmp/nanoclaw-test-data/empty-store-shadow:'),
+    ).toBe(true);
+    expect(mount!.endsWith(':ro')).toBe(true);
+    // The shadow must come after the ro project-root mount to win.
+    const mountArgs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-v') mountArgs.push(args[i + 1]);
+    }
+    const rootIdx = mountArgs.findIndex(
+      (m) => m.split(':')[1] === '/workspace/project',
+    );
+    const storeIdx = mountArgs.findIndex(
+      (m) => m.split(':')[1] === '/workspace/project/store',
+    );
+    expect(rootIdx).toBeGreaterThanOrEqual(0);
+    expect(storeIdx).toBeGreaterThan(rootIdx);
+  });
+
+  it('does not mount any store path for non-main', async () => {
+    const args = await captureArgs(false);
+    expect(findMountFor(args, '/workspace/project/store')).toBeNull();
+  });
+
   it('mounts /workspace/global/CLAUDE.md read-only for main', async () => {
     const args = await captureArgs(true);
     const mount = findMountFor(args, '/workspace/global/CLAUDE.md');

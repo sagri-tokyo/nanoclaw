@@ -117,6 +117,11 @@ export interface PendingActionRow {
   expires_at: string;
   approved_by: string | null;
   consumed_at: string | null;
+  // HMAC integrity (sagri-ai#708, see pending-action-mac.ts). Computed by the
+  // db accessors, never by callers: `row_mac` at create, `approval_mac` at
+  // approve. Null on a legacy row, which then fails verification (closed).
+  row_mac?: string | null;
+  approval_mac?: string | null;
 }
 
 // Per-task capability profile (sagri-ai#312). Fail-closed: an absent value

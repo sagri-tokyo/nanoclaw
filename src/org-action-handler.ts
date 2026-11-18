@@ -48,6 +48,7 @@ import {
   reArmConsumedAction,
 } from './db.js';
 import { logger } from './logger.js';
+import { verifyApprovedRow, verifyRowMac } from './pending-action-mac.js';
 import { parseApprovalIntent } from './approval-trigger.js';
 import { isApprover } from './approver-allowlist.js';
 import {
@@ -493,6 +494,21 @@ export async function handleApprovalReply(
     return true;
   }
 
+  // Integrity (sagri-ai#708): refuse to approve a row whose content does not
+  // carry a valid host HMAC — it was not minted by driveOrgActionRequest, or was
+  // altered after minting (e.g. canonical_args swapped under a benign summary).
+  if (!verifyRowMac(row)) {
+    logger.error(
+      { chatJid, sender: msg.sender, token: intent.token },
+      'org-action approval rejected: row integrity check failed (row_mac)',
+    );
+    await deps.sendMessage(
+      chatJid,
+      `Cannot approve ${intent.token}: the held action failed its integrity check.`,
+    );
+    return true;
+  }
+
   const approved = approvePendingAction(intent.token, msg.sender, deps.now());
   if (!approved) {
     await deps.sendMessage(
@@ -526,6 +542,17 @@ async function executeApproved(
     logger.error(
       { token, state: row?.state ?? 'missing' },
       'org-action executeApproved: row not in approved state — not executing',
+    );
+    return;
+  }
+  if (!verifyApprovedRow(row)) {
+    logger.error(
+      { token, action: row.action, target_ref: row.target_ref },
+      'org-action executeApproved: integrity check failed (row/approval MAC) — not executing',
+    );
+    await deps.sendMessage(
+      chatJid,
+      `Refused ${token}: the held action failed its integrity check.`,
     );
     return;
   }
@@ -584,6 +611,16 @@ export async function reDriveApprovedActions(
 ): Promise<void> {
   const rows = getApprovedUnconsumed();
   for (const row of rows) {
+    // Integrity first (sagri-ai#708): an `approved` row the host did not mint
+    // and seal — e.g. one INSERTed straight into messages.db — is never
+    // executed. Left as-is for operator inspection.
+    if (!verifyApprovedRow(row)) {
+      logger.error(
+        { token: row.token, action: row.action, target_ref: row.target_ref },
+        'org-action boot re-drive: integrity check failed (row/approval MAC) — skipping (left approved for inspection)',
+      );
+      continue;
+    }
     // A corrupt persisted row can never succeed on retry, so it must not strand
     // the healthy rows behind it in the loop (and must not crash the boot). This
     // catch is scoped to the parse only: a write-client failure below is re-armed

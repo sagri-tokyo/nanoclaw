@@ -91,17 +91,17 @@ Anthropic credentials must be either an API key from console.anthropic.com (`ANT
 
 ## Container Mounts
 
-Main has read-only access to the project, read-write access to the store (SQLite DB), and read-write access to its group folder:
+Main has read-only access to the project and read-write access to its group folder. The host SQLite store is **not** available inside the container (`/workspace/project/store` is an empty read-only shadow); use the IPC snapshots and MCP tools instead:
 
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-only |
-| `/workspace/project/store` | `store/` | read-write |
+| `/workspace/project/store` | empty shadow (no DB) | read-only |
 | `/workspace/group` | `groups/main/` | read-write |
 
 Key paths inside the container:
-- `/workspace/project/store/messages.db` - SQLite database (read-write)
-- `/workspace/project/store/messages.db` (registered_groups table) - Group config
+- `/workspace/ipc/available_groups.json` - Known groups/chats (host-written snapshot)
+- `/workspace/ipc/current_tasks.json` - Scheduled tasks (host-written snapshot)
 - `/workspace/project/groups/` - All group folders
 
 ---
@@ -136,21 +136,11 @@ echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).jso
 
 Then wait a moment and re-read `available_groups.json`.
 
-**Fallback**: Query the SQLite database directly:
-
-```bash
-sqlite3 /workspace/project/store/messages.db "
-  SELECT jid, name, last_message_time
-  FROM chats
-  WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
-  ORDER BY last_message_time DESC
-  LIMIT 10;
-"
-```
+The SQLite database is host-only and is not mounted into the container, so there is no direct-query fallback.
 
 ### Registered Groups Config
 
-Groups are registered in the SQLite `registered_groups` table:
+Groups are registered in the host's SQLite `registered_groups` table (host-only; change it via the `register_group` MCP tool):
 
 ```json
 {
@@ -180,7 +170,7 @@ Fields:
 
 ### Adding a Group
 
-1. Query the database to find the group's JID
+1. Find the group's JID in `/workspace/ipc/available_groups.json`
 2. Ask the user whether the group should require a trigger word before registering
 3. Use the `register_group` MCP tool with the JID, name, folder, trigger, and the chosen `requiresTrigger` setting
 4. Optionally include `containerConfig` for additional mounts

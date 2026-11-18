@@ -49,6 +49,14 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
+// HMAC key for pending_actions row integrity (sagri-ai#708). Host-only, OUTSIDE
+// the project root, never mounted into containers. Created (0600) on first use.
+export const PENDING_ACTION_HMAC_KEY_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'pending-action-hmac.key',
+);
 // Approver allowlist (D2.4). Fail-CLOSED: missing/invalid => deny-all. Stored
 // OUTSIDE project root, never mounted into containers (tamper-proof from
 // agents, like the mount/sender allowlists).
