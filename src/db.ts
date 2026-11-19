@@ -6,6 +6,11 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  _setPendingActionMacKeyForTests,
+  computeApprovalMac,
+  computeRowMac,
+} from './pending-action-mac.js';
+import {
   FileRef,
   MessageFileBundle,
   NewMessage,
@@ -113,7 +118,9 @@ function createSchema(database: Database.Database): void {
       created_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       approved_by TEXT,
-      consumed_at TEXT
+      consumed_at TEXT,
+      row_mac TEXT,
+      approval_mac TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_pending_actions_state
       ON pending_actions(state, expires_at);
@@ -164,6 +171,16 @@ function createSchema(database: Database.Database): void {
       .run(`${escapeLikePattern(ASSISTANT_NAME)}:%`);
   } catch {
     /* column already exists */
+  }
+
+  // pending_actions HMAC columns (sagri-ai#708). Legacy rows keep NULL, which
+  // fails verification: they can no longer be approved or re-driven.
+  for (const col of ['row_mac', 'approval_mac']) {
+    try {
+      database.exec(`ALTER TABLE pending_actions ADD COLUMN ${col} TEXT`);
+    } catch {
+      /* column already exists */
+    }
   }
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
@@ -325,8 +342,18 @@ export function initDatabase(): void {
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
+  // Pin a throwaway HMAC key so tests never read or create the host key file.
+  _setPendingActionMacKeyForTests(Buffer.alloc(32, 7));
   db = new Database(':memory:');
   createSchema(db);
+}
+
+/**
+ * @internal - tests only: raw write, to simulate an out-of-band DB writer
+ * (e.g. a forged or tampered pending_actions row, sagri-ai#708).
+ */
+export function _runTestSql(sql: string, ...params: unknown[]): void {
+  db.prepare(sql).run(...params);
 }
 
 /** @internal - for tests only. */
@@ -1161,8 +1188,8 @@ export function createPendingAction(rowInput: PendingActionRow): void {
     `INSERT INTO pending_actions
       (token, source_group, chat_jid, action, target_ref, reversibility,
        stakes_hint, citation_refs, canonical_args, summary, requester, state,
-       created_at, expires_at, approved_by, consumed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       created_at, expires_at, approved_by, consumed_at, row_mac)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     rowInput.token,
     rowInput.source_group,
@@ -1180,6 +1207,7 @@ export function createPendingAction(rowInput: PendingActionRow): void {
     rowInput.expires_at,
     rowInput.approved_by,
     rowInput.consumed_at,
+    computeRowMac(rowInput),
   );
 }
 
@@ -1190,8 +1218,11 @@ export function getPendingAction(token: string): PendingActionRow | undefined {
 }
 
 /**
- * Transition a row from `pending` to `approved`, recording the approver. Returns
- * true only when exactly one `pending` row changed. The `expires_at >= now`
+ * Transition a row from `pending` to `approved`, recording the approver and
+ * sealing the approval with `approval_mac` over the row's `row_mac` + approver
+ * (sagri-ai#708). Callers verify `row_mac` first (handleApprovalReply); a row
+ * without one is refused here too. Returns true only when exactly one `pending`
+ * row changed. The `expires_at >= now`
  * guard rejects a row whose TTL elapsed before the sweep flipped it to
  * `expired`, closing the window where a late approval could still execute. The
  * boundary matches the sweep (`expires_at < now` expires).
@@ -1201,12 +1232,19 @@ export function approvePendingAction(
   approverId: string,
   now: string,
 ): boolean {
+  const current = db
+    .prepare('SELECT row_mac FROM pending_actions WHERE token = ?')
+    .get(token) as { row_mac: string | null } | undefined;
+  if (!current?.row_mac) return false;
+  const approvalMac = computeApprovalMac(token, current.row_mac, approverId);
   const result = db
     .prepare(
-      `UPDATE pending_actions SET state = 'approved', approved_by = ?
-       WHERE token = ? AND state = 'pending' AND expires_at >= ?`,
+      `UPDATE pending_actions SET state = 'approved', approved_by = ?,
+         approval_mac = ?
+       WHERE token = ? AND state = 'pending' AND expires_at >= ?
+         AND row_mac = ?`,
     )
-    .run(approverId, token, now);
+    .run(approverId, approvalMac, token, now, current.row_mac);
   return result.changes === 1;
 }
 

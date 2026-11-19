@@ -231,7 +231,7 @@ function buildContainerPlan(
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
-    // (store, group folder, IPC, .claude/) are mounted separately below.
+    // (group folder, IPC, .claude/) are mounted separately below.
     // Read-only prevents the agent from modifying host application code
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
@@ -252,13 +252,20 @@ function buildContainerPlan(
       });
     }
 
-    // Main gets writable access to the store (SQLite DB) so it can
-    // query and write to the database directly.
-    const storeDir = path.join(projectRoot, 'store');
+    // Shadow store/ (SQLite messages.db) with an empty read-only dir. The DB
+    // holds pending_actions (approval-gate state re-driven on boot) and
+    // scheduled_tasks (prompt + capability_profile), so a writable store lets
+    // an injected agent forge an approved action or rewrite a trusted task
+    // (sagri-ai#708). Readable is not safe either: it would expose approval
+    // tokens and every channel's history. The host owns the DB; the agent
+    // reaches it only through IPC (available_groups.json, current_tasks.json,
+    // the MCP task verbs).
+    const storeShadowDir = path.join(DATA_DIR, 'empty-store-shadow');
+    fs.mkdirSync(storeShadowDir, { recursive: true });
     mounts.push({
-      hostPath: storeDir,
+      hostPath: storeShadowDir,
       containerPath: '/workspace/project/store',
-      readonly: false,
+      readonly: true,
     });
 
     // Main also gets its group folder as the working directory

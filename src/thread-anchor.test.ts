@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  allowedBatchAnchors,
   findExplicitTriggerMessage,
   humanSenders,
   newestHumanMessage,
@@ -148,5 +149,48 @@ describe('newestHumanThreadAnchor', () => {
     ]);
 
     expect(anchor).toBeUndefined();
+  });
+});
+
+describe('allowedBatchAnchors (sagri-ai#709)', () => {
+  const cfg = {
+    default: { allow: ['U_ALLOWED'], mode: 'trigger' as const },
+    chats: {},
+    logDenied: true,
+  };
+
+  it('anchors reply and reaction to the allowed question, not a later denied message', () => {
+    const question = message({
+      id: 'ts-q',
+      sender: 'U_ALLOWED',
+      is_from_me: false,
+      thread_id: undefined,
+    });
+    const denied = message({
+      id: 'ts-d',
+      sender: 'U_DENIED',
+      is_from_me: false,
+      thread_id: 'ts-other-thread',
+    });
+
+    const result = allowedBatchAnchors('C1', [question, denied], cfg);
+
+    expect(result.allowed.map((m) => m.id)).toEqual(['ts-q']);
+    expect(result.fallbackThreadId).toBe('ts-q');
+    expect(result.reactionTs).toBe('ts-q');
+  });
+
+  it('is empty with no anchors when only denied senders spoke', () => {
+    const denied = message({
+      id: 'ts-d',
+      sender: 'U_DENIED',
+      is_from_me: false,
+    });
+
+    const result = allowedBatchAnchors('C1', [denied], cfg);
+
+    expect(result.allowed).toEqual([]);
+    expect(result.fallbackThreadId).toBeUndefined();
+    expect(result.reactionTs).toBeUndefined();
   });
 });

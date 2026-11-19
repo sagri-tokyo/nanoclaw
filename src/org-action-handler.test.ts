@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  _runTestSql,
+  approvePendingAction,
   getPendingAction,
   getApprovedUnconsumed,
   createPendingAction,
@@ -107,6 +109,21 @@ function pendingActionRow(
     consumed_at: null,
     ...overrides,
   };
+}
+
+/**
+ * Seed an `approved` row the way the host does it: mint as `pending` (row_mac)
+ * then approve (approval_mac). A row INSERTed directly as `approved` carries no
+ * approval MAC and is refused by re-drive (sagri-ai#708).
+ */
+function createApprovedAction(row: PendingActionRow): void {
+  createPendingAction({ ...row, state: 'pending', approved_by: null });
+  const ok = approvePendingAction(
+    row.token,
+    row.approved_by ?? 'U_APPROVER',
+    row.created_at,
+  );
+  if (!ok) throw new Error(`test seed: approve failed for ${row.token}`);
 }
 
 describe('driveOrgActionRequest — safe vs gated', () => {
@@ -734,7 +751,7 @@ describe('parsePendingRow validation — no coercion on the security path', () =
 describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
   it('replays an approved-unconsumed row and consumes it', async () => {
     const { deps, rec } = makeDeps();
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
     );
     expect(getApprovedUnconsumed()).toHaveLength(1);
@@ -759,7 +776,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
 
   it('leaves a row that re-classifies as refuse approved, executing nothing', async () => {
     const { deps, rec } = makeDeps();
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({
         target_ref: `prod-${HEX32}`,
         state: 'approved',
@@ -776,7 +793,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
 
   it('isolates an unparseable row and still drives the healthy rows behind it', async () => {
     const { deps, rec } = makeDeps();
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({
         state: 'approved',
         approved_by: 'U_APPROVER',
@@ -784,7 +801,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
         canonical_args: '[1,2,3]',
       }),
     );
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({
         state: 'approved',
         approved_by: 'U_APPROVER',
@@ -807,7 +824,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
         throw new Error('gh exited non-zero');
       },
     });
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
     );
 
@@ -836,7 +853,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
     // created_at orders the re-drive (getApprovedUnconsumed ORDER BY created_at),
     // so the failing row is processed first and the loop rethrows before the
     // second is reached.
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({
         token: firstToken,
         state: 'approved',
@@ -844,7 +861,7 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
         created_at: '2026-06-22T00:00:00.000Z',
       }),
     );
-    createPendingAction(
+    createApprovedAction(
       pendingActionRow({
         token: secondToken,
         target_ref: 'b'.repeat(32),
@@ -864,6 +881,125 @@ describe('reDriveApprovedActions — boot re-drive, exactly-once', () => {
         .map((r) => r.token)
         .sort(),
     ).toEqual([firstToken, secondToken].sort());
+  });
+});
+
+describe('pending_actions HMAC integrity (sagri-ai#708)', () => {
+  it('never re-drives a row INSERTed directly as approved (no approval MAC)', async () => {
+    const { deps, rec } = makeDeps();
+    // What an out-of-band writer with DB access would do: a well-formed row,
+    // already approved by a real approver id, but not sealed by the host.
+    createPendingAction(
+      pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
+    );
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(rec.posted).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
+  });
+
+  it('never re-drives a row whose MACs were written by someone without the key', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(pendingActionRow());
+    _runTestSql(
+      `UPDATE pending_actions SET state = 'approved', approved_by = ?,
+         approval_mac = ? WHERE token = ?`,
+      'U_APPROVER',
+      'f'.repeat(64),
+      TOKEN,
+    );
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
+  });
+
+  it('never re-drives a sealed row whose canonical_args were swapped afterwards', async () => {
+    const { deps, rec } = makeDeps();
+    createApprovedAction(
+      pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
+    );
+    _runTestSql(
+      'UPDATE pending_actions SET canonical_args = ? WHERE token = ?',
+      '{"property":"Status","value":"attacker"}',
+      TOKEN,
+    );
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('approved');
+  });
+
+  it('never re-drives a sealed row whose approved_by was rewritten', async () => {
+    const { deps, rec } = makeDeps();
+    createApprovedAction(
+      pendingActionRow({ state: 'approved', approved_by: 'U_APPROVER' }),
+    );
+    _runTestSql(
+      'UPDATE pending_actions SET approved_by = ? WHERE token = ?',
+      'U_SOMEONE_ELSE',
+      TOKEN,
+    );
+
+    await reDriveApprovedActions(deps);
+
+    expect(rec.executed).toHaveLength(0);
+  });
+
+  it('refuses to approve a pending row whose content was altered after minting', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(pendingActionRow());
+    _runTestSql(
+      'UPDATE pending_actions SET canonical_args = ? WHERE token = ?',
+      '{"property":"Status","value":"attacker"}',
+      TOKEN,
+    );
+
+    const handled = await handleApprovalReply(
+      'slack:C0AAA1111',
+      approval(),
+      deps,
+    );
+
+    expect(handled).toBe(true);
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+    expect(rec.posted).toEqual([
+      {
+        jid: 'slack:C0AAA1111',
+        text: `Cannot approve ${TOKEN}: the held action failed its integrity check.`,
+      },
+    ]);
+  });
+
+  it('refuses to approve a legacy row with no row MAC', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(pendingActionRow());
+    _runTestSql(
+      'UPDATE pending_actions SET row_mac = NULL WHERE token = ?',
+      TOKEN,
+    );
+
+    await handleApprovalReply('slack:C0AAA1111', approval(), deps);
+
+    expect(rec.executed).toHaveLength(0);
+    expect(getPendingAction(TOKEN)?.state).toBe('pending');
+  });
+
+  it('a host-minted, host-approved row still executes end to end', async () => {
+    const { deps, rec } = makeDeps();
+    createPendingAction(pendingActionRow());
+
+    await handleApprovalReply('slack:C0AAA1111', approval(), deps);
+
+    expect(rec.executed).toEqual([
+      { action: 'notion.write_property', target_ref: HEX32 },
+    ]);
+    expect(getPendingAction(TOKEN)?.state).toBe('consumed');
   });
 });
 

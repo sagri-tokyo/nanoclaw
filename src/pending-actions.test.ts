@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  _runTestSql,
   approvePendingAction,
   consumePendingAction,
   createPendingAction,
@@ -43,7 +44,11 @@ describe('pending_actions persistence', () => {
   it('creates and reads back a row by token', () => {
     createPendingAction(row({ token: 'tok-create' }));
     const got = getPendingAction('tok-create');
-    expect(got).toEqual(row({ token: 'tok-create' }));
+    expect(got).toEqual({
+      ...row({ token: 'tok-create' }),
+      row_mac: expect.stringMatching(/^[0-9a-f]{64}$/),
+      approval_mac: null,
+    });
   });
 
   it('returns undefined for an unknown token', () => {
@@ -63,6 +68,28 @@ describe('approve + atomic single-use consume', () => {
     const got = getPendingAction('tok-app');
     expect(got?.state).toBe('approved');
     expect(got?.approved_by).toBe('U_APPROVER');
+  });
+
+  it('approve seals the row with an approval MAC (sagri-ai#708)', () => {
+    createPendingAction(row({ token: 'tok-mac' }));
+    approvePendingAction('tok-mac', 'U_APPROVER', '2026-06-22T01:00:00.000Z');
+    expect(getPendingAction('tok-mac')?.approval_mac).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('approve refuses a row with no row MAC (sagri-ai#708)', () => {
+    createPendingAction(row({ token: 'tok-legacy' }));
+    _runTestSql(
+      'UPDATE pending_actions SET row_mac = NULL WHERE token = ?',
+      'tok-legacy',
+    );
+    expect(
+      approvePendingAction(
+        'tok-legacy',
+        'U_APPROVER',
+        '2026-06-22T01:00:00.000Z',
+      ),
+    ).toBe(false);
+    expect(getPendingAction('tok-legacy')?.state).toBe('pending');
   });
 
   it('consume returns true exactly once then false on every retry', () => {

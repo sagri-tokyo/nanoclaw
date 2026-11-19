@@ -46,7 +46,7 @@ private_key, .secret
 
 **Read-Only Project Root:**
 
-The main group's project root is mounted read-only. Writable paths the agent needs (store, group folder, IPC, `.claude/`) are mounted separately. This prevents the agent from modifying host application code (`src/`, `dist/`, `package.json`, etc.) which would bypass the sandbox entirely on next restart. The `store/` directory is mounted read-write so the main agent can access the SQLite database directly.
+The main group's project root is mounted read-only. Writable paths the agent needs (group folder, IPC, `.claude/`) are mounted separately. This prevents the agent from modifying host application code (`src/`, `dist/`, `package.json`, etc.) which would bypass the sandbox entirely on next restart. The `store/` directory (SQLite `messages.db`) is host-only: it is shadowed inside the container by an empty read-only directory, because a writable DB lets an injected agent forge an `approved` `pending_actions` row or rewrite a `scheduled_tasks` prompt/capability profile (sagri-ai#708), and a readable one exposes approval tokens and every channel's history. The agent reaches DB state only through IPC snapshots and MCP verbs. As defense in depth, each `pending_actions` row carries an HMAC (key at `~/.config/nanoclaw/pending-action-hmac.key`, host-only, never mounted) over its content and over its approval, verified before approve, execute, and boot re-drive.
 
 ### 3. Session Isolation
 
@@ -205,7 +205,7 @@ A user with channel access can stop the active agent for a channel by posting `@
 | Capability          | Main Group                      | Non-Main Group           |
 | ------------------- | ------------------------------- | ------------------------ |
 | Project root access | `/workspace/project` (ro)       | None                     |
-| Store (SQLite DB)   | `/workspace/project/store` (rw) | None                     |
+| Store (SQLite DB)   | None (empty ro shadow)          | None                     |
 | Group folder        | `/workspace/group` (rw)         | `/workspace/group` (rw)  |
 | Global memory       | Implicit via project            | `/workspace/global` (ro) |
 | Additional mounts   | Configurable                    | Read-only unless allowed |

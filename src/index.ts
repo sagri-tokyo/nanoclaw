@@ -70,7 +70,12 @@ import {
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
-import { isTriggerAllowed, loadSenderAllowlist } from './sender-allowlist.js';
+import {
+  filterPromptMessages,
+  isTriggerAllowed,
+  loadSenderAllowlist,
+  type SenderAllowlistConfig,
+} from './sender-allowlist.js';
 import { loadApproverAllowlist } from './approver-allowlist.js';
 import { parseApprovalIntent } from './approval-trigger.js';
 import { executeOrgAction, resolveNotionTarget } from './org-action-clients.js';
@@ -359,6 +364,32 @@ export function newestHumanThreadAnchor(
 }
 
 /**
+ * The part of a missed batch the agent may act on, and the reply/reaction
+ * anchors derived from it (sagri-ai#709). Anchors come from the
+ * allowlist-filtered batch, never the raw one: otherwise a denied sender who
+ * posts after an allowed user's question would have the answer threaded under
+ * (and the hourglass put on) their message.
+ *
+ * @internal - exported for testing
+ */
+export function allowedBatchAnchors(
+  chatJid: string,
+  missed: NewMessage[],
+  cfg: SenderAllowlistConfig,
+): {
+  allowed: NewMessage[];
+  fallbackThreadId: string | undefined;
+  reactionTs: string | undefined;
+} {
+  const allowed = filterPromptMessages(chatJid, missed, cfg);
+  return {
+    allowed,
+    fallbackThreadId: newestHumanThreadAnchor(allowed),
+    reactionTs: newestHumanMessage(allowed)?.id,
+  };
+}
+
+/**
  * Is the newest allow-listed human message in `msgs` a reply in a thread the
  * bot has already posted in? Such a no-mention follow-up is a candidate for
  * the should-reply judge. Returns the thread id, or null. Gated by
@@ -479,6 +510,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // Allowlist-filtered view of the batch (sagri-ai#709). Anchors and the prompt
+  // come from this; the cursor still advances over the raw batch.
+  const anchors = allowedBatchAnchors(
+    chatJid,
+    missedMessages,
+    loadSenderAllowlist(),
+  );
+  if (anchors.allowed.length === 0) {
+    // Nothing from an allowed sender (e.g. a requiresTrigger:false group where
+    // only non-allowlisted senders spoke). Consume the batch without a run.
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    return true;
+  }
+
   // Explicit @mention trigger (today's behaviour). No-trigger groups always
   // proceed, but thread targeting only follows the actual trigger.
   const explicitTrigger = findExplicitTriggerMessage(
@@ -511,7 +558,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // explicit trigger anchors the reply. Fall back to the newest human message's
   // own ts — never the live lastThreadTs map.
   if (!targetThreadId) {
-    targetThreadId = newestHumanThreadAnchor(missedMessages);
+    targetThreadId = anchors.fallbackThreadId;
   }
 
   // Fetch thread context once (used by the judge and/or the prompt).
@@ -523,7 +570,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         targetThreadId,
         SLACK_THREAD_CONTEXT_LIMIT,
       );
-      threadMessages = t.length > 0 ? t : null;
+      // Drop non-allowlisted senders before the judge or the prompt sees the
+      // thread (sagri-ai#709).
+      const allowed = filterPromptMessages(chatJid, t, loadSenderAllowlist());
+      threadMessages = allowed.length > 0 ? allowed : null;
     } catch (err) {
       logger.warn({ chatJid, targetThreadId, err }, 'Thread fetch failed');
       threadMessages = null;
@@ -549,10 +599,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Build the prompt: full laundered thread when available (original question
   // + the bot's own prior replies), else the missed-message batch. Append any
   // laundered file attachments (opt-in; no-op when the flag is off).
+  // Only allowlisted senders' messages reach the prompt (sagri-ai#709): stored
+  // non-trigger messages from anyone else must not ride along as context.
+  // threadMessages is already filtered at fetch.
   const promptMessages =
     threadMessages && threadMessages.length > 0
-      ? mergeThreadContext(threadMessages, missedMessages)
-      : missedMessages;
+      ? mergeThreadContext(threadMessages, anchors.allowed)
+      : anchors.allowed;
   const basePrompt = await formatMessagesViaReader(promptMessages, TIMEZONE);
   const prompt = await buildPromptWithOptionalFiles(
     promptMessages,
@@ -608,8 +661,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Anchor the processing indicator to the message that triggered this run: the
   // explicit @mention when there is one, else the newest human message in the
   // batch. Never the channel's live lastThreadTs (a concurrent message races it).
-  const reactionTs =
-    explicitTrigger?.anchorTs ?? newestHumanMessage(missedMessages)?.id;
+  const reactionTs = explicitTrigger?.anchorTs ?? anchors.reactionTs;
   await channel.setTyping?.(chatJid, true, reactionTs);
   let hadError = false;
   let outputSentToUser = false;
@@ -902,8 +954,14 @@ async function startMessageLoop(): Promise<void> {
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          const batch = allPending.length > 0 ? allPending : groupMessages;
+          // Same allowlist filter as processGroupMessages (sagri-ai#709).
+          const messagesToSend = filterPromptMessages(
+            chatJid,
+            batch,
+            loadSenderAllowlist(),
+          );
+          if (messagesToSend.length === 0) continue;
           const formatted = await formatMessagesViaReader(
             messagesToSend,
             TIMEZONE,
@@ -922,8 +980,7 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+            lastAgentTimestamp[chatJid] = batch[batch.length - 1].timestamp;
             saveState();
             // Ack the piped human message too, so it's cleared with the rest at
             // run end. Skip a trailing bot echo (same filter as the run-start

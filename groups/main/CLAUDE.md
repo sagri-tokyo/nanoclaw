@@ -91,17 +91,17 @@ Anthropic credentials must be either an API key from console.anthropic.com (`ANT
 
 ## Container Mounts
 
-Main has read-only access to the project, read-write access to the store (SQLite DB), and read-write access to its group folder:
+Main has read-only access to the project and read-write access to its group folder. The host SQLite store is **not** available inside the container (`/workspace/project/store` is an empty read-only shadow); use the IPC snapshots and MCP tools instead:
 
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-only |
-| `/workspace/project/store` | `store/` | read-write |
+| `/workspace/project/store` | empty shadow (no DB) | read-only |
 | `/workspace/group` | `groups/main/` | read-write |
 
 Key paths inside the container:
-- `/workspace/project/store/messages.db` - SQLite database (read-write)
-- `/workspace/project/store/messages.db` (registered_groups table) - Group config
+- `/workspace/ipc/available_groups.json` - Known groups/chats (host-written snapshot)
+- `/workspace/ipc/current_tasks.json` - Scheduled tasks (host-written snapshot)
 - `/workspace/project/groups/` - All group folders
 
 ---
@@ -136,21 +136,11 @@ echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).jso
 
 Then wait a moment and re-read `available_groups.json`.
 
-**Fallback**: Query the SQLite database directly:
-
-```bash
-sqlite3 /workspace/project/store/messages.db "
-  SELECT jid, name, last_message_time
-  FROM chats
-  WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
-  ORDER BY last_message_time DESC
-  LIMIT 10;
-"
-```
+The SQLite database is host-only and is not mounted into the container, so there is no direct-query fallback.
 
 ### Registered Groups Config
 
-Groups are registered in the SQLite `registered_groups` table:
+Groups are registered in the host's SQLite `registered_groups` table (host-only; change it via the `register_group` MCP tool):
 
 ```json
 {
@@ -180,7 +170,7 @@ Fields:
 
 ### Adding a Group
 
-1. Query the database to find the group's JID
+1. Find the group's JID in `/workspace/ipc/available_groups.json`
 2. Ask the user whether the group should require a trigger word before registering
 3. Use the `register_group` MCP tool with the JID, name, folder, trigger, and the chosen `requiresTrigger` setting
 4. Optionally include `containerConfig` for additional mounts
@@ -226,7 +216,7 @@ After registering a group, explain the sender allowlist feature to the user:
 
 > This group can be configured with a sender allowlist to control who can interact with me. There are two modes:
 >
-> - **Trigger mode** (default): Everyone's messages are stored for context, but only allowed senders can trigger me with @{AssistantName}.
+> - **Trigger mode**: Everyone's messages are stored, but only allowed senders can trigger me with @{AssistantName}, and only allowed senders' messages are included in what I read.
 > - **Drop mode**: Messages from non-allowed senders are not stored at all.
 >
 > For closed groups with trusted members, I recommend setting up an allow-only list so only specific people can trigger me. Want me to configure that?
@@ -248,7 +238,7 @@ If the user wants to set up an allowlist, edit `~/.config/nanoclaw/sender-allowl
 
 Notes:
 - Your own messages (`is_from_me`) explicitly bypass the allowlist in trigger checks. Bot messages are filtered out by the database query before trigger evaluation, so they never reach the allowlist.
-- If the config file doesn't exist or is invalid, all senders are allowed (fail-open)
+- If the config file doesn't exist or is invalid, all senders are denied and their messages dropped (fail-closed). An invalid per-chat entry denies that chat.
 - The config file is on the host at `~/.config/nanoclaw/sender-allowlist.json`, not inside the container
 
 ### Removing a Group
