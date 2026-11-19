@@ -167,6 +167,18 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
 );
 
+// Per-container resource caps (sagri-ai#713). Sized for the prod host: one
+// t3.xlarge (16 GB) shared with the Langfuse stack and LiteLLM, running up to
+// MAX_CONCURRENT_CONTAINERS (5) agents. 2g leaves headroom for Claude Code +
+// headless Chromium + the startup tsc pass while bounding a runaway agent to
+// 1/8 of the host instead of all of it. Set to '' to omit the flag.
+export const CONTAINER_MEMORY_LIMIT =
+  process.env.CONTAINER_MEMORY_LIMIT ?? '2g';
+// Fork-bomb backstop. cgroups v2 counts threads, not processes, and Chromium is
+// thread-hungry (high hundreds with a few tabs), so keep well above that.
+// Mirrors upstream nanocoai/nanoclaw#2748. Set to '' or '0' to omit the flag.
+export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? '2048';
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

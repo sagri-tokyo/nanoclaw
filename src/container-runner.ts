@@ -15,6 +15,8 @@ import path from 'path';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  CONTAINER_MEMORY_LIMIT,
+  CONTAINER_PIDS_LIMIT,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
@@ -661,6 +663,35 @@ interface BuiltContainerArgs {
   credDir?: string;
 }
 
+/**
+ * Container hardening flags (sagri-ai#713, mirrors upstream nanocoai/nanoclaw#2748).
+ * Applied to every agent container; no per-group override.
+ *
+ * The image runs as the unprivileged `node` user (or the host uid via
+ * `--user`), so the effective capability set is already empty and nothing in
+ * the container needs one back: the entrypoint does no chown/su, and the
+ * Debian chromium package ships no setuid sandbox helper. cap-drop and
+ * no-new-privileges are depth against a root-in-container or setuid path.
+ */
+export function hardeningArgs(
+  memoryLimit: string,
+  pidsLimit: string,
+): string[] {
+  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges'];
+
+  // Test >0, not truthiness: cgroups v2 rejects `--pids-limit 0` with EINVAL
+  // and fails the spawn, and '0' is a truthy string. Blank/garbage = no cap.
+  const pids = Math.floor(Number(pidsLimit));
+  if (pidsLimit.trim() !== '' && Number.isFinite(pids) && pids > 0) {
+    args.push('--pids-limit', String(pids));
+  }
+
+  const memory = memoryLimit.trim();
+  if (memory !== '') args.push('--memory', memory);
+
+  return args;
+}
+
 async function buildContainerArgs(
   plan: ContainerPlan,
   containerName: string,
@@ -668,6 +699,7 @@ async function buildContainerArgs(
 ): Promise<BuiltContainerArgs> {
   const { mounts, extraEnv } = plan;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  args.push(...hardeningArgs(CONTAINER_MEMORY_LIMIT, CONTAINER_PIDS_LIMIT));
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
